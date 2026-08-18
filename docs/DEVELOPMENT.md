@@ -96,17 +96,21 @@ Renovate waits for required checks regardless of branch protection.
 
 `.github/workflows/release.yaml` triggers on any `v*` tag push (or manual dispatch). It first
 calls `ci.yaml` as a reusable workflow — a release build is gated by the same fmt/clippy/test/
-build check as every other push, dogfooding `paws ci` on `paws` itself — then runs a
-`build-builders` job that bootstraps a native `paws` binary once (uploaded as a build artifact for
-the matrix below to reuse) and builds/pushes every `builders/*` image to both GHCR (`GHCR_TOKEN`)
-and Docker Hub (`DOCKER_TOKEN`) via `docker compose build`/`push` against `../compose.yml`. Only
-once that job succeeds (`needs: [ci, build-builders]`) does the per-target matrix start: each leg
-downloads the bootstrapped binary and runs `paws release`, which *pulls* the matching prebuilt
-image (`prebuilt_image_candidate`/`remote_image_exists` in `crates/paws-release`/
-`crates/paws-dagger`) rather than building any Dockerfile itself — deliberately pull-only, no
-local-build fallback, so a `build-builders` failure fails loudly instead of silently getting
-papered over by every leg quietly rebuilding its own copy. Each leg smoke-tests the binary,
-packages a `.zip`, and uploads it to the tag's GitHub Release (`generate_release_notes: true`,
+build check as every other push, dogfooding `paws ci` on `paws` itself — then runs two jobs in
+parallel: `bootstrap` (builds a native `paws` binary once, uploaded as a build artifact) and
+`build-builders`, a **matrix over each builder name** (one runner per builder, not all 7 on a
+single runner — building them concurrently on one machine exhausted its disk) that builds/pushes
+`builders/<name>/Dockerfile` to GHCR (`docker compose build --push`, `GHCR_TOKEN`) and copies the
+manifest to Docker Hub (`docker buildx imagetools create`, `DOCKER_TOKEN`) against `../compose.yml`
+— `--push`/`imagetools create` deliberately never load a full image into the runner's local Docker
+daemon, which is what caused the disk exhaustion in the first place. Only once both jobs succeed
+(`needs: [ci, bootstrap, build-builders]`) does the per-target matrix start: each leg downloads
+the bootstrapped binary and runs `paws release`, which *pulls* the matching prebuilt image
+(`prebuilt_image_candidate`/`remote_image_exists` in `crates/paws-release`/`crates/paws-dagger`)
+rather than building any Dockerfile itself — deliberately pull-only, no local-build fallback, so a
+`build-builders` failure fails loudly instead of silently getting papered over by every leg
+quietly rebuilding its own copy. Each leg smoke-tests the binary, packages a `.zip`, and uploads
+it to the tag's GitHub Release (`generate_release_notes: true`,
 picking up merged PRs since the previous tag automatically), marked prerelease iff the tag
 contains a `-` (semver convention).
 

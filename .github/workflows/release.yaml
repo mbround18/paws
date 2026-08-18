@@ -19,27 +19,14 @@ jobs:
   ci:
     uses: ./.github/workflows/ci.yaml
 
-  # Staged release: bootstrap the native `paws` binary exactly once here,
-  # publish it as an artifact, then build/push every ./builders/* Dockerfile
-  # (via compose.yml) to both GHCR and Docker Hub — before any target build
-  # starts, so every leg of the matrix below can find a prebuilt image
-  # already there (paws_dagger::remote_image_exists) instead of paying for
-  # its own layer build from scratch. This is also what removes the
-  # redundant `cargo build --release -p paws-cli` from every matrix leg:
-  # the bootstrap only ever needs to happen once per release, and GitHub's
-  # own artifact cache carries the result to each leg below instead.
-  #
-  # Deliberately plain `docker compose`/`docker push` for the builder
-  # images, not paws/dagger: this is release-infra tooling that runs once
-  # per release, not part of paws's own container-execution seam (ADR-0001
-  # is about paws's Rust code, not this workflow's build step).
-  build-builders:
-    name: bootstrap paws + build & push builder images
+  # Bootstrap the native `paws` binary exactly once, publish it as an
+  # artifact — there's nothing target-specific about this build, so every
+  # later `paws release --target ...` leg downloads it instead of repeating
+  # the compile itself.
+  bootstrap:
+    name: bootstrap paws binary
     needs: ci
     runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ inputs.tag || github.ref_name }}
-      REVISION: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v7
 
@@ -49,11 +36,6 @@ jobs:
       - name: Cache cargo registry/build
         uses: Swatinem/rust-cache@v2
 
-      # Bootstrap once: every later `paws release --target ...` leg needs
-      # a native `paws` binary to drive the actual cross-target build, but
-      # there's nothing target-specific about *this* build — building it
-      # here and handing it down via artifact upload means the matrix
-      # below never repeats this compile per leg.
       - name: Bootstrap host paws binary
         run: cargo build --release -p paws-cli
 
@@ -63,6 +45,44 @@ jobs:
           name: paws-bootstrap
           path: target/release/paws
           retention-days: 1
+
+  # Builds/pushes every ./builders/* Dockerfile before the target matrix
+  # below starts, so each leg can find a prebuilt image already there
+  # (paws_dagger::remote_image_exists) instead of paying for its own layer
+  # build from scratch. One runner per builder (matrix), not all 7 on a
+  # single runner: building them concurrently on one machine exhausted a
+  # GitHub-hosted runner's disk ("no space left on device") — each of these
+  # is a full toolchain image (JDK+Android SDK/NDK, osxcross, GTK/WebKit,
+  # ...), and `docker compose build`'s default `docker-container` driver
+  # also duplicates every image's storage once for BuildKit's own cache and
+  # again importing it into the local daemon. `--push` avoids that second
+  # copy entirely by pushing straight from BuildKit to the registry, never
+  # loading the image into the runner's local Docker daemon at all.
+  #
+  # Deliberately plain `docker compose`/`docker buildx` for the builder
+  # images, not paws/dagger: this is release-infra tooling that runs once
+  # per release, not part of paws's own container-execution seam (ADR-0001
+  # is about paws's Rust code, not this workflow's build step).
+  build-builders:
+    name: build & push ${{ matrix.builder }}
+    needs: ci
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        builder:
+          - linux-gnu
+          - linux-musl-x86_64
+          - linux-musl-aarch64
+          - windows-gnu
+          - macos
+          - tauri-linux
+          - tauri-android
+    env:
+      VERSION: ${{ inputs.tag || github.ref_name }}
+      REVISION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
 
       - name: Compute CREATED timestamp
         run: echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
@@ -90,24 +110,20 @@ jobs:
           username: mbround18
           password: ${{ secrets.DOCKER_TOKEN }}
 
-      - name: Build builder images
-        run: docker compose build
+      - name: Build & push ${{ matrix.builder }} to GHCR
+        run: docker compose build --push ${{ matrix.builder }}
 
-      - name: Push to GHCR
-        run: docker compose push
-
-      - name: Tag & push to Docker Hub
+      # Registry-to-registry manifest copy, not a local pull/tag/push — no
+      # full image ever touches this runner's disk for this step.
+      - name: Copy ${{ matrix.builder }} to Docker Hub
         run: |
-          for name in $(docker compose config --services); do
-            ghcr_tag="ghcr.io/mbround18/paws-builders:${name}-${VERSION}"
-            dockerhub_tag="docker.io/mbround18/paws-builders:${name}-${VERSION}"
-            docker tag "$ghcr_tag" "$dockerhub_tag"
-            docker push "$dockerhub_tag"
-          done
+          docker buildx imagetools create \
+            --tag "docker.io/mbround18/paws-builders:${{ matrix.builder }}-${VERSION}" \
+            "ghcr.io/mbround18/paws-builders:${{ matrix.builder }}-${VERSION}"
 
   release:
     name: build & publish (${{ matrix.target }})
-    needs: [ci, build-builders]
+    needs: [ci, bootstrap, build-builders]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

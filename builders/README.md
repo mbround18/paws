@@ -16,16 +16,26 @@ populated via `--build-args` at build time — see `../compose.yml`.
 <version>` — a flat repo + tag, not one repo per builder, since Docker Hub doesn't support nested
 repository paths the way GHCR does. `.github/workflows/release.yaml`'s `build-builders` job pushes
 them to both GHCR and Docker Hub (same flat scheme on both) *before* the per-target build matrix
-starts (`needs: [ci, build-builders]`). That matrix's `paws release` (via
+starts (`needs: [ci, bootstrap, build-builders]`). That matrix's `paws release` (via
 `paws_dagger::remote_image_exists`/`prebuilt_image_candidate` in `crates/paws-release`) pulls the
 matching tag rather than building any Dockerfile itself — deliberately pull-only, no local
 `docker-build` fallback: rebuilding here would just re-pay for a build `build-builders` already
 did once (the exact duplicated cost prebuilt images exist to remove) and would silently mask a
 `build-builders` failure instead of surfacing it. If the tag isn't there, `paws release` fails
-loudly rather than quietly falling back. `build-builders` also bootstraps the native `paws` binary
-once (`cargo build --release -p paws-cli`) and uploads it as a build artifact, so the per-target
-matrix downloads it instead of repeating that compile on every leg — a staged release, not N
-independent ones.
+loudly rather than quietly falling back. A separate `bootstrap` job builds the native `paws`
+binary once (`cargo build --release -p paws-cli`) and uploads it as a build artifact, so the
+per-target matrix downloads it instead of repeating that compile on every leg — a staged release,
+not N independent ones.
+
+`build-builders` itself is a matrix — one runner per builder, not all 7 on a single runner.
+Building them concurrently on one machine exhausted a real GitHub-hosted runner's disk ("no space
+left on device": every builder here is a full toolchain image — JDK+Android SDK/NDK, osxcross,
+GTK/WebKit — and `docker compose build`'s default behavior duplicates each one's storage once for
+BuildKit's own cache and again importing it into the local Docker daemon). Each matrix leg instead
+runs `docker compose build --push <builder>`, which pushes straight from BuildKit to GHCR without
+ever loading the image into the runner's local daemon, then `docker buildx imagetools create` to
+copy the manifest to Docker Hub registry-to-registry — no local pull/tag/push round-trip, verified
+directly against a pair of local test registries.
 
 This also means these Dockerfiles are no longer required to exist on disk wherever `paws release`
 runs — the images are `paws`'s own, centrally published by `paws`'s own release pipeline, not
