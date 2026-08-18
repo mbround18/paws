@@ -51,6 +51,21 @@ async fn call_pipeline_report(function: &str, args: Vec<String>) -> anyhow::Resu
         .unwrap_or(true))
 }
 
+/// Runs a `dagger core <args>` pipeline, streaming its live progress to the
+/// terminal by default (`paws_dagger::core_streaming`) — `--silent` falls
+/// back to capturing everything and printing it only once the pipeline
+/// finishes, for callers that want quiet logs (e.g. a CI system that
+/// already buffers/collapses step output itself).
+async fn run_dagger_core(args: &[String], silent: bool) -> anyhow::Result<()> {
+    if silent {
+        let output = paws_dagger::core(args).await?;
+        print!("{output}");
+    } else {
+        paws_dagger::core_streaming(args).await?;
+    }
+    Ok(())
+}
+
 async fn run_provisioning(ecosystems: Vec<Ecosystem>, verbose: bool) -> anyhow::Result<()> {
     if ecosystems.is_empty() {
         return Ok(());
@@ -147,6 +162,10 @@ enum Commands {
         /// Print per-ecosystem provisioning start/elapsed timing to stderr.
         #[arg(long)]
         verbose: bool,
+        /// Suppress dagger's live build progress; only print output once
+        /// the pipeline finishes (or on failure). Default is streamed live.
+        #[arg(long)]
+        silent: bool,
     },
     /// Build and gate a container image the same way `docker-facts` + `docker-release` do.
     Docker {
@@ -263,7 +282,11 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Ci { toolchain, verbose } => {
+        Commands::Ci {
+            toolchain,
+            verbose,
+            silent,
+        } => {
             // FR-015: provisioning must go through the same concurrent path as
             // `paws provision`, never a sequential loop, whenever the target
             // repo needs more than one ecosystem.
@@ -309,8 +332,7 @@ async fn main() -> anyhow::Result<()> {
                             &dir.to_string_lossy(),
                             &builder_dir.to_string_lossy(),
                         );
-                        let output = paws_dagger::core(&args).await?;
-                        print!("{output}");
+                        run_dagger_core(&args, silent).await?;
                         println!("ci: tauri build succeeded");
                     } else {
                         println!(
@@ -321,8 +343,7 @@ async fn main() -> anyhow::Result<()> {
                         );
                         let args =
                             paws_node::dagger_pipeline_args(&project, &dir.to_string_lossy());
-                        let output = paws_dagger::core(&args).await?;
-                        print!("{output}");
+                        run_dagger_core(&args, silent).await?;
                         println!("ci: node build/test succeeded");
                     }
                 }
@@ -348,8 +369,7 @@ async fn main() -> anyhow::Result<()> {
                         &dir.to_string_lossy(),
                         &builder_dir.to_string_lossy(),
                     );
-                    let output = paws_dagger::core(&args).await?;
-                    print!("{output}");
+                    run_dagger_core(&args, silent).await?;
                     println!("ci: tauri android build succeeded");
                 }
                 Some("python") => {
@@ -366,8 +386,7 @@ async fn main() -> anyhow::Result<()> {
                         dir.display()
                     );
                     let args = paws_python::dagger_pipeline_args(&project, &dir.to_string_lossy());
-                    let output = paws_dagger::core(&args).await?;
-                    print!("{output}");
+                    run_dagger_core(&args, silent).await?;
                     println!("ci: python build/test succeeded");
                 }
                 Some("rust") => {
@@ -380,8 +399,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     println!("ci: rust project ({})", dir.display());
                     let args = paws_rust::dagger_pipeline_args(&dir.to_string_lossy());
-                    let output = paws_dagger::core(&args).await?;
-                    print!("{output}");
+                    run_dagger_core(&args, silent).await?;
                     println!("ci: rust build/test succeeded");
                 }
                 Some(other) => anyhow::bail!(

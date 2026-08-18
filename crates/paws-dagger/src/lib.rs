@@ -156,6 +156,44 @@ pub async fn core(args: &[String]) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 
+/// Same pipeline as [`core`], but streams `dagger`'s own live progress
+/// output straight to this process's stdout/stderr as it runs, instead of
+/// buffering everything and only printing it once the whole pipeline
+/// finishes. Capturing it via `.output()` (as [`core`] does) throws that
+/// away and leaves a caller sitting with no visible progress on a build
+/// that can take minutes, only ever seeing the small handful of
+/// `println!`s a `paws ci` caller wraps around it.
+///
+/// Uses `--progress=plain`, not `dagger core`'s default renderer —
+/// verified directly that the default renderer redraws in place via
+/// cursor-repositioning escape codes, which only makes sense on a real
+/// TTY: piped to a file (the same situation a GitHub Actions log is in),
+/// it writes nothing at all until the pipeline finishes, then dumps
+/// everything at once — exactly the "nothing for minutes, then everything"
+/// behavior this function exists to fix. `--progress=plain` is append-only
+/// and was confirmed (via a deliberately slow, non-cacheable step) to
+/// write lines incrementally as they happen, under a redirected/piped
+/// stdout, not just on a real terminal.
+///
+/// This is what `paws ci` uses by default now; [`core`] (captured, silent
+/// until done) remains for `--silent` and for callers that need the
+/// output text itself, not just pass/fail.
+pub async fn core_streaming(args: &[String]) -> Result<()> {
+    let status = Command::new("dagger")
+        .arg("core")
+        .arg("--progress=plain")
+        .args(args)
+        .status()
+        .await
+        .context("failed to spawn `dagger` CLI - is it installed and on PATH?")?;
+
+    if !status.success() {
+        anyhow::bail!("dagger core {}: failed (see output above)", args.join(" "));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +227,38 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(output.trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn core_streaming_succeeds_on_a_real_pipeline_and_fails_on_a_bad_one() {
+        if ensure_available().await.is_err() {
+            return; // no `dagger` on PATH in this environment; nothing to verify
+        }
+        core_streaming(&[
+            "container".into(),
+            "from".into(),
+            "--address=alpine:3.20".into(),
+            "with-exec".into(),
+            "--args=echo,hello".into(),
+            "stdout".into(),
+        ])
+        .await
+        .unwrap();
+
+        let err = core_streaming(&[
+            "container".into(),
+            "from".into(),
+            "--address=alpine:3.20".into(),
+            "with-exec".into(),
+            "--args=false".into(),
+            "stdout".into(),
+        ])
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("failed"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

@@ -27,7 +27,13 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   bundle threw at runtime) as of 2026-08-18. `ci` no longer does — `node`/`python`/`rust`/
   `tauri`/`tauri-android` all build native `paws-dagger::core` pipelines now (`crates/paws-node`/
   `paws-python`/`paws-rust`/`paws-tauri`), so a `paws ci` run has zero dependency on
-  `gh-reusable` being reachable at all.
+  `gh-reusable` being reachable at all. `paws ci` streams a running pipeline's output live by
+  default (`core_streaming`, `dagger core --progress=plain`) instead of buffering everything and
+  dumping it all at the end — verified directly that `dagger core`'s default renderer writes
+  nothing at all to a redirected/piped stdout until the pipeline finishes (it redraws in place via
+  cursor-repositioning escapes, which only makes sense on a real TTY — exactly the situation a
+  GitHub Actions log is in). `--silent` (`paws ci --toolchain ... --silent`) falls back to the old
+  captured-then-printed-once behavior for callers that want quiet logs.
 - `crates/paws-semver` — native Rust port of `actions/semver` (no `dagger` CLI needed).
   The pilot crate for eventually evaluating `dagger-sdk`.
 - `crates/paws-audit` — native Rust port of the audit/compliance aggregation logic
