@@ -5,6 +5,11 @@ members = [
     "crates/paws-core",
     "crates/paws-dagger",
     "crates/paws-provision",
+    "crates/paws-semver",
+    "crates/paws-audit",
+    "crates/paws-docker",
+    "crates/paws-docs",
+    "crates/paws-release",
 ]
 
 [workspace.package]
@@ -17,4 +22,6 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "fs"] }
+semver = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

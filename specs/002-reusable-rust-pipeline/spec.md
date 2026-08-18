@@ -1,5 +1,9 @@
 # Feature Specification: Reusable Rust Pipeline Architecture
 
+> **Superseded**: this spec is kept as a reference/inspiration copy from `gh-reusable`. For
+> anything beyond pure reference, `001-paws-core-cli` (this repo's actual feature) is the
+> current source of truth — see `specs/001-paws-core-cli/`.
+
 ## Summary
 
 Introduce a new reusable Rust pipeline contract for downstream repositories that centralizes build/test execution, optional crates.io publishing, and optional Rust docs publication to GitHub Pages through shared pipeline code.

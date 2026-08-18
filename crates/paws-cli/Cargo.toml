@@ -9,9 +9,15 @@ name = "paws"
 path = "src/main.rs"
 
 [dependencies]
+paws-audit = { path = "../paws-audit" }
 paws-core = { path = "../paws-core" }
+paws-docker = { path = "../paws-docker" }
+paws-docs = { path = "../paws-docs" }
 paws-dagger = { path = "../paws-dagger" }
 paws-provision = { path = "../paws-provision" }
+paws-release = { path = "../paws-release" }
+paws-semver = { path = "../paws-semver" }
 clap.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
+serde_json.workspace = true

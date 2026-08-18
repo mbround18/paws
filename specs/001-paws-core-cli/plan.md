@@ -8,7 +8,7 @@
 
 ## Constitution Check
 
-No `constitution.md` exists yet in this repo (`specs/memory/constitution.md` is unset). This plan proceeds without a formal gate but flags `speckit-constitution` as a prerequisite task (see `tasks.md`) so future specs have one to check against. No conflicts identified against the informal principles already stated in `README.md` (reliability/testability first, incremental SDK adoption, CLI-subprocess-first Dagger access).
+`.specify/memory/constitution.md` v1.0.0 is now ratified. This plan's design decisions (subprocess-first Dagger access, one crate per domain, parity testing, reliability/testability-first) are consistent with Principles I–V; no conflicts identified.
 
 ## Design Decisions
 
@@ -58,5 +58,5 @@ No `constitution.md` exists yet in this repo (`specs/memory/constitution.md` is 
 
 - ~~FR-011: confirm `actions/semver`'s actual default base version for a tagless repo.~~ **Resolved** — see spec.md FR-011: `{prefix}0.0.0`, default prefix `v`, read directly from `actions/semver/src/tag.js`.
 - ~~FR-012: extract and document `docker-facts`'s multi-service `docker-compose.yml` resolution rule.~~ **Resolved** — see spec.md FR-012: first `image:`-matching service wins, read directly from `packages/dagger-pipelines/src/docker-parity.ts`.
-- No `paws`-native CI pipeline exists yet — workstream 8 needs a decision on whether it's plain `cargo test` GitHub Actions initially, or `paws ci` dogfooding itself once `paws ci` ships (bootstrapping order matters: don't block on dogfooding before the first release).
+- ~~No `paws`-native CI pipeline exists yet.~~ **Resolved**: `.github/workflows/ci.yaml` runs plain `cargo build`/`cargo test --workspace`/`cargo clippy`/the SC-004 lint on GitHub Actions. Dogfooding `paws ci` itself is deferred until task 6 (native toolchain execution, currently still interim-`dagger`-wired) ships.
 - ~~`paws-provision`'s per-ecosystem task signature isn't decided yet.~~ **Resolved during scaffolding**: an `Installer` trait with a blanket impl over `Fn() -> Future<Output = Result<()>>`, boxed as `Box<dyn Installer>`, orchestrated via `JoinSet`. See `crates/paws-provision/src/lib.rs`. Real installers (rustup, pnpm/corepack, `uv`) still need to be plugged in behind this trait — that's workstream 5's remaining work, not a design question anymore.

@@ -423,6 +423,10 @@ $RECYCLE.BIN/
 ### paws-specific ###
 /target
 
+# Apple's SDK license doesn't allow redistributing it — never commit the
+# macOS SDK tarball the osxcross builder needs (see builders/macos/README.md).
+builders/macos/*.sdk.tar.xz
+
 # Claude Code local settings/session state can carry credentials - skills
 # (.claude/skills/) are plain markdown and meant to be committed, so only
 # the local/session-ish paths are excluded here, not all of .claude/.
