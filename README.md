@@ -87,10 +87,10 @@ subcommand-by-subcommand walkthrough with real example output.
 
 ## Language / stack support
 
-`paws ci` fully supports Rust, and Node across all four major package managers (npm, yarn, pnpm,
-bun) with Vite/Next.js framework detection — plain JS/TS, React, and SSR frameworks all covered.
-Python is provisionable but not yet wired for `paws ci`. See [`docs/ROADMAP.md`](docs/ROADMAP.md)
-for the full target stack list (JVM, Go, .NET, mobile, Tauri, and more) and an honest read of
+`paws ci` fully supports Rust, Node across all four major package managers (npm, yarn, pnpm, bun)
+with Vite/Next.js framework detection, `uv`-based Python, and Tauri desktop/Android builds — plain
+JS/TS, React, and SSR frameworks all covered. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the
+full target stack list (JVM, Go, .NET, mobile, and more) and an honest read of
 what's actually built versus planned.
 
 ## Contributing / development

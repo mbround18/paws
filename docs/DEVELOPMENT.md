@@ -64,6 +64,13 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   (`src-tauri/gen/android` committed) — `paws` doesn't scaffold mobile projects itself. iOS has no
   builder image and isn't planned as one: `cargo tauri ios build` needs real Xcode/`xcodebuild`,
   which only runs under Apple's license on genuine macOS — see `docs/ROADMAP.md`.
+- `crates/paws-python` — native port of `gh-reusable`'s real `pythonBuildAndTest` Dagger function
+  (`packages/dagger-module/src/index.ts`): `uv sync --all-groups [--frozen] && uv build && uv run
+  pytest` against `astral/uv:python<version>-trixie-slim`, a plain `container from` pipeline (no
+  dedicated `builders/*` Dockerfile needed, unlike Tauri). `uv`-based projects only
+  (`pyproject.toml`) — that's what `gh-reusable` actually supports, no poetry/pipenv/pip path
+  exists there to port. `--frozen` is only passed when `uv.lock` is committed, the same
+  lockfile-optional-install fix `paws-node` needed for `npm ci`.
 
 ## CI
 
@@ -73,10 +80,11 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   [ADR-0001](adr/0001-route-container-execution-through-dagger.md)'s `docker`/`cross` rule).
   `cargo test --workspace` also runs `paws-docker`'s real-Docker-daemon e2e suite and
   `paws-provision`'s concurrency-timing test (SC-005) — no separate CI steps needed for either.
-- **`ci-e2e`** — installs the real `dagger` CLI and runs `paws ci --toolchain rust` and
-  `--toolchain node` end-to-end against `examples/rust-fixture`/`examples/node-fixture` (FR-008),
-  kept as its own job since it depends on external infrastructure (a Dagger engine, `gh-reusable`
-  being reachable on GitHub) the fast unit-test job doesn't need.
+- **`ci-e2e`** — installs the real `dagger` CLI and runs `paws ci --toolchain rust`,
+  `--toolchain node`, and `--toolchain python` end-to-end against `examples/rust-fixture`/
+  `examples/node-fixture`/`examples/python-fixture` (FR-008), kept as its own job since it depends
+  on external infrastructure (a Dagger engine, `gh-reusable` being reachable on GitHub) the fast
+  unit-test job doesn't need.
 
 `main` is protected by a ruleset requiring the `build, test, lint` check before merge (no force
 push, no deletion). The repo owner can always bypass it (break-glass); Renovate's GitHub App can

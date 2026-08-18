@@ -66,3 +66,7 @@ part of `paws` itself.
   (`src-tauri/tauri.conf.json`) and a real, full `tauri build` — frontend build via
   `beforeBuildCommand`, then Rust bundling into `.deb`/`.rpm`/`.AppImage` — run against the
   `builders/tauri-linux` Dockerfile through Dagger.
+- `python-fixture/` — a real `uv init` scaffold (with a `pytest` dev dependency and one real test);
+  the target for `paws ci --toolchain python`. Exercises `crates/paws-python`'s detection
+  (`pyproject.toml` + `uv.lock`) and a real `uv sync --all-groups --frozen && uv build && uv run
+  pytest`, run against `astral/uv:python3.12-trixie-slim` through Dagger.

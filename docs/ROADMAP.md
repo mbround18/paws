@@ -8,7 +8,7 @@ see [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) for how a new stack actually gets ad
 
 Confirmed directly against the code, not from memory:
 
-- **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node`, `tauri`
+- **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node`, `python`, `tauri`
   (`crates/paws-cli/src/main.rs`). Node execution is now natively multi-package-manager
   (`crates/paws-node` — npm/yarn/pnpm/bun, detected from lockfiles or `package.json`'s
   `packageManager` field, no longer the old `pnpmBuildAndTest`-only interim path) and
@@ -16,7 +16,12 @@ Confirmed directly against the code, not from memory:
   fixtures covering all 4 package managers plus real `create-vite`/`create-next-app` scaffolds
   (including a React+TSX one) — see `examples/README.md`. `tauri` (`crates/paws-tauri`) builds a
   Tauri app through a dedicated `builders/tauri-linux` Dockerfile via Dagger, verified for real
-  against a `create-tauri-app` scaffold (`examples/tauri-fixture`) — Linux-only so far.
+  against a `create-tauri-app` scaffold (`examples/tauri-fixture`) — Linux-only so far. `python`
+  (`crates/paws-python`) is a native port of `gh-reusable`'s real `pythonBuildAndTest` function
+  (`uv sync --all-groups [--frozen] && uv build && uv run pytest` against
+  `astral/uv:python3.12-trixie-slim`) — `uv`-based projects only, matching what `gh-reusable`
+  actually supports (no poetry/pipenv/pip path exists there to port). Verified for real, end to
+  end, against `examples/python-fixture` (a real `uv init` scaffold).
 - **`paws provision`** (concurrent toolchain installers): `rust`, `node`, `python`
   (`paws_provision::Ecosystem`). `gh-reusable` (the TS system `paws` is replacing) already has
   `setupGo`/`setupRuby`/`setupJava`/`setupTerraform`/`setupPulumi` — none of those ecosystems are
@@ -31,9 +36,11 @@ Confirmed directly against the code, not from memory:
 - **`paws release`**: cross-compiles **`paws` itself** (the Rust binary) for multiple OS/arch —
   this is not a general "build any project for any target" capability, it's specific to `paws`'s
   own release pipeline. Don't read the target matrix here as stack coverage for user projects.
-- **Python** is the closest "next" gap worth naming specifically: `paws-provision` can already
-  install it (`uv`), `paws-audit` already detects it, and `gh-reusable` already has a
-  `pythonBuildAndTest` function to port/wire — but `paws ci --toolchain python` doesn't exist yet.
+- **Java** is the next gap worth naming specifically, per a real `gh api users/mbround18/repos`
+  audit (2026-08-18): after Rust/JS/TS, Java is the next-most-common language across
+  `mbround18`'s own non-fork repos (3, all Gradle-based Hytale mods) with no `paws-provision`/
+  `paws-audit` precedent yet to build on — unlike Python, which had both before `paws ci
+  --toolchain python` was wired.
 
 ## Status legend
 
@@ -118,7 +125,7 @@ version-matrix complexity to design around the way `Java`/`Kotlin` would need.
 
 | Stack Permutation | Primary Languages | Package Manager(s) | Core Toolchain / Frameworks | Output Type | Status |
 | --- | --- | --- | --- | --- | --- |
-| Python | Python | pip, poetry, conda, uv | CPython, FastAPI, Django | Python Package (.whl), Docker Image | 🚧 |
+| Python | Python | uv | CPython, FastAPI, Django | Python Package (.whl), Docker Image | ✅ |
 | C# / .NET | C#, F# | NuGet | .NET SDK, ASP.NET Core, EF Core | Binaries (.exe, .dll), NuGet Package | 📋 |
 | C / C++ | C, C++ | conan, vcpkg, system pkg mgrs | GCC, Clang, MSVC, CMake, Make | Native Binaries, Libs (.so, .dll, .a) | 📋 |
 | Ruby | Ruby | gem, bundler | Ruby (MRI), Ruby on Rails, Sinatra | Gem Package, Docker Image | 📋 |
@@ -132,8 +139,9 @@ version-matrix complexity to design around the way `Java`/`Kotlin` would need.
 | React Native | JS/TS, Java/Swift | npm, gradle, CocoaPods | Node.js, React Native, Mobile SDKs | Mobile Apps (.apk, .aab, .ipa) | 📋 |
 | Zig | Zig | zon (Zig Object Notation) | Zig Compiler | Native Executable (.exe, ELF, Mach-O) | 📋 |
 
-`Python`'s status here means: closer than everything else in this table, but still not
-`paws ci --toolchain python` — see "Current coverage" above for exactly what exists already.
+`Python`'s ✅ is `uv`-only, matching what `gh-reusable`'s real `pythonBuildAndTest` function
+actually supports — pip/poetry/conda projects (no `pyproject.toml` + `uv.lock`) aren't detected
+and fall through to `paws ci`'s "unsupported toolchain" error; see "Current coverage" above.
 `Swift`/`.NET MAUI`/`Flutter` mobile+Apple targets are the hardest group: they need either a
 macOS-hosted runner or a cross-compilation story `paws` doesn't have for anything beyond `paws`'s
 own binary (`builders/macos`'s osxcross setup is Rust-specific, not a general Swift/Xcode

@@ -77,3 +77,7 @@ jobs:
       - name: paws ci --toolchain node (examples/node-fixture)
         working-directory: examples/node-fixture
         run: ../../target/debug/paws ci --toolchain node
+
+      - name: paws ci --toolchain python (examples/python-fixture)
+        working-directory: examples/python-fixture
+        run: ../../target/debug/paws ci --toolchain python
