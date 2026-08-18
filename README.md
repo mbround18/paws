@@ -1,103 +1,85 @@
 # paws
 
-Run-anywhere CI/CD pipelines, backed by [Dagger](https://dagger.io), shipped as a single Rust binary.
+**Run-anywhere CI/CD pipelines, backed by [Dagger](https://dagger.io), shipped as a single Rust
+binary.**
 
-Not tied to GitHub Actions: the same pipeline logic runs in CI or on your laptop.
+`paws` runs the same build/test/audit/release pipeline whether it's executing inside GitHub
+Actions or on your laptop. No YAML lock-in, no "works in CI but not locally" — one binary, one
+set of commands, everywhere.
 
-## Origin
+[![CI](https://github.com/mbround18/paws/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/mbround18/paws/actions/workflows/ci.yaml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-`paws` grew out of [gh-reusable](https://github.com/MBRound18/gh-reusable)'s reusable-workflow
-library. That repo's `specs/002-reusable-rust-pipeline/` spec (copied here under `specs/`)
-is the original inspiration for a first-class Rust pipeline contract — this project takes
-that idea further: instead of adding Rust as one more supported language inside a
-TypeScript-orchestrated system, the orchestrator itself is Rust.
+## Why
 
-## Layout
+Most CI setups tie your build logic to your CI provider's YAML dialect. Debugging a failing
+check usually means pushing a commit and waiting, because there's no easy way to reproduce the
+exact pipeline locally. `paws` exists to remove that dependency: every subcommand is a normal CLI
+program that runs the same way on your machine as it does in CI, backed by
+[Dagger](https://dagger.io) for portable, cacheable container execution rather than
+provider-specific scripting.
 
-- `crates/paws-cli` — the `paws` binary. `clap`-based subcommands (`ci`, `docker`, `semver`,
-  `audit`, `docs`, ...) are the narrative/user-facing layer.
-- `crates/paws-core` — shared contract types (defaults, pipeline config shapes).
-- `crates/paws-dagger` — wraps the `dagger` CLI. Deliberately **not** built on the
-  `dagger-sdk` Rust crate yet — Dagger's own README marks that SDK experimental and
-  "not for anything mission-critical." Pipeline logic goes through this crate so the
-  day the SDK is trustworthy, only this crate needs to change. The interim `ci`/`docker`/
-  `audit` subcommands call into `gh-reusable`'s real Dagger module through here, pinned to a
-  known-good commit (see `GH_REUSABLE_DAGGER_MODULE` in `crates/paws-cli/src/main.rs`) rather
-  than trusting its floating `main` branch, which was verified broken (a stale vendored SDK
-  bundle threw at runtime) as of 2026-08-18.
-- `crates/paws-semver` — native Rust port of `actions/semver` (no `dagger` CLI needed).
-  The pilot crate for eventually evaluating `dagger-sdk`.
-- `crates/paws-audit` — native Rust port of the audit/compliance aggregation logic
-  (language detection, scanner selection, finding normalization/aggregation); running the
-  actual `semgrep`/`gitleaks` containers still goes through `paws-dagger`.
-- `crates/paws-docker` — native Rust port of `docker-facts`/`docker-release`'s resolution
-  logic (compose discovery, tag generation, push gating); has a real e2e test suite that
-  builds `examples/`' fixtures against an actual Docker daemon, including a BuildKit-only
-  fixture. Building/pushing the image itself still goes through `paws-dagger`.
-- `crates/paws-provision` — concurrent toolchain provisioning (`tokio::JoinSet`-based),
-  aggregating per-ecosystem install results without one failure hiding another's. Real
-  installers shell to `rustup`/`corepack`/`uv`; `paws ci` uses this internally whenever a repo
-  needs more than one ecosystem (FR-015), rather than a sequential setup loop.
-- `crates/paws-docs` — thin wrapper around `cargo doc --workspace --no-deps`; doesn't need the
-  `dagger` CLI at all.
-- `crates/paws-release` — cross-target build + smoke-test + package (`zip`) + GitHub Release
-  publish. Build and smoke-test both route through `paws-dagger::core` (moduleless `dagger core`
-  pipelines against `./builders/*` Dockerfiles) — never a direct `docker`/`cross` spawn, so
-  `paws release` needs nothing beyond the `dagger` CLI. Only the GitHub REST API calls (plain
-  HTTPS, no process spawn) and packaging (`zip`, a host utility, not a second build backend)
-  fall outside that seam.
+## What it does
 
-## CI
+| Command | What it does |
+| --- | --- |
+| `paws ci` | Build, lint, and test a Node or Rust project |
+| `paws semver` | Compute the next version from PR labels, branch name, or an explicit bump |
+| `paws docker` | Resolve and build a container image the way `docker-compose`-aware pipelines do |
+| `paws audit` | Run a security/compliance scanner suite and summarize the findings |
+| `paws provision` | Install multiple toolchains (Rust, Node, Python, ...) concurrently, not one at a time |
+| `paws docs` | Build workspace documentation |
+| `paws release` | Cross-compile, smoke-test, package, and publish a release binary for Linux, Windows, and macOS |
 
-`.github/workflows/ci.yaml` has two jobs:
-- **`test`** — `cargo build`/`cargo test --workspace`/`cargo clippy`/the SC-004 dagger-call-site
-  lint. `cargo test --workspace` also runs `paws-docker`'s real-Docker-daemon e2e suite and
-  `paws-provision`'s concurrency-timing test (SC-005) — no separate CI steps needed for either.
-- **`ci-e2e`** — installs the real `dagger` CLI and runs `paws ci --toolchain rust` and
-  `--toolchain node` end-to-end against `examples/rust-fixture`/`examples/node-fixture` (FR-008),
-  kept as its own job since it depends on external infrastructure (a Dagger engine, `gh-reusable`
-  being reachable on GitHub) the fast unit-test job doesn't need.
+Run `paws --help` or `paws <command> --help` for the full flag reference.
 
-## Releases
+## Status
 
-`.github/workflows/release.yaml` triggers on any `v*` tag push (or manual dispatch). It first
-calls `ci.yaml` as a reusable workflow — a release build is gated by the same fmt/clippy/test/
-build check as every other push, dogfooding `paws ci` on `paws` itself — then, per target, builds
-`paws` with `paws release` (bootstrapped from a host-native build of itself), smoke-tests it,
-packages a `.zip`, and uploads it to the tag's GitHub Release, marked prerelease iff the tag
-contains a `-` (semver convention).
+Early and actively developed — pre-1.0, versions like `0.0.1-prerelease.N`. The core subcommands
+work and are tested against real fixtures and a real Dagger engine, not just unit tests, but the
+surface is still growing. See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for exactly what's
+verified where.
 
-Every build and smoke test goes through `dagger core` (see `crates/paws-release` and
-`builders/`) — `dagger`'s own multi-platform container execution (backed by the runner's QEMU
-`binfmt_misc` registration) handles the aarch64 legs, and a Wine-enabled base image handles the
-Windows one, so the CI job needs nothing beyond Rust + the `dagger` CLI (no `cross`, no
-`docker/setup-qemu-action`, no separate Wine setup). A binary that builds but doesn't run never
-reaches a GitHub Release: the smoke test runs before packaging/upload.
+## Installation
 
-Current target matrix (`paws_release::known_targets()`): `x86_64-unknown-linux-gnu`,
-`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
-`x86_64-pc-windows-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin` — see `builders/README.md`
-for each one's Dockerfile. The first 5 were verified end-to-end in development (real build + real
-execution, not just "it compiled"). The 2 macOS targets build real, verified Mach-O binaries
-(`builders/macos/`, via osxcross, SDK fetched automatically and checksum-verified from
-`joseluisq/macosx-sdks`) but aren't smoke-tested — no Mach-O execution environment is available to
-`dagger`/Wine — so `paws release` builds and packages them while honestly reporting the smoke test
-as skipped; see `builders/macos/README.md`.
+**Prebuilt binaries**: not published yet — `paws`'s own release pipeline (`paws release`, see
+below) is built and verified, but no tag has been cut. Once released, binaries will be available
+on the [Releases page](https://github.com/mbround18/paws/releases) for Linux (x86_64/aarch64,
+glibc and musl), Windows (x86_64), and macOS (x86_64/aarch64).
 
-## Examples / fixtures
+**From source** (needs a [Rust toolchain](https://rustup.rs)):
 
-`examples/` holds small, real fixture projects `paws`'s own tests and CI exercise
-subcommands against — see [`examples/README.md`](examples/README.md).
+```sh
+git clone https://github.com/mbround18/paws.git
+cd paws
+cargo install --path crates/paws-cli
+```
 
-## Architecture decisions
+Most subcommands also need the [`dagger` CLI](https://docs.dagger.io/install) on your `PATH`.
 
-Significant, trade-off-laden architectural decisions are recorded in
-[`docs/adr/`](docs/adr/README.md) as ADRs — e.g.
-[0001](docs/adr/0001-route-container-execution-through-dagger.md), why `paws release` routes
-every build/smoke-test through `dagger core` instead of shelling to `docker`/`cross` directly.
+## Quickstart
 
-## Principles
+```sh
+# Compute the next version — works fully offline, no dagger needed
+paws semver --base v1.0.0 --prefix v --branch main
+# -> v1.0.1
 
-See [`.specify/memory/constitution.md`](.specify/memory/constitution.md) for the project's
-formal governing principles (one crate per domain, subprocess-first Dagger access, incremental
-SDK adoption, parity testing, reliability/testability-first) and development workflow rules.
+# Build and test a project
+paws ci --toolchain rust
+
+# Resolve how a container image would be built/tagged/pushed
+paws docker --image ghcr.io/you/app --version 1.0.0
+```
+
+See [`specs/001-paws-core-cli/quickstart.md`](specs/001-paws-core-cli/quickstart.md) for a full,
+subcommand-by-subcommand walkthrough with real example output.
+
+## Contributing / development
+
+Architecture, crate layout, CI internals, and the reasoning behind non-obvious decisions live in
+[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) and [`docs/adr/`](docs/adr/README.md). Start there
+if you're looking to build or modify `paws` itself rather than just use it.
+
+## License
+
+[MIT](LICENSE) © MBRound18

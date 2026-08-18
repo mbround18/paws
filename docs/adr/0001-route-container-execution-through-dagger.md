@@ -157,7 +157,7 @@ Author a new `@func()` (or extend `gh-reusable`'s existing `packages/dagger-modu
 * Good, because TypeScript pipeline definitions are more conventional Dagger usage than raw CLI
   chains, and easier to read/maintain than a long `dagger core` invocation.
 * Bad, because it reintroduces exactly the TypeScript-orchestration dependency `paws` exists to
-  get away from (see `README.md`'s "Origin" section) — `paws`'s own release mechanism would
+  get away from (see `docs/DEVELOPMENT.md`'s "Origin" section) — `paws`'s own release mechanism would
   depend on `gh-reusable` (or a new TS module) staying in sync and reachable, the same risk
   already flagged and mitigated elsewhere in this project by pinning `GH_REUSABLE_DAGGER_MODULE`
   to a known-good commit after its floating `main` branch was found broken.
