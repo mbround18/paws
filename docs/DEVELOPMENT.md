@@ -58,7 +58,12 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   materialized to a temp dir at runtime (`write_builder_dockerfile`) — a plain repo-relative path
   would resolve against the *target* repo `paws ci` is running in, not `paws`'s own source tree,
   since `paws` (unlike `paws-release`, which only ever builds itself) is meant to run from
-  anywhere. Linux-only for now.
+  anywhere. Desktop (`--toolchain tauri`) is Linux-only for now. Mobile (`--toolchain
+  tauri-android`) builds against `builders/tauri-android/Dockerfile` (JDK 17 + Android SDK/NDK +
+  Rust's Android cross targets), assuming the target repo already ran `tauri android init`
+  (`src-tauri/gen/android` committed) — `paws` doesn't scaffold mobile projects itself. iOS has no
+  builder image and isn't planned as one: `cargo tauri ios build` needs real Xcode/`xcodebuild`,
+  which only runs under Apple's license on genuine macOS — see `docs/ROADMAP.md`.
 
 ## CI
 

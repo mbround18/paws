@@ -57,6 +57,8 @@ Confirmed directly against the code, not from memory:
 | Tauri + Node + Rust | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Tauri, Node.js (Sidecar), Rust | Desktop App + Node Backend Process | 📋 |
 | Tauri + React + Rust | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Tauri, React, Rust, Vite/Next.js | Desktop App (React UI) | 🚧 |
 | Tauri + React + Node + Rust | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Tauri, React, Node.js, Rust | Desktop App + Embedded Node APIs | 📋 |
+| Tauri + Android | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Tauri, JDK, Android SDK/NDK | .apk / .aab | 🚧 |
+| Tauri + iOS | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Tauri, Xcode, `xcodebuild` | .ipa | 📋 (blocked) |
 
 `paws ci --toolchain tauri` (`crates/paws-tauri`) detects a Tauri project (`src-tauri/tauri.conf.json`)
 and runs `<package manager> run tauri build` against a dedicated `builders/tauri-linux` Dockerfile
@@ -69,6 +71,24 @@ the same code path (the pipeline is package-manager-driven, not framework-driven
 independently verified yet, hence 🚧 rather than ✅. Linux-only for now — no macOS/Windows Tauri
 builder exists yet, and the Node-sidecar row is a distinct capability (spawning a persistent Node
 process alongside the Tauri shell) this crate doesn't attempt.
+
+**Android** gets its own `builders/tauri-android` Dockerfile (JDK 17 + Android SDK/NDK + Rust's
+Android cross targets + Node) and `paws ci --toolchain tauri-android`, which runs `<package
+manager> run tauri android build`. The builder image itself is build-verified — JDK, `sdkmanager`,
+platform/build-tools/NDK install, and `rustup target add` for all four Android ABIs all confirmed
+working through a real Dagger build. It's marked 🚧, not ✅, because it assumes the target repo has
+already run `tauri android init` (`src-tauri/gen/android` committed) — `paws` doesn't scaffold
+mobile projects itself — and a full `tauri android build` hasn't been run against a real generated
+Android project yet.
+
+**iOS is explicitly blocked, not just unstarted.** Unlike macOS (where `osxcross` lets Rust
+cross-compile against the Darwin ABI using Apple's redistributed SDK headers — see
+`builders/macos/`), there's no equivalent path for iOS: `cargo tauri ios build` shells out to real
+Xcode (`xcodebuild`) to generate and build the Xcode project and produce the `.ipa`, and Apple's
+license terms require Xcode to run on genuine Apple hardware/macOS. That's a legal and technical
+constraint a container image can't route around. iOS support would need a real macOS build host
+(a GitHub-hosted `macos-*` runner or a self-hosted Mac) wired in as a *different kind* of backend
+than the Docker-image-through-Dagger approach every other target here uses — not attempted yet.
 
 `Node + Rust`/`React + Rust` need real new capability, not just wiring: native addon builds
 (`napi-rs`/`neon`) and `wasm-pack` WebAssembly builds are each a distinct toolchain `paws` doesn't
