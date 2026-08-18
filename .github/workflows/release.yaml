@@ -40,7 +40,7 @@ jobs:
         run: cargo build --release -p paws-cli
 
       - name: Upload bootstrapped paws binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: paws-bootstrap
           path: target/release/paws
@@ -95,17 +95,17 @@ jobs:
       # only `docker-container` does, which this sets up as the active
       # builder `docker compose build` below picks up automatically.
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_TOKEN }}
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: mbround18
           password: ${{ secrets.DOCKER_TOKEN }}
@@ -154,6 +154,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # paws_dagger::remote_image_exists / build_binary pull the prebuilt
+      # builder image from GHCR (dagger's own engine, which respects the
+      # host's Docker credential store the same way docker/buildx does) -
+      # GHCR packages default to private, and this job never logged in
+      # before, so the pull failed anonymously ("not found", not an auth
+      # error - GHCR doesn't distinguish missing-vs-unauthorized to an
+      # anonymous caller). build-builders logs in for the same reason.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
       - name: Install dagger CLI
         run: curl -fsSL https://dl.dagger.io/dagger/install.sh | BIN_DIR=/usr/local/bin sh
 
@@ -164,7 +178,7 @@ jobs:
       # point — cross-target build (via ./builders/*), the QEMU/Wine-backed
       # smoke test, packaging — is `paws release` orchestrating Dagger.
       - name: Download bootstrapped paws binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: paws-bootstrap
           path: target/release
