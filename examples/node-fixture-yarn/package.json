@@ -1,11 +1,10 @@
 {
-  "name": "node-fixture-with-lint-failure",
+  "name": "node-fixture-yarn",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node --check index.js",
-    "lint": "node lint.js",
     "test": "node index.test.js"
   }
 }

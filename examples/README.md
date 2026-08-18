@@ -39,4 +39,25 @@ part of `paws` itself.
   offending call. Exercises spec.md's User Story 1, acceptance scenario 1 ("Given a Node project
   fixture with a failing lint rule, When `paws ci --toolchain node` runs, Then it exits non-zero
   and reports the specific lint failure"). Its `index.test.js` still passes cleanly, so the
-  fixture isolates the lint failure from test behavior.
+  fixture isolates the lint failure from test behavior. Also has no lockfile (`npm` detected via
+  fallback, not a `package-lock.json`) — caught a real bug where `npm ci` (which requires an
+  existing lockfile) was used even when none exists yet; see `crates/paws-node`.
+- `node-fixture-npm/`, `node-fixture-yarn/` — the same minimal project as `node-fixture/`
+  (pnpm), one per remaining package manager `paws-node` detects from lockfiles
+  (`package-lock.json`, `yarn.lock`). Each verified for real: `paws ci --toolchain node` installs,
+  builds, and tests through a real Dagger container.
+- `node-fixture-bun/` — same again for Bun, but detected via `package.json`'s `packageManager`
+  field rather than a lockfile (a zero-dependency `bun install` produces no lockfile at all) —
+  exercises the same lockfile-optional install path as `node-fixture-with-lint-failure/`, this
+  time for real with Bun's own base image (`oven/bun:1-debian`, since Bun isn't bundled with the
+  official Node image the way npm/yarn/pnpm are via `corepack`).
+- `vite-fixture/` — a real, unmodified `npm create vite -- --template vanilla-ts` scaffold (plus
+  a `test.mjs` asserting `dist/index.html` exists post-build, since Vite's own templates don't
+  include a test script). Exercises `paws-node`'s `Framework::Vite` detection and a real
+  `tsc && vite build`.
+- `react-vite-fixture/` — a real `npm create vite -- --template react-ts` scaffold (React + TSX),
+  keeping its generated `oxlint` lint script — exercises the full install → build → test → lint
+  chain for a real React/TypeScript project, not just plain JS.
+- `next-fixture/` — a real `create-next-app` scaffold (TypeScript, App Router, ESLint), with a
+  `test.mjs` asserting `.next/BUILD_ID` exists post-build. Exercises `paws-node`'s
+  `Framework::NextJs` detection and a real `next build` (Turbopack) + `eslint` run.

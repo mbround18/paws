@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use paws_audit::{select_audit_scanners, RepositorySignals};
 use paws_dagger::{call, DaggerCall};
@@ -260,16 +261,42 @@ async fn main() -> anyhow::Result<()> {
             }
 
             paws_dagger::ensure_available().await?;
-            let function = match toolchain.as_deref() {
-                Some("node") => "pnpm-build-and-test",
-                Some("rust") => "rust-build-and-test",
+            match toolchain.as_deref() {
+                Some("node") => {
+                    let dir = std::env::current_dir()?;
+                    let project = paws_node::detect_project(&dir)
+                        .context("failed to detect a Node project in the current directory")?;
+                    let missing = project.missing_required_scripts();
+                    if !missing.is_empty() {
+                        anyhow::bail!(
+                            "package.json is missing required script(s): {} (found package manager: {}, framework: {})",
+                            missing.join(", "),
+                            project.package_manager.as_str(),
+                            project.framework.as_str()
+                        );
+                    }
+                    println!(
+                        "ci: {} project using {} ({})",
+                        project.framework.as_str(),
+                        project.package_manager.as_str(),
+                        dir.display()
+                    );
+
+                    let args = paws_node::dagger_pipeline_args(&project, &dir.to_string_lossy());
+                    let output = paws_dagger::core(&args).await?;
+                    print!("{output}");
+                    println!("ci: node build/test succeeded");
+                }
+                Some("rust") => {
+                    let source = std::env::current_dir()?.to_string_lossy().to_string();
+                    let succeeded =
+                        call_pipeline_report("rust-build-and-test", vec!["--source".into(), source]).await?;
+                    if !succeeded {
+                        anyhow::bail!("ci failed: see report above");
+                    }
+                }
                 Some(other) => anyhow::bail!("unsupported --toolchain '{other}'; expected 'node' or 'rust'"),
                 None => anyhow::bail!("--toolchain is required (e.g. --toolchain node)"),
-            };
-            let source = std::env::current_dir()?.to_string_lossy().to_string();
-            let succeeded = call_pipeline_report(function, vec!["--source".into(), source]).await?;
-            if !succeeded {
-                anyhow::bail!("ci failed: see report above");
             }
         }
         Commands::Docker {

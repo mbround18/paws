@@ -1,0 +1,11 @@
+{
+  "name": "node-fixture-bun",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.14",
+  "scripts": {
+    "build": "bun build index.js --outdir=dist",
+    "test": "bun index.test.js"
+  }
+}

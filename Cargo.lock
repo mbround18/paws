@@ -603,6 +603,7 @@ dependencies = [
  "paws-dagger",
  "paws-docker",
  "paws-docs",
+ "paws-node",
  "paws-provision",
  "paws-release",
  "paws-semver",
@@ -642,6 +643,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "tokio",
+]
+
+[[package]]
+name = "paws-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

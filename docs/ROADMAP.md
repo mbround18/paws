@@ -8,9 +8,13 @@ see [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) for how a new stack actually gets ad
 
 Confirmed directly against the code, not from memory:
 
-- **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node` only
-  (`crates/paws-cli/src/main.rs`). Node execution is pnpm-specific today (`pnpmBuildAndTest` in
-  the interim `gh-reusable` module path) — npm/yarn/bun aren't distinguished or supported yet.
+- **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node`
+  (`crates/paws-cli/src/main.rs`). Node execution is now natively multi-package-manager
+  (`crates/paws-node` — npm/yarn/pnpm/bun, detected from lockfiles or `package.json`'s
+  `packageManager` field, no longer the old `pnpmBuildAndTest`-only interim path) and
+  framework-aware (Vite, Next.js, or plain, informational for now). Verified for real against
+  fixtures covering all 4 package managers plus real `create-vite`/`create-next-app` scaffolds
+  (including a React+TSX one) — see `examples/README.md`.
 - **`paws provision`** (concurrent toolchain installers): `rust`, `node`, `python`
   (`paws_provision::Ecosystem`). `gh-reusable` (the TS system `paws` is replacing) already has
   `setupGo`/`setupRuby`/`setupJava`/`setupTerraform`/`setupPulumi` — none of those ecosystems are
@@ -40,10 +44,10 @@ Confirmed directly against the code, not from memory:
 
 | Stack Permutation | Primary Languages | Package Manager(s) | Core Toolchain / Frameworks | Output Type | Status |
 | --- | --- | --- | --- | --- | --- |
-| React | JavaScript, TypeScript | npm, yarn, pnpm, bun | Node.js (build env), React, Vite/Webpack | Static Web Assets (HTML/CSS/JS) | 🚧 |
+| React | JavaScript, TypeScript | npm, yarn, pnpm, bun | Node.js (build env), React, Vite/Webpack | Static Web Assets (HTML/CSS/JS) | ✅ |
 | Node | JavaScript, TypeScript | npm, yarn, pnpm, bun | Node.js | NPM Package / Backend Server | 🚧 |
 | Rust | Rust | cargo | rustc, Cargo | Native Executable (.exe, ELF, Mach-O) | ✅ |
-| Node + React | JavaScript, TypeScript | npm, yarn, pnpm, bun | Node.js, React, Next.js / Express | SSR Web App / Full-stack | 🚧 |
+| Node + React | JavaScript, TypeScript | npm, yarn, pnpm, bun | Node.js, React, Next.js / Express | SSR Web App / Full-stack | ✅ |
 | Rust + React | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Rust (Actix/Axum), React | Backend API + Static UI | 🚧 |
 | Node + Rust | JS/TS, Rust | npm/yarn/pnpm/bun & cargo | Node.js, Rust, napi-rs or neon | Native Node bindings (.node) | 📋 |
 | React + Rust | JS/TS, Rust | npm/yarn/pnpm/bun & cargo | React, Rust, wasm-pack | WebAssembly (.wasm) + React UI | 📋 |
