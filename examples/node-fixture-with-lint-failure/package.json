@@ -1,0 +1,10 @@
+{
+  "name": "node-fixture-with-lint-failure",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "node lint.js",
+    "test": "node index.test.js"
+  }
+}

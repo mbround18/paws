@@ -7,8 +7,10 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use tokio::process::Command;
 use tokio::task::JoinSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -16,6 +18,29 @@ pub enum Ecosystem {
     Rust,
     Node,
     Python,
+}
+
+impl Ecosystem {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Ecosystem::Rust => "rust",
+            Ecosystem::Node => "node",
+            Ecosystem::Python => "python",
+        }
+    }
+}
+
+impl std::str::FromStr for Ecosystem {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "rust" => Ok(Ecosystem::Rust),
+            "node" => Ok(Ecosystem::Node),
+            "python" => Ok(Ecosystem::Python),
+            other => anyhow::bail!("unsupported ecosystem: {other}"),
+        }
+    }
 }
 
 type InstallFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
@@ -37,32 +62,120 @@ where
     }
 }
 
+/// One ecosystem's provisioning outcome, with enough timing data to verify
+/// SC-005 (wall-clock stays near the slowest single install, not the sum).
+#[derive(Debug)]
+pub struct ProvisionOutcome {
+    pub result: Result<()>,
+    pub started_at: std::time::Instant,
+    pub elapsed: Duration,
+}
+
 /// Runs every requested ecosystem's installer concurrently and returns every
 /// outcome — success or failure — with no early return on first failure
 /// (FR-014). Genuinely independent work only; a step with a real ordering
 /// dependency on another does not belong here (FR-016).
-pub async fn provision(
+pub async fn provision(tasks: Vec<(Ecosystem, Box<dyn Installer>)>) -> HashMap<Ecosystem, Result<()>> {
+    provision_with_timing(tasks)
+        .await
+        .into_iter()
+        .map(|(ecosystem, outcome)| (ecosystem, outcome.result))
+        .collect()
+}
+
+/// Same as [`provision`], but keeps per-ecosystem start time and elapsed
+/// duration for `--verbose` reporting (spec.md User Story 5's acceptance
+/// scenario 1: concurrency must be verifiable via timestamps).
+pub async fn provision_with_timing(
     tasks: Vec<(Ecosystem, Box<dyn Installer>)>,
-) -> HashMap<Ecosystem, Result<()>> {
+) -> HashMap<Ecosystem, ProvisionOutcome> {
     let mut set = JoinSet::new();
+    let mut ecosystem_by_id = HashMap::new();
+    let overall_start = std::time::Instant::now();
+
     for (ecosystem, installer) in tasks {
-        set.spawn(async move { (ecosystem, installer.install().await) });
+        let started_at = std::time::Instant::now();
+        let handle = set.spawn(async move {
+            let result = installer.install().await;
+            (started_at, result)
+        });
+        ecosystem_by_id.insert(handle.id(), ecosystem);
     }
 
     let mut results = HashMap::new();
-    while let Some(joined) = set.join_next().await {
+    while let Some(joined) = set.join_next_with_id().await {
         match joined {
-            Ok((ecosystem, result)) => {
-                results.insert(ecosystem, result);
+            Ok((id, (started_at, result))) => {
+                let ecosystem = ecosystem_by_id[&id];
+                results.insert(
+                    ecosystem,
+                    ProvisionOutcome { result, started_at, elapsed: started_at.elapsed() },
+                );
             }
             Err(join_err) => {
                 // A panicking task must still surface as a reported failure,
-                // never silently vanish from the aggregate (FR-014).
-                results.insert(Ecosystem::Rust, Err(anyhow::anyhow!(join_err)));
+                // never silently vanish from the aggregate (FR-014) — and it
+                // must be attributed to the ecosystem that actually panicked,
+                // not a hardcoded placeholder.
+                let ecosystem = ecosystem_by_id[&join_err.id()];
+                results.insert(
+                    ecosystem,
+                    ProvisionOutcome {
+                        result: Err(anyhow::anyhow!(join_err)),
+                        started_at: overall_start,
+                        elapsed: overall_start.elapsed(),
+                    },
+                );
             }
         }
     }
     results
+}
+
+async fn run_command(program: &str, args: &[&str]) -> Result<()> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .await
+        .with_context(|| format!("failed to spawn `{program}` — is it installed and on PATH?"))?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "`{program} {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// Real, idempotent installer for the Rust toolchain via `rustup`. A no-op
+/// (fast, successful) if the toolchain is already installed.
+pub async fn install_rust() -> Result<()> {
+    run_command("rustup", &["toolchain", "install", "stable", "--no-self-update"]).await
+}
+
+/// Real, idempotent installer for the Node/pnpm toolchain via `corepack`
+/// (ported intent of `setupNode`: ensure pnpm is present and activated, not
+/// reinstall Node itself — see this crate's module doc on scope).
+pub async fn install_node() -> Result<()> {
+    run_command("corepack", &["enable"]).await?;
+    run_command("corepack", &["prepare", "pnpm@latest", "--activate"]).await
+}
+
+/// Real, idempotent installer for a Python toolchain via `uv`.
+pub async fn install_python() -> Result<()> {
+    run_command("uv", &["python", "install"]).await
+}
+
+/// Builds a real installer closure for `ecosystem`, matching it to the
+/// concrete `install_*` function above.
+pub fn real_installer(ecosystem: Ecosystem) -> Box<dyn Installer> {
+    match ecosystem {
+        Ecosystem::Rust => Box::new(install_rust),
+        Ecosystem::Node => Box::new(install_node),
+        Ecosystem::Python => Box::new(install_python),
+    }
 }
 
 #[cfg(test)]
@@ -106,6 +219,27 @@ mod tests {
         assert!(results.values().all(|r| r.is_ok()));
     }
 
+    fn panicky() -> Box<dyn Installer> {
+        Box::new(|| async move {
+            panic!("installer panicked");
+            #[allow(unreachable_code)]
+            Ok(())
+        })
+    }
+
+    #[tokio::test]
+    async fn panicking_installer_is_attributed_to_its_own_ecosystem_not_hardcoded_rust() {
+        let tasks: Vec<(Ecosystem, Box<dyn Installer>)> =
+            vec![(Ecosystem::Rust, sleepy_ok(10)), (Ecosystem::Node, panicky()), (Ecosystem::Python, sleepy_ok(10))];
+
+        let results = provision(tasks).await;
+
+        assert_eq!(results.len(), 3);
+        assert!(results[&Ecosystem::Rust].is_ok());
+        assert!(results[&Ecosystem::Node].is_err(), "the panicking task's ecosystem must show the failure");
+        assert!(results[&Ecosystem::Python].is_ok(), "a sibling task's outcome must not be overwritten by another's panic");
+    }
+
     #[tokio::test]
     async fn one_failure_does_not_hide_other_outcomes() {
         let tasks: Vec<(Ecosystem, Box<dyn Installer>)> = vec![
@@ -120,5 +254,35 @@ mod tests {
         assert!(results[&Ecosystem::Rust].is_ok());
         assert!(results[&Ecosystem::Node].is_err());
         assert!(results[&Ecosystem::Python].is_ok());
+    }
+
+    fn tool_on_path(bin: &str) -> bool {
+        std::process::Command::new(bin).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn real_installers_provision_concurrently_when_their_tools_are_present() {
+        let mut tasks: Vec<(Ecosystem, Box<dyn Installer>)> = Vec::new();
+        if tool_on_path("rustup") {
+            tasks.push((Ecosystem::Rust, real_installer(Ecosystem::Rust)));
+        }
+        if tool_on_path("corepack") {
+            tasks.push((Ecosystem::Node, real_installer(Ecosystem::Node)));
+        }
+        if tool_on_path("uv") {
+            tasks.push((Ecosystem::Python, real_installer(Ecosystem::Python)));
+        }
+        if tasks.is_empty() {
+            eprintln!("skipping: none of rustup/corepack/uv are on PATH");
+            return;
+        }
+
+        let requested: Vec<Ecosystem> = tasks.iter().map(|(e, _)| *e).collect();
+        let results = provision(tasks).await;
+
+        for ecosystem in requested {
+            let result = &results[&ecosystem];
+            assert!(result.is_ok(), "real installer for {:?} failed: {:?}", ecosystem, result);
+        }
     }
 }

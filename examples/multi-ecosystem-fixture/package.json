@@ -1,0 +1,10 @@
+{
+  "name": "multi-ecosystem-fixture",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "node --check index.js",
+    "test": "node index.test.js"
+  }
+}
