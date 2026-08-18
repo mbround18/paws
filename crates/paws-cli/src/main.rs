@@ -130,7 +130,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build and test a language target (node, rust, docker, ...).
+    /// Build and test a language target (node, rust, tauri, ...).
     Ci {
         #[arg(long)]
         toolchain: Option<String>,
@@ -262,12 +262,20 @@ async fn main() -> anyhow::Result<()> {
 
             paws_dagger::ensure_available().await?;
             match toolchain.as_deref() {
-                Some("node") => {
+                Some("node") | Some("tauri") => {
                     let dir = std::env::current_dir()?;
+                    let is_tauri = paws_tauri::is_tauri_project(&dir);
+                    if toolchain.as_deref() == Some("tauri") && !is_tauri {
+                        anyhow::bail!(
+                            "--toolchain tauri given, but no src-tauri/tauri.conf.json found in {}",
+                            dir.display()
+                        );
+                    }
+
                     let project = paws_node::detect_project(&dir)
                         .context("failed to detect a Node project in the current directory")?;
                     let missing = project.missing_required_scripts();
-                    if !missing.is_empty() {
+                    if !is_tauri && !missing.is_empty() {
                         anyhow::bail!(
                             "package.json is missing required script(s): {} (found package manager: {}, framework: {})",
                             missing.join(", "),
@@ -275,17 +283,35 @@ async fn main() -> anyhow::Result<()> {
                             project.framework.as_str()
                         );
                     }
-                    println!(
-                        "ci: {} project using {} ({})",
-                        project.framework.as_str(),
-                        project.package_manager.as_str(),
-                        dir.display()
-                    );
 
-                    let args = paws_node::dagger_pipeline_args(&project, &dir.to_string_lossy());
-                    let output = paws_dagger::core(&args).await?;
-                    print!("{output}");
-                    println!("ci: node build/test succeeded");
+                    if is_tauri {
+                        println!(
+                            "ci: tauri project using {} ({})",
+                            project.package_manager.as_str(),
+                            dir.display()
+                        );
+                        let builder_dir = paws_tauri::write_builder_dockerfile()
+                            .context("failed to materialize the tauri-linux builder Dockerfile")?;
+                        let args = paws_tauri::dagger_pipeline_args(
+                            &project,
+                            &dir.to_string_lossy(),
+                            &builder_dir.to_string_lossy(),
+                        );
+                        let output = paws_dagger::core(&args).await?;
+                        print!("{output}");
+                        println!("ci: tauri build succeeded");
+                    } else {
+                        println!(
+                            "ci: {} project using {} ({})",
+                            project.framework.as_str(),
+                            project.package_manager.as_str(),
+                            dir.display()
+                        );
+                        let args = paws_node::dagger_pipeline_args(&project, &dir.to_string_lossy());
+                        let output = paws_dagger::core(&args).await?;
+                        print!("{output}");
+                        println!("ci: node build/test succeeded");
+                    }
                 }
                 Some("rust") => {
                     let source = std::env::current_dir()?.to_string_lossy().to_string();
@@ -295,7 +321,7 @@ async fn main() -> anyhow::Result<()> {
                         anyhow::bail!("ci failed: see report above");
                     }
                 }
-                Some(other) => anyhow::bail!("unsupported --toolchain '{other}'; expected 'node' or 'rust'"),
+                Some(other) => anyhow::bail!("unsupported --toolchain '{other}'; expected 'node', 'rust', or 'tauri'"),
                 None => anyhow::bail!("--toolchain is required (e.g. --toolchain node)"),
             }
         }

@@ -607,6 +607,7 @@ dependencies = [
  "paws-provision",
  "paws-release",
  "paws-semver",
+ "paws-tauri",
  "serde_json",
  "tokio",
 ]
@@ -683,6 +684,14 @@ dependencies = [
  "semver",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "paws-tauri"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "paws-node",
 ]
 
 [[package]]

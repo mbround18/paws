@@ -18,6 +18,7 @@ paws-node = { path = "../paws-node" }
 paws-provision = { path = "../paws-provision" }
 paws-release = { path = "../paws-release" }
 paws-semver = { path = "../paws-semver" }
+paws-tauri = { path = "../paws-tauri" }
 clap.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
