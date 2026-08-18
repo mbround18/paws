@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "presets": {
+    "gh-reusable": {
+      "version": "0.1.0",
+      "source": "local",
+      "manifest_hash": "sha256:78e54bb1d376f82ffded5485b1cc7c5dff6d78ddfb6ed041cfcffc0b9d58585d",
+      "enabled": true,
+      "priority": 10,
+      "registered_commands": {
+        "claude": [
+          "speckit.specify"
+        ]
+      },
+      "registered_skills": {
+        "claude": [
+          "speckit-specify"
+        ]
+      },
+      "installed_at": "2026-08-18T07:08:02.311757+00:00"
+    }
+  }
+}

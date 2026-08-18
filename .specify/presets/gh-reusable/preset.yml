@@ -1,0 +1,42 @@
+schema_version: "1.0"
+
+preset:
+  id: "gh-reusable"
+  name: "GH Reusable CI Standards"
+  version: "0.1.0"
+  description: "Spec Kit preset for Dagger-first reusable workflow contracts, runtime defaults governance, and security policy discipline."
+  author: "mbround18"
+  repository: "https://github.com/mbround18/gh-reusable"
+  license: "BSD-3-Clause"
+
+requires:
+  speckit_version: ">=0.6.0"
+
+provides:
+  templates:
+    - type: "template"
+      name: "spec-template"
+      file: "templates/spec-template.md"
+      description: "Pipeline-centric spec template with contract, security, and rollout sections."
+      strategy: "replace"
+    - type: "template"
+      name: "plan-template"
+      file: "templates/plan-template.md"
+      description: "Implementation plan template focused on workflow/module contract safety."
+      strategy: "replace"
+    - type: "template"
+      name: "tasks-template"
+      file: "templates/tasks-template.md"
+      description: "Task template that enforces tests/docs/governance updates."
+      strategy: "replace"
+    - type: "command"
+      name: "speckit.specify"
+      file: "commands/speckit.specify.md"
+      description: "Specify command tuned for reusable workflow and Dagger contract changes."
+      strategy: "replace"
+
+tags:
+  - "github-actions"
+  - "dagger"
+  - "ci"
+  - "governance"

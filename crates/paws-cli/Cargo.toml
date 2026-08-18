@@ -1,0 +1,17 @@
+[package]
+name = "paws-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "paws"
+path = "src/main.rs"
+
+[dependencies]
+paws-core = { path = "../paws-core" }
+paws-dagger = { path = "../paws-dagger" }
+paws-provision = { path = "../paws-provision" }
+clap.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
