@@ -16,9 +16,6 @@
 
 FROM debian:bookworm-slim AS osxcross-builder
 
-ARG BUILDER_VERSION=0.0.0
-ARG BUILDER_REVISION=unknown
-ARG BUILDER_CREATED=unknown
 # Pin the osxcross commit for reproducibility; bump deliberately, not on trust.
 ARG OSXCROSS_COMMIT=27d21e4977c9751d01199c7a226a6faf494c3dd9
 # Must be a tag at https://github.com/joseluisq/macosx-sdks/releases (11.0+
@@ -52,18 +49,7 @@ RUN cd /opt/osxcross && UNATTENDED=1 ./build.sh
 
 FROM rust:1-bookworm
 
-ARG BUILDER_VERSION=0.0.0
-ARG BUILDER_REVISION=unknown
-ARG BUILDER_CREATED=unknown
 ARG MACOS_SDK_VERSION=14.0
-
-LABEL org.opencontainers.image.title="paws-builder-macos" \
-      org.opencontainers.image.description="Rust cross-compilation builder for macOS targets (x86_64, aarch64) via osxcross" \
-      org.opencontainers.image.source="https://github.com/mbround18/paws" \
-      org.opencontainers.image.version="${BUILDER_VERSION}" \
-      org.opencontainers.image.revision="${BUILDER_REVISION}" \
-      org.opencontainers.image.created="${BUILDER_CREATED}" \
-      io.paws.targets="x86_64-apple-darwin,aarch64-apple-darwin"
 
 COPY --from=osxcross-builder /opt/osxcross/target /opt/osxcross/target
 
@@ -111,3 +97,23 @@ ENV CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER=x86_64-apple-darwin-clang \
     OSXCROSS_SDKROOT=/opt/osxcross/target/SDK/MacOSX${MACOS_SDK_VERSION}.sdk
 
 WORKDIR /src
+
+# Release-metadata ARGs/LABEL come last, deliberately: BUILDER_CREATED
+# changes on every single release, and BuildKit's cache invalidates every
+# layer *after* the one whose inputs changed — put this LABEL before the
+# COPY/apt-get/rustup/symlink layers above (this is the slowest builder to
+# rebuild, given the osxcross build in the first stage) and every release
+# would fully redo all of them from scratch, even though nothing about the
+# toolchain actually changed (verified directly against builders/linux-gnu,
+# the same pattern this Dockerfile follows).
+ARG BUILDER_VERSION=0.0.0
+ARG BUILDER_REVISION=unknown
+ARG BUILDER_CREATED=unknown
+
+LABEL org.opencontainers.image.title="paws-builder-macos" \
+      org.opencontainers.image.description="Rust cross-compilation builder for macOS targets (x86_64, aarch64) via osxcross" \
+      org.opencontainers.image.source="https://github.com/mbround18/paws" \
+      org.opencontainers.image.version="${BUILDER_VERSION}" \
+      org.opencontainers.image.revision="${BUILDER_REVISION}" \
+      org.opencontainers.image.created="${BUILDER_CREATED}" \
+      io.paws.targets="x86_64-apple-darwin,aarch64-apple-darwin"

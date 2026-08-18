@@ -22,23 +22,12 @@
 
 FROM rust:1-bookworm
 
-ARG BUILDER_VERSION=0.0.0
-ARG BUILDER_REVISION=unknown
-ARG BUILDER_CREATED=unknown
 ARG NODE_MAJOR=22
 ARG ANDROID_CMDLINE_TOOLS_VERSION=9862592
 ARG ANDROID_CMDLINE_TOOLS_SHA1=a787f0c35d3970f2ad634f7d91a2e7bc49e2c7f5
 ARG ANDROID_PLATFORM=android-34
 ARG ANDROID_BUILD_TOOLS_VERSION=34.0.0
 ARG ANDROID_NDK_VERSION=27.0.12077973
-
-LABEL org.opencontainers.image.title="paws-builder-tauri-android" \
-      org.opencontainers.image.description="JDK + Android SDK/NDK + Rust + Node builder for Tauri apps on Android" \
-      org.opencontainers.image.source="https://github.com/mbround18/paws" \
-      org.opencontainers.image.version="${BUILDER_VERSION}" \
-      org.opencontainers.image.revision="${BUILDER_REVISION}" \
-      org.opencontainers.image.created="${BUILDER_CREATED}" \
-      io.paws.targets="tauri-android"
 
 ENV ANDROID_HOME=/opt/android-sdk
 ENV ANDROID_SDK_ROOT=${ANDROID_HOME}
@@ -77,3 +66,23 @@ RUN rustup target add \
     x86_64-linux-android
 
 WORKDIR /src
+
+# Release-metadata ARGs/LABEL come last, deliberately: BUILDER_CREATED
+# changes on every single release, and BuildKit's cache invalidates every
+# layer *after* the one whose inputs changed — put this LABEL before the
+# apt-get/Android SDK/NDK/rustup layers above (by far the slowest steps
+# here, given the SDK/NDK download sizes) and every release would fully
+# re-download and reinstall the whole toolchain from scratch, even though
+# nothing about it actually changed (verified directly against
+# builders/linux-gnu, the same pattern this Dockerfile follows).
+ARG BUILDER_VERSION=0.0.0
+ARG BUILDER_REVISION=unknown
+ARG BUILDER_CREATED=unknown
+
+LABEL org.opencontainers.image.title="paws-builder-tauri-android" \
+      org.opencontainers.image.description="JDK + Android SDK/NDK + Rust + Node builder for Tauri apps on Android" \
+      org.opencontainers.image.source="https://github.com/mbround18/paws" \
+      org.opencontainers.image.version="${BUILDER_VERSION}" \
+      org.opencontainers.image.revision="${BUILDER_REVISION}" \
+      org.opencontainers.image.created="${BUILDER_CREATED}" \
+      io.paws.targets="tauri-android"

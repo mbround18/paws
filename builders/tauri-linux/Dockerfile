@@ -14,18 +14,7 @@
 
 FROM rust:1-bookworm
 
-ARG BUILDER_VERSION=0.0.0
-ARG BUILDER_REVISION=unknown
-ARG BUILDER_CREATED=unknown
 ARG NODE_MAJOR=22
-
-LABEL org.opencontainers.image.title="paws-builder-tauri-linux" \
-      org.opencontainers.image.description="Rust + Node builder for Tauri apps on Linux (deb/rpm/AppImage bundling)" \
-      org.opencontainers.image.source="https://github.com/mbround18/paws" \
-      org.opencontainers.image.version="${BUILDER_VERSION}" \
-      org.opencontainers.image.revision="${BUILDER_REVISION}" \
-      org.opencontainers.image.created="${BUILDER_CREATED}" \
-      io.paws.targets="tauri-linux"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -44,3 +33,22 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         xdg-utils
 
 WORKDIR /src
+
+# Release-metadata ARGs/LABEL come last, deliberately: BUILDER_CREATED
+# changes on every single release, and BuildKit's cache invalidates every
+# layer *after* the one whose inputs changed — put this LABEL before the
+# apt-get layer above (by far the slowest step here) and every release
+# would fully re-download and reinstall Node + the GTK/WebKit toolchain
+# from scratch, even though nothing about it actually changed (verified
+# directly against builders/linux-gnu, the same pattern this follows).
+ARG BUILDER_VERSION=0.0.0
+ARG BUILDER_REVISION=unknown
+ARG BUILDER_CREATED=unknown
+
+LABEL org.opencontainers.image.title="paws-builder-tauri-linux" \
+      org.opencontainers.image.description="Rust + Node builder for Tauri apps on Linux (deb/rpm/AppImage bundling)" \
+      org.opencontainers.image.source="https://github.com/mbround18/paws" \
+      org.opencontainers.image.version="${BUILDER_VERSION}" \
+      org.opencontainers.image.revision="${BUILDER_REVISION}" \
+      org.opencontainers.image.created="${BUILDER_CREATED}" \
+      io.paws.targets="tauri-linux"
