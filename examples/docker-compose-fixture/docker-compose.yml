@@ -1,0 +1,15 @@
+services:
+  sidecar:
+    build:
+      context: ./sidecar
+      dockerfile: Dockerfile
+    image: ghcr.io/example/sidecar:latest
+
+  app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        FOO: bar
+    image: ghcr.io/example/app:latest
