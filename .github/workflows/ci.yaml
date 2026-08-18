@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, main]
+    branches: [main]
   pull_request:
   # Lets release.yaml call this as a reusable workflow, so a release build
   # always goes through the same fmt/clippy/test/build gate as every push.
