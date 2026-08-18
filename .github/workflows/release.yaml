@@ -67,6 +67,16 @@ jobs:
       - name: Compute CREATED timestamp
         run: echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 
+      # compose.yml's cache_from/cache_to use BuildKit's registry cache
+      # exporter (type=registry) so build cache survives across separate
+      # workflow runs on GitHub's ephemeral runners, not just within one -
+      # the default `docker` buildx driver doesn't support that exporter
+      # (confirmed directly: a build against it silently exports nothing),
+      # only `docker-container` does, which this sets up as the active
+      # builder `docker compose build` below picks up automatically.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:

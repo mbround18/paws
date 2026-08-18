@@ -31,6 +31,18 @@ This also means these Dockerfiles are no longer required to exist on disk wherev
 runs — the images are `paws`'s own, centrally published by `paws`'s own release pipeline, not
 something every consuming repo needs to build itself.
 
+Each service in `compose.yml` also sets `cache_from`/`cache_to` (BuildKit's registry cache
+exporter, `type=registry,mode=max`, one `cache-<name>` tag per builder on GHCR) — this is what
+actually lets build cache survive *between* separate `release.yaml` runs on GitHub's ephemeral
+runners, not just within one. The `builders/*/Dockerfile` ARG/LABEL reorder above only protects
+Docker's local layer cache, which never persists across runners anyway; the registry cache is what
+makes that matter. Verified for real against a local test registry: a completely fresh `buildx`
+builder with no local cache at all still hit `CACHED` on every layer by importing it, even with
+`BUILDER_CREATED` changed between builds. Requires the `docker-container` buildx driver — the
+default `docker` driver doesn't support the registry cache exporter (confirmed directly: a build
+against it silently exports nothing) — which is why `release.yaml`'s `build-builders` job runs
+`docker/setup-buildx-action` before `docker compose build`.
+
 - `linux-gnu/` — `x86_64-unknown-linux-gnu` (native) + `aarch64-unknown-linux-gnu` (via
   `gcc-aarch64-linux-gnu`).
 - `linux-musl-x86_64/`, `linux-musl-aarch64/` — separate images (musl cross toolchains are
