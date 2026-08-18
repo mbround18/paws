@@ -31,3 +31,8 @@ populated via `--build-args` at build time from the release tag/commit being bui
 - `tauri-linux/` — Rust + Node (via NodeSource) + the GTK/WebKit libraries Tauri's Linux backend
   links against, per https://tauri.app/start/prerequisites/#linux. Used by `paws ci --toolchain
   tauri`, not `paws release`; see `crates/paws-tauri`.
+- `tauri-android/` — JDK 17 + Android SDK (platform-tools, a platform, build-tools) + NDK + Rust's
+  Android cross targets + Node, per https://tauri.app/start/prerequisites/#android. Used by `paws
+  ci --toolchain tauri-android`; see `crates/paws-tauri`. There's no `tauri-ios/` and none is
+  planned — iOS builds need real Xcode/`xcodebuild`, which Apple's license restricts to genuine
+  macOS; no container image can provide that the way this one provides the Android SDK/NDK.
