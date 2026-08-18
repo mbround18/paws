@@ -19,9 +19,85 @@ jobs:
   ci:
     uses: ./.github/workflows/ci.yaml
 
+  # Staged release: bootstrap the native `paws` binary exactly once here,
+  # publish it as an artifact, then build/push every ./builders/* Dockerfile
+  # (via compose.yml) to both GHCR and Docker Hub — before any target build
+  # starts, so every leg of the matrix below can find a prebuilt image
+  # already there (paws_dagger::remote_image_exists) instead of paying for
+  # its own layer build from scratch. This is also what removes the
+  # redundant `cargo build --release -p paws-cli` from every matrix leg:
+  # the bootstrap only ever needs to happen once per release, and GitHub's
+  # own artifact cache carries the result to each leg below instead.
+  #
+  # Deliberately plain `docker compose`/`docker push` for the builder
+  # images, not paws/dagger: this is release-infra tooling that runs once
+  # per release, not part of paws's own container-execution seam (ADR-0001
+  # is about paws's Rust code, not this workflow's build step).
+  build-builders:
+    name: bootstrap paws + build & push builder images
+    needs: ci
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.tag || github.ref_name }}
+      REVISION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry/build
+        uses: Swatinem/rust-cache@v2
+
+      # Bootstrap once: every later `paws release --target ...` leg needs
+      # a native `paws` binary to drive the actual cross-target build, but
+      # there's nothing target-specific about *this* build — building it
+      # here and handing it down via artifact upload means the matrix
+      # below never repeats this compile per leg.
+      - name: Bootstrap host paws binary
+        run: cargo build --release -p paws-cli
+
+      - name: Upload bootstrapped paws binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: paws-bootstrap
+          path: target/release/paws
+          retention-days: 1
+
+      - name: Compute CREATED timestamp
+        run: echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: mbround18
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Build builder images
+        run: docker compose build
+
+      - name: Push to GHCR
+        run: docker compose push
+
+      - name: Tag & push to Docker Hub
+        run: |
+          for name in $(docker compose config --services); do
+            ghcr_tag="ghcr.io/mbround18/paws-builders:${name}-${VERSION}"
+            dockerhub_tag="docker.io/mbround18/paws-builders:${name}-${VERSION}"
+            docker tag "$ghcr_tag" "$dockerhub_tag"
+            docker push "$dockerhub_tag"
+          done
+
   release:
     name: build & publish (${{ matrix.target }})
-    needs: ci
+    needs: [ci, build-builders]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -41,24 +117,23 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry/build
-        uses: Swatinem/rust-cache@v2
-
       - name: Install dagger CLI
         run: curl -fsSL https://dl.dagger.io/dagger/install.sh | BIN_DIR=/usr/local/bin sh
 
-      # Bootstrap: build `paws` for the runner's own (host) target, so the
-      # freshly-built binary can drive the actual release build below — the
-      # dogfooding step the release relies on. Everything past this point —
-      # cross-target build (via ./builders/*), the QEMU/Wine-backed smoke
-      # test, packaging — is `paws release` orchestrating Dagger; this job
-      # needs nothing beyond Rust + `dagger` (Docker is already on this
-      # runner, but `paws`/Dagger are the only things that ever talk to it).
-      - name: Bootstrap host paws binary
-        run: cargo build --release -p paws-cli
+      # Reuses build-builders' bootstrap instead of re-running `cargo build
+      # --release -p paws-cli` on every leg of this matrix — no Rust
+      # toolchain install needed in this job at all, since only the
+      # already-compiled binary is used from here on. Everything past this
+      # point — cross-target build (via ./builders/*), the QEMU/Wine-backed
+      # smoke test, packaging — is `paws release` orchestrating Dagger.
+      - name: Download bootstrapped paws binary
+        uses: actions/download-artifact@v4
+        with:
+          name: paws-bootstrap
+          path: target/release
+
+      - name: chmod +x the downloaded binary
+        run: chmod +x target/release/paws
 
       - name: paws release --target ${{ matrix.target }}
         env:

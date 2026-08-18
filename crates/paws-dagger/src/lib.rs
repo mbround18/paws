@@ -80,6 +80,21 @@ pub async fn install_cli() -> Result<std::path::PathBuf> {
     Ok(install_dir)
 }
 
+/// Whether `image` (e.g. `ghcr.io/mbround18/paws-builders/linux-gnu:v0.0.1`)
+/// can actually be pulled — used to decide between starting a `dagger core`
+/// pipeline from a prebuilt registry image (`container from --address=...`)
+/// versus building `./builders/<name>/Dockerfile` locally from scratch.
+/// Goes through `dagger core container from ... platform` (the sanctioned
+/// container-execution seam per ADR-0001) rather than a `docker manifest
+/// inspect`/registry-API probe, so this never becomes a second place that
+/// talks to a registry directly. `platform` (not `id`, which isn't a valid
+/// terminal call on `container from` — verified directly against a real
+/// `dagger` CLI, not assumed) is just the cheapest real scalar that forces
+/// Dagger to actually resolve the image.
+pub async fn remote_image_exists(image: &str) -> bool {
+    core(&["container".into(), "from".into(), format!("--address={image}"), "platform".into()]).await.is_ok()
+}
+
 pub async fn call(invocation: DaggerCall) -> Result<String> {
     let output = Command::new("dagger")
         .arg("call")

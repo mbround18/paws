@@ -14,6 +14,23 @@ Every builder image is labeled with standard OCI annotations (`org.opencontainer
 populated via `--build-args` at build time from the release tag/commit being built — see
 `paws_release::build_binary` in `crates/paws-release/src/lib.rs`.
 
+## Prebuilt images
+
+`../compose.yml` builds all of these and tags them `ghcr.io/mbround18/paws-builders:<name>-
+<version>` — a flat repo + tag, not one repo per builder, since Docker Hub doesn't support nested
+repository paths the way GHCR does. `.github/workflows/release.yaml`'s `build-builders` job pushes
+them to both GHCR and Docker Hub (same flat scheme on both) before the per-target build matrix
+starts, so `paws_release::build_binary` (via `paws_dagger::remote_image_exists` /
+`prebuilt_image_candidate`) can pull the matching tag instead of paying for the Dockerfile's own
+build from scratch on every release — this is what actually speeds CI up, `compose.yml` is just
+how the images get there. That same job also bootstraps the native `paws` binary once
+(`cargo build --release -p paws-cli`) and uploads it as a build artifact, so the per-target matrix
+below downloads it instead of repeating that compile on every leg — a staged release, not N
+independent ones. Falls back to the local `docker-build` path whenever a matching prebuilt tag
+isn't there (a fresh builder, an unreleased version, or running outside CI entirely) — building
+these images is never
+a hard requirement for `paws release` to work.
+
 - `linux-gnu/` — `x86_64-unknown-linux-gnu` (native) + `aarch64-unknown-linux-gnu` (via
   `gcc-aarch64-linux-gnu`).
 - `linux-musl-x86_64/`, `linux-musl-aarch64/` — separate images (musl cross toolchains are

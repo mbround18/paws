@@ -112,11 +112,33 @@ pub struct BuildRequest<'a> {
     pub builder_revision: &'a str,
 }
 
+/// The prebuilt registry image `compose.yml`/`release.yaml`'s
+/// `build-builders` job would have pushed for `builder_dir`/`version`, e.g.
+/// `builders/linux-gnu` + `v0.0.1-prerelease.1` ->
+/// `ghcr.io/mbround18/paws-builders:linux-gnu-v0.0.1-prerelease.1`. Flat
+/// repo + `<builder>-<version>` tag, not one repo per builder — Docker
+/// Hub doesn't support nested repository paths, so `compose.yml` uses the
+/// same flat scheme on both registries this candidate needs to match. Pure
+/// string construction, checked against the registry separately (see
+/// [`build_binary`]) — this function can't know whether the image actually
+/// exists.
+pub fn prebuilt_image_candidate(builder_dir: &str, version: &str) -> String {
+    let name = Path::new(builder_dir).file_name().and_then(|s| s.to_str()).unwrap_or(builder_dir);
+    format!("ghcr.io/mbround18/paws-builders:{name}-{version}")
+}
+
 /// Builds `./<builder_dir>/Dockerfile` (via `dagger core ... docker-build`,
 /// getting Dagger's own BuildKit layer caching for free — no separate cache
 /// setup needed), mounts `source_dir` into it, runs `cargo build --release
 /// --target <triple> -p <package>` inside it, and exports the resulting
 /// binary to `target/dagger-release/<triple>/<binary_name>`.
+///
+/// Tries [`prebuilt_image_candidate`] first (`container from --address=...`)
+/// via `paws_dagger::remote_image_exists` — when `release.yaml`'s
+/// `build-builders` job already pushed this exact builder+version, this
+/// skips paying for the Dockerfile's own build from scratch. Falls back to
+/// the local `docker-build` path whenever it isn't there (a fresh builder,
+/// a version nothing has pushed for yet, or running outside CI entirely).
 pub async fn build_binary(request: &BuildRequest<'_>) -> Result<PathBuf> {
     let file_name = binary_file_name(request.binary_name, request.triple);
     let container_bin_path = format!("target/{}/release/{}", request.triple, file_name);
@@ -131,12 +153,20 @@ pub async fn build_binary(request: &BuildRequest<'_>) -> Result<PathBuf> {
         request.builder_version, request.builder_revision
     );
 
-    let args: Vec<String> = vec![
-        "host".into(),
-        "directory".into(),
-        format!("--path={}", request.builder_dir),
-        "docker-build".into(),
-        format!("--build-args={build_args}"),
+    let prebuilt = prebuilt_image_candidate(request.builder_dir, request.builder_version);
+    let mut args: Vec<String> = if paws_dagger::remote_image_exists(&prebuilt).await {
+        vec!["container".into(), "from".into(), format!("--address={prebuilt}")]
+    } else {
+        vec![
+            "host".into(),
+            "directory".into(),
+            format!("--path={}", request.builder_dir),
+            "docker-build".into(),
+            format!("--build-args={build_args}"),
+        ]
+    };
+
+    args.extend([
         "with-mounted-directory".into(),
         "--path=/src".into(),
         format!("--source={}", request.source_dir),
@@ -148,7 +178,7 @@ pub async fn build_binary(request: &BuildRequest<'_>) -> Result<PathBuf> {
         format!("--path={container_bin_path}"),
         "export".into(),
         format!("--path={}", out_path.display()),
-    ];
+    ]);
 
     paws_dagger::core(&args).await.with_context(|| format!("dagger build failed for target {}", request.triple))?;
     Ok(out_path)
@@ -339,6 +369,18 @@ mod tests {
         assert_eq!(
             archive_name("paws", "0.0.1-prerelease.1", "x86_64-unknown-linux-gnu"),
             "paws-0.0.1-prerelease.1-x86_64-unknown-linux-gnu.zip"
+        );
+    }
+
+    #[test]
+    fn prebuilt_image_candidate_uses_the_builder_dir_basename() {
+        assert_eq!(
+            prebuilt_image_candidate("builders/linux-gnu", "v0.0.1-prerelease.1"),
+            "ghcr.io/mbround18/paws-builders:linux-gnu-v0.0.1-prerelease.1"
+        );
+        assert_eq!(
+            prebuilt_image_candidate("builders/macos", "v1.2.3"),
+            "ghcr.io/mbround18/paws-builders:macos-v1.2.3"
         );
     }
 

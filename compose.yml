@@ -1,0 +1,86 @@
+# Builds every ./builders/* Dockerfile and tags it for the registries the
+# release pipeline pushes prebuilt builder images to. `paws-release`'s own
+# build path never runs `docker compose` itself (see docs/adr/0001) — this
+# is release-infra tooling that runs in `.github/workflows/release.yaml`
+# before the per-target build matrix, so `paws-dagger::remote_image_exists`
+# can find a prebuilt image and skip rebuilding it from scratch. Local
+# `docker build`/`dagger core ... docker-build` against these same
+# Dockerfiles remains the fallback whenever a prebuilt tag isn't there
+# (a fresh builder, or a version this pipeline hasn't run for yet).
+#
+# Tag scheme is flat repo + "<builder>-<version>" tag
+# (mbround18/paws-builders:linux-gnu-v0.0.1), not one repo per builder —
+# Docker Hub doesn't support nested repository paths
+# (docker.io/<namespace>/<repo>/<subpath> isn't a thing there, only GHCR
+# allows that), so both registries need the same flat scheme for this to
+# actually push. GHCR is the primary `image:` tag here; the Docker Hub
+# push (same flat scheme) happens as a `docker tag`/`docker push` step in
+# release.yaml, since compose only carries one `image:` per service.
+#
+# VERSION/REVISION/CREATED are the same build-arg names paws-release passes
+# at build time; default to "dev" so `docker compose build` also works
+# untagged, for local iteration on a Dockerfile itself.
+
+services:
+  linux-gnu:
+    build:
+      context: ./builders/linux-gnu
+      args:
+        BUILDER_VERSION: ${VERSION:-dev}
+        BUILDER_REVISION: ${REVISION:-unknown}
+        BUILDER_CREATED: ${CREATED:-unknown}
+    image: ghcr.io/mbround18/paws-builders:linux-gnu-${VERSION:-dev}
+
+  linux-musl-x86_64:
+    build:
+      context: ./builders/linux-musl-x86_64
+      args:
+        BUILDER_VERSION: ${VERSION:-dev}
+        BUILDER_REVISION: ${REVISION:-unknown}
+        BUILDER_CREATED: ${CREATED:-unknown}
+    image: ghcr.io/mbround18/paws-builders:linux-musl-x86_64-${VERSION:-dev}
+
+  linux-musl-aarch64:
+    build:
+      context: ./builders/linux-musl-aarch64
+      args:
+        BUILDER_VERSION: ${VERSION:-dev}
+        BUILDER_REVISION: ${REVISION:-unknown}
+        BUILDER_CREATED: ${CREATED:-unknown}
+    image: ghcr.io/mbround18/paws-builders:linux-musl-aarch64-${VERSION:-dev}
+
+  windows-gnu:
+    build:
+      context: ./builders/windows-gnu
+      args:
+        BUILDER_VERSION: ${VERSION:-dev}
+        BUILDER_REVISION: ${REVISION:-unknown}
+        BUILDER_CREATED: ${CREATED:-unknown}
+    image: ghcr.io/mbround18/paws-builders:windows-gnu-${VERSION:-dev}
+
+  macos:
+    build:
+      context: ./builders/macos
+      args:
+        BUILDER_VERSION: ${VERSION:-dev}
+        BUILDER_REVISION: ${REVISION:-unknown}
+        BUILDER_CREATED: ${CREATED:-unknown}
+    image: ghcr.io/mbround18/paws-builders:macos-${VERSION:-dev}
+
+  tauri-linux:
+    build:
+      context: ./builders/tauri-linux
+      args:
+        BUILDER_VERSION: ${VERSION:-dev}
+        BUILDER_REVISION: ${REVISION:-unknown}
+        BUILDER_CREATED: ${CREATED:-unknown}
+    image: ghcr.io/mbround18/paws-builders:tauri-linux-${VERSION:-dev}
+
+  tauri-android:
+    build:
+      context: ./builders/tauri-android
+      args:
+        BUILDER_VERSION: ${VERSION:-dev}
+        BUILDER_REVISION: ${REVISION:-unknown}
+        BUILDER_CREATED: ${CREATED:-unknown}
+    image: ghcr.io/mbround18/paws-builders:tauri-android-${VERSION:-dev}
