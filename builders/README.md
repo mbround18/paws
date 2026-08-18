@@ -30,21 +30,27 @@ not N independent ones.
 `build-builders` itself is a matrix — one runner per builder, not all 7 on a single runner.
 Building them concurrently on one machine exhausted a real GitHub-hosted runner's disk ("no space
 left on device": every builder here is a full toolchain image — JDK+Android SDK/NDK, osxcross,
-GTK/WebKit — and `docker compose build`'s default behavior duplicates each one's storage once for
-BuildKit's own cache and again importing it into the local Docker daemon). Each matrix leg runs
-`docker compose build --push <builder>`, which pushes to both registries in the same build —
-`image:` is the GHCR ref, `compose.yml`'s `build.tags` adds the Docker Hub one — rather than a
-separate copy step, verified directly against a pair of local test registries.
+GTK/WebKit). Each matrix leg runs `docker buildx bake -f compose.yml --push <builder>` — `buildx
+bake` directly, not `docker compose build --push`. Two real, reproduced bugs led here:
+
+1. **Both registries under `image:` + `build.tags` split, not both under `build.tags`.** Looked
+   right at first (`docker compose build --push` pushed *a* manifest), but `docker buildx bake
+   --print` against the generated bake definition showed Compose's compose→bake translation
+   silently drops the top-level `image:` field whenever `build.tags` is also set — only the Docker
+   Hub ref (`build.tags`) ever actually got pushed; GHCR (`image:`) only ever received the
+   registry *cache*, never the image. Fixed by putting both refs under `build.tags` and dropping
+   `image:` entirely — verified directly: the bug reproduced with the split, and a single push
+   landed both refs once both were under `build.tags`.
+2. **`docker buildx bake` directly, not `docker compose build --push`.** On the runner's Docker
+   Compose version (v2.38.2) specifically, `docker compose build --push` silently loaded the built
+   image into the local Docker daemon instead of pushing it at all — no error, exit 0, only the
+   registry cache landed, not the image. Didn't reproduce locally against the same `compose.yml`.
+   Calling `buildx bake` directly (still reading this same `compose.yml` as its bake definition)
+   reliably took the correct push path instead.
 
 `build-builders` also re-verifies both pushes actually landed (`docker buildx imagetools
-inspect`), rather than trusting the build step's exit code alone: a real, reproduced bug had
-`docker compose build --push` (with only `image:` set, no `build.tags`) silently load the built
-image into the runner's local Docker daemon instead of pushing it — no error, exit 0, only the
-BuildKit registry *cache* actually landed in the registry. That exact failure didn't reproduce
-locally against the same `compose.yml` pattern (a Docker Compose version difference is the leading
-suspect — the runner ran v2.38.2), so this doesn't assume `build.tags` fully closes it; the
-verification step is what actually catches a repeat, loudly, instead of it surfacing later as a
-confusing "image not found" in `paws release`.
+inspect`) as a belt-and-suspenders check, given how quietly both bugs above failed — catching a
+repeat loudly instead of it surfacing later as a confusing "image not found" in `paws release`.
 
 This also means these Dockerfiles are no longer required to exist on disk wherever `paws release`
 runs — the images are `paws`'s own, centrally published by `paws`'s own release pipeline, not

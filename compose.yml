@@ -14,23 +14,35 @@
 # (docker.io/<namespace>/<repo>/<subpath> isn't a thing there, only GHCR
 # allows that), so both registries need the same flat scheme.
 #
-# Each service tags to GHCR *and* Docker Hub in the same build via
+# Each service tags to GHCR *and* Docker Hub in the same build, both under
 # `build.tags` (https://docs.docker.com/reference/compose-file/build/#tags)
-# — `image:` is the GHCR ref, `build.tags` adds the Docker Hub one — rather
-# than a separate `docker buildx imagetools create` copy step afterward.
-# Verified for real against a pair of local test registries: a single
-# `docker compose build --push` with both set pushed the same manifest to
-# both refs in one shot. This also sidesteps a real, reproduced bug: on
-# GitHub's runner (Docker Compose v2.38.2), `docker compose build --push`
-# with only `image:` set silently loaded the built image into the local
-# Docker daemon instead of pushing it at all (no "pushing manifest" line,
-# just "exporting to docker image format" / "importing to docker") — only
-# the BuildKit registry *cache* got pushed, not the image. That exact
-# failure didn't reproduce locally with the same compose.yml pattern, so
-# release.yaml's build-builders job also verifies the push landed
-# (`docker buildx imagetools inspect`) and fails loudly if it didn't,
-# rather than let it surface later as a confusing "not found" in
-# `paws release`.
+# — deliberately *not* split across a top-level `image:` plus `build.tags`.
+# That split was tried first and looked right (`docker compose build
+# --push` pushed *a* manifest successfully), but `docker buildx bake
+# --print` against the generated bake definition showed the real bug:
+# when both `image:` and `build.tags` are set, Compose's compose->bake
+# translation silently drops the top-level `image:` from the bake target's
+# `tags` entirely and keeps only `build.tags` — so only the Docker Hub ref
+# ever actually got pushed; GHCR only ever received the registry *cache*,
+# never the image itself. Verified directly, twice: once seeing the bug
+# (`image:` + `build.tags` -> only one registry populated) and once
+# confirming the fix (both refs under `build.tags`, nothing on `image:`
+# -> a single push landed the same manifest on both).
+#
+# release.yaml also runs this through `docker buildx bake -f compose.yml
+# --push <service>` rather than `docker compose build --push <service>` —
+# a separate, second real bug: on GitHub's runner (Docker Compose v2.38.2)
+# specifically, `docker compose build --push` silently loaded the built
+# image into the local Docker daemon instead of pushing it at all (no
+# "pushing manifest" line, just "exporting to docker image format" /
+# "importing to docker" — only the registry cache got pushed). That
+# didn't reproduce locally against the same compose.yml, so it's suspected
+# to be a compose-version-specific `--push` translation bug rather than
+# anything about this file; calling `buildx bake` directly (still reading
+# this same compose.yml) reliably produced the correct "exporting to
+# image" / "pushing manifest" push path instead. `build-builders` also
+# verifies each push actually landed (`docker buildx imagetools inspect`)
+# as a belt-and-suspenders check, given how quietly both of these failed.
 #
 # cache_from/cache_to use BuildKit's registry cache exporter
 # (type=registry), one shared "cache-<name>" tag per builder on GHCR only
@@ -51,11 +63,11 @@
 # default `docker` driver doesn't support the registry cache exporter,
 # confirmed directly (a `--cache-to type=registry` build fails silently
 # short of actually exporting anything under it). release.yaml sets one up
-# via docker/setup-buildx-action before running `docker compose build`.
+# via docker/setup-buildx-action before running `docker buildx bake`.
 #
 # VERSION/REVISION/CREATED are the same build-arg names paws-release passes
-# at build time; default to "dev" so `docker compose build` also works
-# untagged, for local iteration on a Dockerfile itself.
+# at build time; default to "dev" so `docker buildx bake`/`docker compose
+# build` also work untagged, for local iteration on a Dockerfile itself.
 
 services:
   linux-gnu:
@@ -70,8 +82,8 @@ services:
       cache_to:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-linux-gnu,mode=max
       tags:
+        - ghcr.io/mbround18/paws-builders:linux-gnu-${VERSION:-dev}
         - docker.io/mbround18/paws-builders:linux-gnu-${VERSION:-dev}
-    image: ghcr.io/mbround18/paws-builders:linux-gnu-${VERSION:-dev}
 
   linux-musl-x86_64:
     build:
@@ -85,8 +97,8 @@ services:
       cache_to:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-linux-musl-x86_64,mode=max
       tags:
+        - ghcr.io/mbround18/paws-builders:linux-musl-x86_64-${VERSION:-dev}
         - docker.io/mbround18/paws-builders:linux-musl-x86_64-${VERSION:-dev}
-    image: ghcr.io/mbround18/paws-builders:linux-musl-x86_64-${VERSION:-dev}
 
   linux-musl-aarch64:
     build:
@@ -100,8 +112,8 @@ services:
       cache_to:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-linux-musl-aarch64,mode=max
       tags:
+        - ghcr.io/mbround18/paws-builders:linux-musl-aarch64-${VERSION:-dev}
         - docker.io/mbround18/paws-builders:linux-musl-aarch64-${VERSION:-dev}
-    image: ghcr.io/mbround18/paws-builders:linux-musl-aarch64-${VERSION:-dev}
 
   windows-gnu:
     build:
@@ -115,8 +127,8 @@ services:
       cache_to:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-windows-gnu,mode=max
       tags:
+        - ghcr.io/mbround18/paws-builders:windows-gnu-${VERSION:-dev}
         - docker.io/mbround18/paws-builders:windows-gnu-${VERSION:-dev}
-    image: ghcr.io/mbround18/paws-builders:windows-gnu-${VERSION:-dev}
 
   macos:
     build:
@@ -130,8 +142,8 @@ services:
       cache_to:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-macos,mode=max
       tags:
+        - ghcr.io/mbround18/paws-builders:macos-${VERSION:-dev}
         - docker.io/mbround18/paws-builders:macos-${VERSION:-dev}
-    image: ghcr.io/mbround18/paws-builders:macos-${VERSION:-dev}
 
   tauri-linux:
     build:
@@ -145,8 +157,8 @@ services:
       cache_to:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-tauri-linux,mode=max
       tags:
+        - ghcr.io/mbround18/paws-builders:tauri-linux-${VERSION:-dev}
         - docker.io/mbround18/paws-builders:tauri-linux-${VERSION:-dev}
-    image: ghcr.io/mbround18/paws-builders:tauri-linux-${VERSION:-dev}
 
   tauri-android:
     build:
@@ -160,5 +172,5 @@ services:
       cache_to:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-tauri-android,mode=max
       tags:
+        - ghcr.io/mbround18/paws-builders:tauri-android-${VERSION:-dev}
         - docker.io/mbround18/paws-builders:tauri-android-${VERSION:-dev}
-    image: ghcr.io/mbround18/paws-builders:tauri-android-${VERSION:-dev}

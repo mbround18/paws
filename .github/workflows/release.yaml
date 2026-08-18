@@ -110,18 +110,23 @@ jobs:
           username: mbround18
           password: ${{ secrets.DOCKER_TOKEN }}
 
-      # compose.yml's build.tags pushes the Docker Hub ref in the same
-      # build as the primary (image:) GHCR ref — one push, both registries.
+      # `docker buildx bake` directly, not `docker compose build --push`:
+      # the latter, on this runner's Docker Compose version, silently
+      # loaded the built image into the local Docker daemon instead of
+      # pushing it (no error, exit 0, only the BuildKit registry *cache*
+      # actually landed) - reproduced twice, didn't reproduce locally
+      # against the same compose.yml, and calling buildx directly (still
+      # reading this same compose.yml as its bake definition) reliably
+      # took the correct push path instead. compose.yml's build.tags
+      # carries both the GHCR and Docker Hub refs for this target - see
+      # its header comment for why they're both under build.tags and not
+      # split across a top-level image: field (a second, separate bug).
       - name: Build & push ${{ matrix.builder }}
-        run: docker compose build --push ${{ matrix.builder }}
+        run: docker buildx bake -f compose.yml --push ${{ matrix.builder }}
 
-      # Safety net for a real, reproduced failure mode: `docker compose
-      # build --push` has been observed silently loading the image into
-      # the runner's local Docker daemon instead of pushing it (no error,
-      # exit 0, only the BuildKit registry *cache* actually landed) - not
-      # reproducible locally with the same compose.yml, so this doesn't
-      # trust the previous step's success alone. Fails loudly here instead
-      # of downstream as a confusing "image not found" in `paws release`.
+      # Belt-and-suspenders after two different silent-push bugs already
+      # slipped past a green build step: fails loudly here instead of
+      # downstream as a confusing "image not found" in `paws release`.
       - name: Verify ${{ matrix.builder }} actually landed in both registries
         run: |
           docker buildx imagetools inspect "ghcr.io/mbround18/paws-builders:${{ matrix.builder }}-${VERSION}" >/dev/null

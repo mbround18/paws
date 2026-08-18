@@ -101,14 +101,14 @@ parallel: `bootstrap` (builds a native `paws` binary once, uploaded as a build a
 `build-builders`, a **matrix over each builder name** (one runner per builder, not all 7 on a
 single runner — building them concurrently on one machine exhausted its disk) that builds
 `builders/<name>/Dockerfile` and pushes it to both GHCR (`GHCR_TOKEN`) and Docker Hub
-(`DOCKER_TOKEN`) in a single `docker compose build --push` against `../compose.yml` (`image:` is
-the GHCR ref, `build.tags` adds the Docker Hub one) — deliberately never loading a full image into
-the runner's local Docker daemon, which is what caused the disk exhaustion in the first place. It
-then re-verifies both pushes actually landed (`docker buildx imagetools inspect`), since `docker
-compose build --push` has been observed to silently load an image locally instead of pushing it
-(exit 0, no error, only the registry cache actually landed) without reproducing locally against
-the same compose file — a real gap the verification step exists to catch loudly instead of
-surfacing later as a confusing "image not found" in `paws release`. Only once both jobs succeed
+(`DOCKER_TOKEN`) via `docker buildx bake -f compose.yml --push`, both refs listed under
+`build.tags` in `compose.yml` (see its header comment for two real, reproduced bugs this exact
+shape works around — Compose's compose→bake translation silently drops a top-level `image:` field
+whenever `build.tags` is also set, and `docker compose build --push` itself silently loaded images
+locally instead of pushing on the runner's Compose version). It then re-verifies both pushes
+actually landed (`docker buildx imagetools inspect`) as a belt-and-suspenders check given how
+quietly both of those failed — instead of surfacing later as a confusing "image not found" in
+`paws release`. Only once both jobs succeed
 (`needs: [ci, bootstrap, build-builders]`) does the per-target matrix start: each leg downloads
 the bootstrapped binary and runs `paws release`, which *pulls* the matching prebuilt image
 (`prebuilt_image_candidate`/`remote_image_exists` in `crates/paws-release`/`crates/paws-dagger`)
