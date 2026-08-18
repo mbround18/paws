@@ -1,7 +1,8 @@
 # Development guide
 
 Architecture, crate layout, CI/release internals, and contributor-facing detail. For "what is
-`paws` and how do I use it," see the top-level [`README.md`](../README.md).
+`paws` and how do I use it," see the top-level [`README.md`](../README.md). For what language/
+stack support is planned versus already wired, see [`docs/ROADMAP.md`](ROADMAP.md).
 
 ## Origin
 

@@ -81,6 +81,12 @@ paws docker --image ghcr.io/you/app --version 1.0.0
 See [`specs/001-paws-core-cli/quickstart.md`](specs/001-paws-core-cli/quickstart.md) for a full,
 subcommand-by-subcommand walkthrough with real example output.
 
+## Language / stack support
+
+`paws ci` fully supports Rust and Node today. Python is provisionable but not yet wired for
+`paws ci`. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full target stack list (JVM, Go,
+.NET, mobile, Tauri, and more) and an honest read of what's actually built versus planned.
+
 ## Contributing / development
 
 Architecture, crate layout, CI internals, and the reasoning behind non-obvious decisions live in
