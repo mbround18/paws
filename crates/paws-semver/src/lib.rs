@@ -49,10 +49,7 @@ fn resolve_increment_from_branch(branch_name: &str) -> Option<Increment> {
         return Some(Increment::Minor);
     }
 
-    let tokens: Vec<&str> = lower
-        .split(['/', '-'])
-        .filter(|s| !s.is_empty())
-        .collect();
+    let tokens: Vec<&str> = lower.split(['/', '-']).filter(|s| !s.is_empty()).collect();
 
     const MAJOR_WORDS: &[&str] = &["major", "breaking"];
     const MINOR_WORDS: &[&str] = &["feat", "feature", "minor"];
@@ -72,7 +69,12 @@ fn resolve_increment_from_branch(branch_name: &str) -> Option<Increment> {
     None
 }
 
-fn has_configured_increment_label(labels: &[String], major: &str, minor: &str, patch: &str) -> bool {
+fn has_configured_increment_label(
+    labels: &[String],
+    major: &str,
+    minor: &str,
+    patch: &str,
+) -> bool {
     labels
         .iter()
         .any(|l| l == major || l == minor || l == patch)
@@ -82,7 +84,12 @@ fn has_configured_increment_label(labels: &[String], major: &str, minor: &str, p
 // branch that produces the same result as its final fallback; kept as two
 // arms for parity with the original rather than collapsed into one.
 #[allow(clippy::if_same_then_else)]
-fn resolve_increment_from_labels(labels: &[String], major: &str, minor: &str, patch: &str) -> Increment {
+fn resolve_increment_from_labels(
+    labels: &[String],
+    major: &str,
+    minor: &str,
+    patch: &str,
+) -> Increment {
     if labels.iter().any(|l| l == major) {
         Increment::Major
     } else if labels.iter().any(|l| l == minor) {
@@ -206,7 +213,10 @@ pub struct LastTag {
 /// Resolves the last tag and its prefix per `tag.js`'s `getLastTag`, minus the
 /// `GITHUB_REF`-is-a-tag short-circuit and `base` override, which are handled by
 /// the caller (see [`compute_new_version`]) before this is invoked.
-pub async fn resolve_last_tag(tag_source: &dyn TagSource, prefix: Option<String>) -> Result<LastTag> {
+pub async fn resolve_last_tag(
+    tag_source: &dyn TagSource,
+    prefix: Option<String>,
+) -> Result<LastTag> {
     let tags = tag_source.tags().await?;
 
     if tags.is_empty() {
@@ -342,19 +352,25 @@ impl SemverRequest {
 /// Computes the next version for `request`, matching `actions/semver`'s end-to-end
 /// behavior (FR-011's full resolved precedence): tag-ref passthrough first, then
 /// explicit/label/branch increment resolution, then version construction.
-pub async fn compute_new_version(tag_source: &dyn TagSource, request: &SemverRequest) -> Result<String> {
+pub async fn compute_new_version(
+    tag_source: &dyn TagSource,
+    request: &SemverRequest,
+) -> Result<String> {
     if let Some(ref_) = &request.github_ref
-        && let Some(tag_name) = ref_.strip_prefix("refs/tags/") {
-            let prefix = request.prefix.as_deref().unwrap_or("");
-            let version_part = tag_name.strip_prefix(prefix).unwrap_or(tag_name);
-            // node-semver (used by the original action) accepts an optional
-            // leading "v" regardless of the configured prefix; Rust's `semver`
-            // crate is strict, so fall back to stripping one before validating.
-            semver::Version::parse(version_part)
-                .or_else(|_| semver::Version::parse(version_part.strip_prefix('v').unwrap_or(version_part)))
-                .with_context(|| format!("tag \"{tag_name}\" is not a valid semantic version"))?;
-            return Ok(tag_name.to_string());
-        }
+        && let Some(tag_name) = ref_.strip_prefix("refs/tags/")
+    {
+        let prefix = request.prefix.as_deref().unwrap_or("");
+        let version_part = tag_name.strip_prefix(prefix).unwrap_or(tag_name);
+        // node-semver (used by the original action) accepts an optional
+        // leading "v" regardless of the configured prefix; Rust's `semver`
+        // crate is strict, so fall back to stripping one before validating.
+        semver::Version::parse(version_part)
+            .or_else(|_| {
+                semver::Version::parse(version_part.strip_prefix('v').unwrap_or(version_part))
+            })
+            .with_context(|| format!("tag \"{tag_name}\" is not a valid semantic version"))?;
+        return Ok(tag_name.to_string());
+    }
 
     let last_tag = if let Some(base) = &request.base {
         LastTag {
@@ -373,7 +389,13 @@ pub async fn compute_new_version(tag_source: &dyn TagSource, request: &SemverReq
         &request.patch_label,
     );
 
-    build_new_version(&last_tag.tag, &last_tag.prefix, increment, request.is_pr, &request.sha)
+    build_new_version(
+        &last_tag.tag,
+        &last_tag.prefix,
+        increment,
+        request.is_pr,
+        &request.sha,
+    )
 }
 
 #[cfg(test)]

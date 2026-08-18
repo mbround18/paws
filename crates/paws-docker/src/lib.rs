@@ -20,7 +20,12 @@ const DEFAULT_DOCKERFILE: &str = "./Dockerfile";
 const DEFAULT_CONTEXT: &str = ".";
 const DEFAULT_CANARY_LABEL: &str = "canary";
 
-const COMPOSE_PATHS: &[&str] = &["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"];
+const COMPOSE_PATHS: &[&str] = &[
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
+];
 
 /// Ported from `findDockerCompose`: workspace root first, then the resolved
 /// context directory if it differs from the workspace root.
@@ -103,7 +108,10 @@ fn parse_build_args(args: Option<ComposeBuildArgs>) -> Vec<(String, String)> {
             .map(|(k, v)| {
                 let value = match v {
                     serde_yaml::Value::String(s) => s,
-                    other => serde_yaml::to_string(&other).unwrap_or_default().trim().to_string(),
+                    other => serde_yaml::to_string(&other)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string(),
                 };
                 (k, value)
             })
@@ -150,8 +158,13 @@ pub fn parse_docker_compose(compose_path: &Path, image_name: &str) -> ComposeRes
 
     let prefix = format!("{image_name}:");
     for name in ordered_names {
-        let Some(service) = compose.services.get(&name) else { continue };
-        let matches = service.image.as_deref().is_some_and(|image| image.starts_with(&prefix));
+        let Some(service) = compose.services.get(&name) else {
+            continue;
+        };
+        let matches = service
+            .image
+            .as_deref()
+            .is_some_and(|image| image.starts_with(&prefix));
         if !matches {
             continue;
         }
@@ -162,7 +175,12 @@ pub fn parse_docker_compose(compose_path: &Path, image_name: &str) -> ComposeRes
                 context: Some(context.clone()),
                 ..Default::default()
             },
-            Some(ComposeBuildField::Record { dockerfile, context, target, args }) => ComposeResolution {
+            Some(ComposeBuildField::Record {
+                dockerfile,
+                context,
+                target,
+                args,
+            }) => ComposeResolution {
                 dockerfile: dockerfile.clone(),
                 context: context.clone(),
                 target: target.clone(),
@@ -225,7 +243,9 @@ pub fn should_push_image(
 }
 
 fn is_prerelease_version(version: &str) -> bool {
-    ["alpha", "beta", "rc", "dev"].iter().any(|marker| version.contains(marker))
+    ["alpha", "beta", "rc", "dev"]
+        .iter()
+        .any(|marker| version.contains(marker))
 }
 
 fn strip_registry(image: &str) -> String {
@@ -236,7 +256,12 @@ fn strip_registry(image: &str) -> String {
     let first = parts.next().unwrap_or_default();
     let rest = parts.next();
     match rest {
-        Some(rest) if first.contains('.') || first == "localhost" || first == "ghcr" || first == "docker" => {
+        Some(rest)
+            if first.contains('.')
+                || first == "localhost"
+                || first == "ghcr"
+                || first == "docker" =>
+        {
             rest.to_string()
         }
         _ => image.to_string(),
@@ -254,7 +279,11 @@ pub fn generate_tags(
     prepend_target: bool,
 ) -> Vec<String> {
     let registries: Vec<&String> = registries.iter().filter(|r| !r.is_empty()).collect();
-    let target_prefix = if prepend_target && !target.is_empty() { format!("{target}-") } else { String::new() };
+    let target_prefix = if prepend_target && !target.is_empty() {
+        format!("{target}-")
+    } else {
+        String::new()
+    };
 
     let version_tag = if version.starts_with('v') {
         format!("{target_prefix}{version}")
@@ -297,7 +326,11 @@ fn join_relative(base: &str, addition: &str) -> String {
         return base.to_string();
     }
     let base_part = base.trim_end_matches('/');
-    let base_part = if base_part == "." { "" } else { base_part.trim_start_matches("./") };
+    let base_part = if base_part == "." {
+        ""
+    } else {
+        base_part.trim_start_matches("./")
+    };
     let addition_part = addition.trim_start_matches("./");
 
     if base_part.is_empty() {
@@ -310,8 +343,14 @@ fn join_relative(base: &str, addition: &str) -> String {
 /// Ported from `resolveDockerParity`, tying compose discovery/resolution, push
 /// gating, and tag generation together (spec.md User Story 3).
 pub fn resolve_docker_facts(input: &DockerFactsInput, github: &GithubContext) -> DockerFacts {
-    let dockerfile_input = input.dockerfile.clone().unwrap_or_else(|| DEFAULT_DOCKERFILE.to_string());
-    let context_input = input.context.clone().unwrap_or_else(|| DEFAULT_CONTEXT.to_string());
+    let dockerfile_input = input
+        .dockerfile
+        .clone()
+        .unwrap_or_else(|| DEFAULT_DOCKERFILE.to_string());
+    let context_input = input
+        .context
+        .clone()
+        .unwrap_or_else(|| DEFAULT_CONTEXT.to_string());
 
     let mut context = context_input.clone();
     let mut dockerfile = dockerfile_input.clone();
@@ -336,9 +375,10 @@ pub fn resolve_docker_facts(input: &DockerFactsInput, github: &GithubContext) ->
         }
 
         if let Some(t) = &resolution.target
-            && target.is_empty() {
-                target = t.clone();
-            }
+            && target.is_empty()
+        {
+            target = t.clone();
+        }
         build_args = resolution.build_args;
     }
 
@@ -346,7 +386,10 @@ pub fn resolve_docker_facts(input: &DockerFactsInput, github: &GithubContext) ->
         &github.event_name,
         &github.git_ref,
         &github.default_branch,
-        input.canary_label.as_deref().unwrap_or(DEFAULT_CANARY_LABEL),
+        input
+            .canary_label
+            .as_deref()
+            .unwrap_or(DEFAULT_CANARY_LABEL),
         input.force_push,
         &github.pr_labels,
     );
@@ -361,7 +404,14 @@ pub fn resolve_docker_facts(input: &DockerFactsInput, github: &GithubContext) ->
         input.prepend_target,
     );
 
-    DockerFacts { context, dockerfile, target, push, tags, build_args }
+    DockerFacts {
+        context,
+        dockerfile,
+        target,
+        push,
+        tags,
+        build_args,
+    }
 }
 
 #[cfg(test)]
@@ -394,12 +444,16 @@ mod tests {
     #[test]
     fn compose_defined_build_resolves_matching_service() {
         let workspace = fixtures_dir().join("docker-compose-fixture");
-        let facts = resolve_docker_facts(&base_input("ghcr.io/example/app"), &base_github(workspace));
+        let facts =
+            resolve_docker_facts(&base_input("ghcr.io/example/app"), &base_github(workspace));
 
         assert_eq!(facts.context, "./app");
         assert_eq!(facts.dockerfile, "./app/Dockerfile");
         assert_eq!(facts.target, "runtime");
-        assert_eq!(facts.build_args, vec![("FOO".to_string(), "bar".to_string())]);
+        assert_eq!(
+            facts.build_args,
+            vec![("FOO".to_string(), "bar".to_string())]
+        );
     }
 
     #[test]
@@ -418,7 +472,10 @@ mod tests {
     #[test]
     fn no_compose_file_falls_back_to_plain_dockerfile_and_dot_context() {
         let workspace = fixtures_dir().join("docker-fixture");
-        let facts = resolve_docker_facts(&base_input("ghcr.io/example/plain"), &base_github(workspace));
+        let facts = resolve_docker_facts(
+            &base_input("ghcr.io/example/plain"),
+            &base_github(workspace),
+        );
 
         assert_eq!(facts.context, ".");
         assert_eq!(facts.dockerfile, "./Dockerfile");
@@ -486,7 +543,15 @@ mod tests {
 
     #[test]
     fn prerelease_versions_never_get_a_latest_tag() {
-        let tags = generate_tags("app", "1.2.3-rc.1", &[], true, "refs/tags/v1.2.3-rc.1", "", false);
+        let tags = generate_tags(
+            "app",
+            "1.2.3-rc.1",
+            &[],
+            true,
+            "refs/tags/v1.2.3-rc.1",
+            "",
+            false,
+        );
         assert_eq!(tags, vec!["app:v1.2.3-rc.1".to_string()]);
     }
 }

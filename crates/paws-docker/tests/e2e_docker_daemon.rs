@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use paws_docker::{resolve_docker_facts, DockerFactsInput, GithubContext};
+use paws_docker::{DockerFactsInput, GithubContext, resolve_docker_facts};
 
 fn docker_available() -> bool {
     Command::new("docker")
@@ -38,8 +38,18 @@ fn no_compose_fixture_builds_with_real_docker() {
 
     let workspace = examples_dir().join("docker-fixture");
     let facts = resolve_docker_facts(
-        &DockerFactsInput { image: "paws-e2e-docker-fixture".to_string(), version: "0.0.1".to_string(), ..Default::default() },
-        &GithubContext { workspace: workspace.clone(), event_name: "push".to_string(), git_ref: "refs/heads/main".to_string(), default_branch: "main".to_string(), pr_labels: vec![] },
+        &DockerFactsInput {
+            image: "paws-e2e-docker-fixture".to_string(),
+            version: "0.0.1".to_string(),
+            ..Default::default()
+        },
+        &GithubContext {
+            workspace: workspace.clone(),
+            event_name: "push".to_string(),
+            git_ref: "refs/heads/main".to_string(),
+            default_branch: "main".to_string(),
+            pr_labels: vec![],
+        },
     );
 
     let status = Command::new("docker")
@@ -52,9 +62,14 @@ fn no_compose_fixture_builds_with_real_docker() {
         .status()
         .expect("failed to spawn docker build");
 
-    assert!(status.success(), "docker build failed for the no-compose fixture");
+    assert!(
+        status.success(),
+        "docker build failed for the no-compose fixture"
+    );
 
-    let _ = Command::new("docker").args(["rmi", "-f", "paws-e2e-docker-fixture:test"]).status();
+    let _ = Command::new("docker")
+        .args(["rmi", "-f", "paws-e2e-docker-fixture:test"])
+        .status();
 }
 
 #[test]
@@ -66,8 +81,18 @@ fn compose_fixture_resolved_service_builds_with_real_docker() {
 
     let workspace = examples_dir().join("docker-compose-fixture");
     let facts = resolve_docker_facts(
-        &DockerFactsInput { image: "ghcr.io/example/app".to_string(), version: "0.0.1".to_string(), ..Default::default() },
-        &GithubContext { workspace: workspace.clone(), event_name: "push".to_string(), git_ref: "refs/heads/main".to_string(), default_branch: "main".to_string(), pr_labels: vec![] },
+        &DockerFactsInput {
+            image: "ghcr.io/example/app".to_string(),
+            version: "0.0.1".to_string(),
+            ..Default::default()
+        },
+        &GithubContext {
+            workspace: workspace.clone(),
+            event_name: "push".to_string(),
+            git_ref: "refs/heads/main".to_string(),
+            default_branch: "main".to_string(),
+            pr_labels: vec![],
+        },
     );
 
     assert_eq!(facts.target, "runtime");
@@ -86,9 +111,14 @@ fn compose_fixture_resolved_service_builds_with_real_docker() {
     cmd.arg(workspace.join(facts.context.trim_start_matches("./")));
 
     let status = cmd.status().expect("failed to spawn docker build");
-    assert!(status.success(), "docker build failed for the compose-resolved fixture");
+    assert!(
+        status.success(),
+        "docker build failed for the compose-resolved fixture"
+    );
 
-    let _ = Command::new("docker").args(["rmi", "-f", "paws-e2e-compose-fixture:test"]).status();
+    let _ = Command::new("docker")
+        .args(["rmi", "-f", "paws-e2e-compose-fixture:test"])
+        .status();
 }
 
 #[test]
@@ -108,14 +138,28 @@ fn buildkit_only_fixture_fails_on_legacy_builder_and_succeeds_via_buildx() {
         .arg(&fixture)
         .status()
         .expect("failed to spawn legacy docker build");
-    assert!(!legacy.success(), "buildkit-only fixture must NOT build on the legacy builder");
+    assert!(
+        !legacy.success(),
+        "buildkit-only fixture must NOT build on the legacy builder"
+    );
 
     let buildkit = Command::new("docker")
-        .args(["buildx", "build", "--load", "-t", "paws-e2e-buildkit-fixture:test"])
+        .args([
+            "buildx",
+            "build",
+            "--load",
+            "-t",
+            "paws-e2e-buildkit-fixture:test",
+        ])
         .arg(&fixture)
         .status()
         .expect("failed to spawn buildx build");
-    assert!(buildkit.success(), "buildkit-only fixture must build via `docker buildx build`");
+    assert!(
+        buildkit.success(),
+        "buildkit-only fixture must build via `docker buildx build`"
+    );
 
-    let _ = Command::new("docker").args(["rmi", "-f", "paws-e2e-buildkit-fixture:test"]).status();
+    let _ = Command::new("docker")
+        .args(["rmi", "-f", "paws-e2e-buildkit-fixture:test"])
+        .status();
 }

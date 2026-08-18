@@ -49,9 +49,12 @@ pub async fn ensure_available() -> Result<()> {
 /// is also appended there so a later step's `dagger` calls resolve without
 /// the caller having to touch `PATH` itself.
 pub async fn install_cli() -> Result<std::path::PathBuf> {
-    let home = std::env::var("HOME").context("HOME is not set - can't determine an install directory")?;
+    let home =
+        std::env::var("HOME").context("HOME is not set - can't determine an install directory")?;
     let install_dir = std::path::PathBuf::from(home).join(".local").join("bin");
-    tokio::fs::create_dir_all(&install_dir).await.context("failed to create the dagger install directory")?;
+    tokio::fs::create_dir_all(&install_dir)
+        .await
+        .context("failed to create the dagger install directory")?;
 
     let output = Command::new("sh")
         .arg("-c")
@@ -62,7 +65,10 @@ pub async fn install_cli() -> Result<std::path::PathBuf> {
         .context("failed to run the dagger install script")?;
 
     if !output.status.success() {
-        anyhow::bail!("dagger install script failed: {}", String::from_utf8_lossy(&output.stderr));
+        anyhow::bail!(
+            "dagger install script failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     if let Ok(github_path) = std::env::var("GITHUB_PATH") {
@@ -92,7 +98,14 @@ pub async fn install_cli() -> Result<std::path::PathBuf> {
 /// `dagger` CLI, not assumed) is just the cheapest real scalar that forces
 /// Dagger to actually resolve the image.
 pub async fn remote_image_exists(image: &str) -> bool {
-    core(&["container".into(), "from".into(), format!("--address={image}"), "platform".into()]).await.is_ok()
+    core(&[
+        "container".into(),
+        "from".into(),
+        format!("--address={image}"),
+        "platform".into(),
+    ])
+    .await
+    .is_ok()
 }
 
 pub async fn call(invocation: DaggerCall) -> Result<String> {
@@ -133,7 +146,11 @@ pub async fn core(args: &[String]) -> Result<String> {
         .context("failed to spawn `dagger` CLI - is it installed and on PATH?")?;
 
     if !output.status.success() {
-        anyhow::bail!("dagger core {}: failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr));
+        anyhow::bail!(
+            "dagger core {}: failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     Ok(String::from_utf8(output.stdout)?)

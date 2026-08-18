@@ -200,7 +200,10 @@ fn detect_with_signals(
 
     let confidence = if has_high_signal {
         DetectionConfidence::High
-    } else if present.iter().any(|(_, c)| *c == DetectionConfidence::Medium) {
+    } else if present
+        .iter()
+        .any(|(_, c)| *c == DetectionConfidence::Medium)
+    {
         DetectionConfidence::Medium
     } else {
         DetectionConfidence::Low
@@ -209,7 +212,10 @@ fn detect_with_signals(
     DetectedFamily {
         family,
         confidence,
-        signals: present.into_iter().map(|(name, _)| name.to_string()).collect(),
+        signals: present
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect(),
     }
 }
 
@@ -247,7 +253,10 @@ fn detect_family(signals: &RepositorySignals, family: LanguageFamily) -> Detecte
                 ("requirements.txt", Medium),
                 ("setup.py", Low),
             ],
-            &[&["pyproject.toml", "uv.lock"], &["pyproject.toml", "poetry.lock"]],
+            &[
+                &["pyproject.toml", "uv.lock"],
+                &["pyproject.toml", "poetry.lock"],
+            ],
         ),
         LanguageFamily::Go => detect_with_signals(
             family,
@@ -333,7 +342,10 @@ const AUDIT_SCANNER_REGISTRY: &[(ScannerName, &[LanguageFamily], &str, &str)] = 
 ];
 
 /// Ported from `selectAuditScanners`.
-pub fn select_audit_scanners(detection: &DetectionResult, include_gitleaks: bool) -> Vec<ScannerConfig> {
+pub fn select_audit_scanners(
+    detection: &DetectionResult,
+    include_gitleaks: bool,
+) -> Vec<ScannerConfig> {
     let detected_families: std::collections::HashSet<LanguageFamily> =
         detection.families.iter().map(|f| f.family).collect();
 
@@ -341,7 +353,9 @@ pub fn select_audit_scanners(detection: &DetectionResult, include_gitleaks: bool
         .iter()
         .map(|(name, applies_to, step_name, image)| {
             let should_run = (*name != ScannerName::Gitleaks || include_gitleaks)
-                && applies_to.iter().any(|family| detected_families.contains(family));
+                && applies_to
+                    .iter()
+                    .any(|family| detected_families.contains(family));
             ScannerConfig {
                 name: *name,
                 family: ScannerFamily::CrossLanguage,
@@ -451,7 +465,10 @@ fn derive_overall_status(scanners: &[AuditScannerResult]) -> AuditOverallStatus 
     if scanners.is_empty() {
         return AuditOverallStatus::Failed;
     }
-    let failed = scanners.iter().filter(|s| s.status == ScannerStatus::Failed).count();
+    let failed = scanners
+        .iter()
+        .filter(|s| s.status == ScannerStatus::Failed)
+        .count();
     let has_findings = scanners.iter().any(|s| s.status == ScannerStatus::Findings);
     if failed == scanners.len() {
         AuditOverallStatus::Failed
@@ -471,7 +488,10 @@ pub fn aggregate_audit_results(
     detection: &DetectionResult,
 ) -> AuditSummary {
     let scanners = sort_scanner_results(scanner_results);
-    let runnable: Vec<&AuditScannerResult> = scanners.iter().filter(|s| s.status != ScannerStatus::Skipped).collect();
+    let runnable: Vec<&AuditScannerResult> = scanners
+        .iter()
+        .filter(|s| s.status != ScannerStatus::Skipped)
+        .collect();
 
     let total_findings: usize = runnable
         .iter()
@@ -479,7 +499,10 @@ pub fn aggregate_audit_results(
         .map(|s| s.findings_count)
         .sum();
 
-    let mut top_findings: Vec<TopFinding> = runnable.iter().flat_map(|s| s.top_findings.clone()).collect();
+    let mut top_findings: Vec<TopFinding> = runnable
+        .iter()
+        .flat_map(|s| s.top_findings.clone())
+        .collect();
     top_findings.sort_by(compare_top_findings);
     top_findings.truncate(10);
 
@@ -487,7 +510,11 @@ pub fn aggregate_audit_results(
 
     AuditSummary {
         overall_status,
-        detected_families: detection.families.iter().map(|f| f.family.as_str().to_string()).collect(),
+        detected_families: detection
+            .families
+            .iter()
+            .map(|f| f.family.as_str().to_string())
+            .collect(),
         detection_confidence: derive_detection_confidence(detection),
         fallback_mode: detection.fallback_mode,
         scanners,
@@ -513,12 +540,20 @@ pub fn build_scan_findings(summary: &AuditSummary) -> HashMap<String, i64> {
     result.insert("total".to_string(), summary.total_findings as i64);
     result.insert(
         "detectedFamilyCount".to_string(),
-        summary.detected_families.iter().filter(|f| f.as_str() != "generic").count() as i64,
+        summary
+            .detected_families
+            .iter()
+            .filter(|f| f.as_str() != "generic")
+            .count() as i64,
     );
     result.insert("fallbackMode".to_string(), i64::from(summary.fallback_mode));
     result.insert(
         "scannerFailureCount".to_string(),
-        summary.scanners.iter().filter(|s| s.status == ScannerStatus::Failed).count() as i64,
+        summary
+            .scanners
+            .iter()
+            .filter(|s| s.status == ScannerStatus::Failed)
+            .count() as i64,
     );
     result
 }
@@ -538,7 +573,13 @@ pub fn render_audit_intelligence_section(summary: &AuditSummary) -> String {
     let families = summary
         .detected_families
         .iter()
-        .map(|f| if f == "generic" { "generic (baseline)".to_string() } else { f.clone() })
+        .map(|f| {
+            if f == "generic" {
+                "generic (baseline)".to_string()
+            } else {
+                f.clone()
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -559,7 +600,11 @@ pub fn render_audit_intelligence_section(summary: &AuditSummary) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let failed_count = summary.scanners.iter().filter(|s| s.status == ScannerStatus::Failed).count();
+    let failed_count = summary
+        .scanners
+        .iter()
+        .filter(|s| s.status == ScannerStatus::Failed)
+        .count();
 
     let mut lines = vec![
         "### Audit Intelligence".to_string(),
@@ -567,10 +612,17 @@ pub fn render_audit_intelligence_section(summary: &AuditSummary) -> String {
         "| Field | Value |".to_string(),
         "| --- | --- |".to_string(),
         format!("| Overall status | `{:?}` |", summary.overall_status),
-        format!("| Detection confidence | `{:?}` |", summary.detection_confidence),
+        format!(
+            "| Detection confidence | `{:?}` |",
+            summary.detection_confidence
+        ),
         format!(
             "| Detected families | {} |",
-            if families.is_empty() { "_(none)_".to_string() } else { format!("`{families}`") }
+            if families.is_empty() {
+                "_(none)_".to_string()
+            } else {
+                format!("`{families}`")
+            }
         ),
         format!("| Fallback mode | `{}` |", summary.fallback_mode),
         format!("| Scanner failures | `{failed_count}` |"),
@@ -615,7 +667,11 @@ pub fn render_audit_intelligence_section(summary: &AuditSummary) -> String {
         );
     }
 
-    lines.into_iter().filter(|l| !l.is_empty() || true).collect::<Vec<_>>().join("\n")
+    lines
+        .into_iter()
+        .filter(|l| !l.is_empty() || true)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn normalize_severity(value: Option<&str>) -> Severity {
@@ -629,8 +685,13 @@ fn normalize_severity(value: Option<&str>) -> Severity {
 }
 
 fn parse_semgrep_findings(raw_json: &str) -> (usize, Vec<TopFinding>) {
-    let parsed: serde_json::Value = serde_json::from_str(raw_json).unwrap_or(serde_json::Value::Null);
-    let results = parsed.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let parsed: serde_json::Value =
+        serde_json::from_str(raw_json).unwrap_or(serde_json::Value::Null);
+    let results = parsed
+        .get("results")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
 
     let mut top_findings: Vec<TopFinding> = results
         .iter()
@@ -647,7 +708,11 @@ fn parse_semgrep_findings(raw_json: &str) -> (usize, Vec<TopFinding>) {
                 rule: result
                     .get("check_id")
                     .and_then(|v| v.as_str())
-                    .or_else(|| extra.and_then(|e| e.get("check_id")).and_then(|v| v.as_str()))
+                    .or_else(|| {
+                        extra
+                            .and_then(|e| e.get("check_id"))
+                            .and_then(|v| v.as_str())
+                    })
                     .unwrap_or("semgrep-rule")
                     .to_string(),
                 severity: normalize_severity(
@@ -679,14 +744,17 @@ fn parse_semgrep_findings(raw_json: &str) -> (usize, Vec<TopFinding>) {
 }
 
 fn parse_gitleaks_findings(raw_json: &str) -> (usize, Vec<TopFinding>) {
-    let parsed: serde_json::Value = serde_json::from_str(raw_json).unwrap_or(serde_json::Value::Null);
+    let parsed: serde_json::Value =
+        serde_json::from_str(raw_json).unwrap_or(serde_json::Value::Null);
     let results = parsed.as_array().cloned().unwrap_or_default();
 
     let str_field = |v: &serde_json::Value, keys: &[&str]| -> Option<String> {
-        keys.iter().find_map(|k| v.get(k).and_then(|x| x.as_str()).map(String::from))
+        keys.iter()
+            .find_map(|k| v.get(k).and_then(|x| x.as_str()).map(String::from))
     };
     let num_field = |v: &serde_json::Value, keys: &[&str]| -> Option<u32> {
-        keys.iter().find_map(|k| v.get(k).and_then(|x| x.as_u64()).map(|n| n as u32))
+        keys.iter()
+            .find_map(|k| v.get(k).and_then(|x| x.as_u64()).map(|n| n as u32))
     };
 
     let mut top_findings: Vec<TopFinding> = results
@@ -694,14 +762,20 @@ fn parse_gitleaks_findings(raw_json: &str) -> (usize, Vec<TopFinding>) {
         .filter_map(|result| {
             let path = str_field(result, &["File", "file", "Path"])?;
             Some(TopFinding {
-                rule: str_field(result, &["RuleID", "ruleID", "rule_id"]).unwrap_or_else(|| "gitleaks-rule".to_string()),
+                rule: str_field(result, &["RuleID", "ruleID", "rule_id"])
+                    .unwrap_or_else(|| "gitleaks-rule".to_string()),
                 severity: normalize_severity(
-                    str_field(result, &["Severity", "severity"]).as_deref().or(Some("high")),
+                    str_field(result, &["Severity", "severity"])
+                        .as_deref()
+                        .or(Some("high")),
                 ),
                 path,
                 line: num_field(result, &["StartLine", "startLine", "Line", "line"]),
-                message: str_field(result, &["Description", "description", "Message", "message"])
-                    .unwrap_or_else(|| "Gitleaks finding".to_string()),
+                message: str_field(
+                    result,
+                    &["Description", "description", "Message", "message"],
+                )
+                .unwrap_or_else(|| "Gitleaks finding".to_string()),
                 scanner: "gitleaks".to_string(),
             })
         })
@@ -766,7 +840,8 @@ mod tests {
         let detection = detect_language_families(&signals(&["Cargo.toml", "Cargo.lock"]));
 
         let raw_semgrep = r#"{"results":[{"check_id":"rust.lang.security.foo","path":"src/lib.rs","start":{"line":10},"extra":{"severity":"ERROR","message":"do not do this"}}]}"#;
-        let (findings_count, top_findings) = parse_scanner_findings(ScannerName::Semgrep, raw_semgrep);
+        let (findings_count, top_findings) =
+            parse_scanner_findings(ScannerName::Semgrep, raw_semgrep);
 
         let scanner_result = AuditScannerResult {
             name: "semgrep".to_string(),
@@ -803,7 +878,10 @@ mod tests {
     fn gitleaks_skipped_when_not_requested() {
         let detection = detect_language_families(&signals(&["Cargo.toml"]));
         let scanners = select_audit_scanners(&detection, false);
-        let gitleaks = scanners.iter().find(|s| s.name == ScannerName::Gitleaks).unwrap();
+        let gitleaks = scanners
+            .iter()
+            .find(|s| s.name == ScannerName::Gitleaks)
+            .unwrap();
         assert!(!gitleaks.should_run);
     }
 }

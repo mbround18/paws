@@ -43,7 +43,10 @@ mod tests {
     async fn building_docs_produces_a_stable_output_path() {
         let docs_dir = build_docs(&repo_root()).await.unwrap();
         assert!(docs_dir.ends_with("target/doc"));
-        assert!(docs_dir.is_dir(), "expected {docs_dir:?} to exist after a successful build");
+        assert!(
+            docs_dir.is_dir(),
+            "expected {docs_dir:?} to exist after a successful build"
+        );
     }
 
     #[tokio::test]

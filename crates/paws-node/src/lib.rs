@@ -154,9 +154,12 @@ impl Framework {
     /// file names as a fallback signal.
     pub fn detect(package_json: &Value, dir: &Path) -> Self {
         let has_dep = |name: &str| -> bool {
-            ["dependencies", "devDependencies"]
-                .iter()
-                .any(|section| package_json.get(section).and_then(|d| d.get(name)).is_some())
+            ["dependencies", "devDependencies"].iter().any(|section| {
+                package_json
+                    .get(section)
+                    .and_then(|d| d.get(name))
+                    .is_some()
+            })
         };
 
         // Checked before Vite: a Next.js project commonly also depends on
@@ -185,8 +188,10 @@ impl Framework {
 }
 
 fn read_package_json(path: &Path) -> Result<Value> {
-    let raw = std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&raw).with_context(|| format!("failed to parse {} as JSON", path.display()))
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {} as JSON", path.display()))
 }
 
 /// A detected Node/JS project: package manager, framework, and which of the
@@ -225,10 +230,17 @@ pub fn detect_project(dir: &Path) -> Result<NodeProject> {
     let framework = Framework::detect(&package_json, dir);
 
     let has_script = |name: &str| -> bool {
-        package_json.get("scripts").and_then(|s| s.get(name)).and_then(|v| v.as_str()).is_some()
+        package_json
+            .get("scripts")
+            .and_then(|s| s.get(name))
+            .and_then(|v| v.as_str())
+            .is_some()
     };
 
-    let has_lockfile = package_manager.lockfile_names().iter().any(|name| dir.join(name).is_file());
+    let has_lockfile = package_manager
+        .lockfile_names()
+        .iter()
+        .any(|name| dir.join(name).is_file());
 
     Ok(NodeProject {
         package_manager,
@@ -265,7 +277,12 @@ pub fn dagger_pipeline_args(project: &NodeProject, source_dir: &str) -> Vec<Stri
     if let Some(setup) = pm.setup_args() {
         push_exec(setup.iter().map(|s| s.to_string()).collect());
     }
-    push_exec(pm.install_args(project.has_lockfile).iter().map(|s| s.to_string()).collect());
+    push_exec(
+        pm.install_args(project.has_lockfile)
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    );
     push_exec(pm.run_script_args("build"));
     push_exec(pm.run_script_args("test"));
     if project.has_lint_script {
@@ -282,7 +299,8 @@ mod tests {
     use std::fs;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("paws-node-test-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("paws-node-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -298,7 +316,11 @@ mod tests {
         ] {
             let dir = temp_dir(file);
             fs::write(dir.join(file), "").unwrap();
-            assert_eq!(PackageManager::detect(&dir).unwrap(), expected, "for {file}");
+            assert_eq!(
+                PackageManager::detect(&dir).unwrap(),
+                expected,
+                "for {file}"
+            );
             fs::remove_dir_all(&dir).unwrap();
         }
     }
@@ -306,7 +328,11 @@ mod tests {
     #[test]
     fn falls_back_to_package_manager_field_when_no_lockfile() {
         let dir = temp_dir("packagemanager-field");
-        fs::write(dir.join("package.json"), r#"{"packageManager": "pnpm@9.1.0"}"#).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"packageManager": "pnpm@9.1.0"}"#,
+        )
+        .unwrap();
         assert_eq!(PackageManager::detect(&dir).unwrap(), PackageManager::Pnpm);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -333,7 +359,11 @@ mod tests {
         // resolution.
         let dir = temp_dir("conflict");
         fs::write(dir.join("yarn.lock"), "").unwrap();
-        fs::write(dir.join("package.json"), r#"{"packageManager": "pnpm@9.1.0"}"#).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"packageManager": "pnpm@9.1.0"}"#,
+        )
+        .unwrap();
         assert_eq!(PackageManager::detect(&dir).unwrap(), PackageManager::Yarn);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -348,7 +378,8 @@ mod tests {
 
     #[test]
     fn detects_vite_from_dev_dependency() {
-        let json: Value = serde_json::from_str(r#"{"devDependencies": {"vite": "^5.0.0"}}"#).unwrap();
+        let json: Value =
+            serde_json::from_str(r#"{"devDependencies": {"vite": "^5.0.0"}}"#).unwrap();
         let dir = temp_dir("vite-dep");
         assert_eq!(Framework::detect(&json, &dir), Framework::Vite);
         fs::remove_dir_all(&dir).unwrap();
@@ -365,7 +396,8 @@ mod tests {
 
     #[test]
     fn plain_project_has_no_framework() {
-        let json: Value = serde_json::from_str(r#"{"dependencies": {"express": "^4.0.0"}}"#).unwrap();
+        let json: Value =
+            serde_json::from_str(r#"{"dependencies": {"express": "^4.0.0"}}"#).unwrap();
         let dir = temp_dir("plain");
         assert_eq!(Framework::detect(&json, &dir), Framework::Plain);
         fs::remove_dir_all(&dir).unwrap();

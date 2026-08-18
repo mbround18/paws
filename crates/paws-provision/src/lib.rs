@@ -75,7 +75,9 @@ pub struct ProvisionOutcome {
 /// outcome — success or failure — with no early return on first failure
 /// (FR-014). Genuinely independent work only; a step with a real ordering
 /// dependency on another does not belong here (FR-016).
-pub async fn provision(tasks: Vec<(Ecosystem, Box<dyn Installer>)>) -> HashMap<Ecosystem, Result<()>> {
+pub async fn provision(
+    tasks: Vec<(Ecosystem, Box<dyn Installer>)>,
+) -> HashMap<Ecosystem, Result<()>> {
     provision_with_timing(tasks)
         .await
         .into_iter()
@@ -109,7 +111,11 @@ pub async fn provision_with_timing(
                 let ecosystem = ecosystem_by_id[&id];
                 results.insert(
                     ecosystem,
-                    ProvisionOutcome { result, started_at, elapsed: started_at.elapsed() },
+                    ProvisionOutcome {
+                        result,
+                        started_at,
+                        elapsed: started_at.elapsed(),
+                    },
                 );
             }
             Err(join_err) => {
@@ -152,7 +158,11 @@ async fn run_command(program: &str, args: &[&str]) -> Result<()> {
 /// Real, idempotent installer for the Rust toolchain via `rustup`. A no-op
 /// (fast, successful) if the toolchain is already installed.
 pub async fn install_rust() -> Result<()> {
-    run_command("rustup", &["toolchain", "install", "stable", "--no-self-update"]).await
+    run_command(
+        "rustup",
+        &["toolchain", "install", "stable", "--no-self-update"],
+    )
+    .await
 }
 
 /// Real, idempotent installer for the Node/pnpm toolchain via `corepack`
@@ -229,15 +239,24 @@ mod tests {
 
     #[tokio::test]
     async fn panicking_installer_is_attributed_to_its_own_ecosystem_not_hardcoded_rust() {
-        let tasks: Vec<(Ecosystem, Box<dyn Installer>)> =
-            vec![(Ecosystem::Rust, sleepy_ok(10)), (Ecosystem::Node, panicky()), (Ecosystem::Python, sleepy_ok(10))];
+        let tasks: Vec<(Ecosystem, Box<dyn Installer>)> = vec![
+            (Ecosystem::Rust, sleepy_ok(10)),
+            (Ecosystem::Node, panicky()),
+            (Ecosystem::Python, sleepy_ok(10)),
+        ];
 
         let results = provision(tasks).await;
 
         assert_eq!(results.len(), 3);
         assert!(results[&Ecosystem::Rust].is_ok());
-        assert!(results[&Ecosystem::Node].is_err(), "the panicking task's ecosystem must show the failure");
-        assert!(results[&Ecosystem::Python].is_ok(), "a sibling task's outcome must not be overwritten by another's panic");
+        assert!(
+            results[&Ecosystem::Node].is_err(),
+            "the panicking task's ecosystem must show the failure"
+        );
+        assert!(
+            results[&Ecosystem::Python].is_ok(),
+            "a sibling task's outcome must not be overwritten by another's panic"
+        );
     }
 
     #[tokio::test]
@@ -257,7 +276,11 @@ mod tests {
     }
 
     fn tool_on_path(bin: &str) -> bool {
-        std::process::Command::new(bin).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+        std::process::Command::new(bin)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 
     #[tokio::test]
@@ -282,7 +305,12 @@ mod tests {
 
         for ecosystem in requested {
             let result = &results[&ecosystem];
-            assert!(result.is_ok(), "real installer for {:?} failed: {:?}", ecosystem, result);
+            assert!(
+                result.is_ok(),
+                "real installer for {:?} failed: {:?}",
+                ecosystem,
+                result
+            );
         }
     }
 }
