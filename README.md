@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./docs/assets/paws.webp" alt="logo" width="80" height="80">
+</p>
+
 # paws
 
 **Run-anywhere CI/CD pipelines, backed by [Dagger](https://dagger.io), shipped as a single Rust
