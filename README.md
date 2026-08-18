@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./docs/assets/paws.webp" alt="logo" width="80" height="80">
+  <img src="./docs/assets/paws.webp" alt="logo" width="400rem" height="400rem">
 </p>
 
 # paws
