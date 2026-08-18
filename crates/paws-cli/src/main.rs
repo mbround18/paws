@@ -130,7 +130,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build and test a language target (node, rust, tauri, ...).
+    /// Build and test a language target (node, rust, tauri, tauri-android, ...).
     Ci {
         #[arg(long)]
         toolchain: Option<String>,
@@ -313,6 +313,32 @@ async fn main() -> anyhow::Result<()> {
                         println!("ci: node build/test succeeded");
                     }
                 }
+                Some("tauri-android") => {
+                    let dir = std::env::current_dir()?;
+                    if !paws_tauri::is_tauri_project(&dir) {
+                        anyhow::bail!(
+                            "--toolchain tauri-android given, but no src-tauri/tauri.conf.json found in {}",
+                            dir.display()
+                        );
+                    }
+                    let project = paws_node::detect_project(&dir)
+                        .context("failed to detect a Node project in the current directory")?;
+                    println!(
+                        "ci: tauri android project using {} ({})",
+                        project.package_manager.as_str(),
+                        dir.display()
+                    );
+                    let builder_dir = paws_tauri::write_android_builder_dockerfile()
+                        .context("failed to materialize the tauri-android builder Dockerfile")?;
+                    let args = paws_tauri::android_dagger_pipeline_args(
+                        &project,
+                        &dir.to_string_lossy(),
+                        &builder_dir.to_string_lossy(),
+                    );
+                    let output = paws_dagger::core(&args).await?;
+                    print!("{output}");
+                    println!("ci: tauri android build succeeded");
+                }
                 Some("rust") => {
                     let source = std::env::current_dir()?.to_string_lossy().to_string();
                     let succeeded =
@@ -321,7 +347,9 @@ async fn main() -> anyhow::Result<()> {
                         anyhow::bail!("ci failed: see report above");
                     }
                 }
-                Some(other) => anyhow::bail!("unsupported --toolchain '{other}'; expected 'node', 'rust', or 'tauri'"),
+                Some(other) => anyhow::bail!(
+                    "unsupported --toolchain '{other}'; expected 'node', 'rust', 'tauri', or 'tauri-android'"
+                ),
                 None => anyhow::bail!("--toolchain is required (e.g. --toolchain node)"),
             }
         }

@@ -35,30 +35,43 @@ pub fn is_tauri_project(dir: &Path) -> bool {
 /// where `paws` is invoked from.
 const TAURI_LINUX_DOCKERFILE: &str = include_str!("../../../builders/tauri-linux/Dockerfile");
 
+/// The Tauri Android builder Dockerfile (JDK + Android SDK/NDK + Rust
+/// Android targets + Node), embedded the same way and for the same reason
+/// as [`TAURI_LINUX_DOCKERFILE`]. There is no Android equivalent of the
+/// iOS problem: the SDK/NDK are plain redistributable downloads and the
+/// whole toolchain runs on Linux, unlike Xcode/`xcodebuild` (see
+/// `builders/tauri-android/Dockerfile`'s header comment, and the iOS note
+/// in `docs/ROADMAP.md`).
+const TAURI_ANDROID_DOCKERFILE: &str = include_str!("../../../builders/tauri-android/Dockerfile");
+
+fn write_dockerfile(name: &str, contents: &str) -> Result<PathBuf> {
+    let dir = std::env::temp_dir().join("paws-builders").join(name);
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create temp dir for the {name} builder Dockerfile"))?;
+    std::fs::write(dir.join("Dockerfile"), contents)
+        .with_context(|| format!("failed to write the {name} builder Dockerfile"))?;
+    Ok(dir)
+}
+
 /// Writes the embedded Tauri Linux builder Dockerfile to a temp directory
 /// and returns that directory's path, suitable for `dagger_pipeline_args`'s
 /// `builder_dir` argument.
 pub fn write_builder_dockerfile() -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join("paws-builders").join("tauri-linux");
-    std::fs::create_dir_all(&dir).context("failed to create temp dir for the tauri-linux builder Dockerfile")?;
-    std::fs::write(dir.join("Dockerfile"), TAURI_LINUX_DOCKERFILE)
-        .context("failed to write the tauri-linux builder Dockerfile")?;
-    Ok(dir)
+    write_dockerfile("tauri-linux", TAURI_LINUX_DOCKERFILE)
 }
 
-/// Builds the `dagger core <chain>` argument list (see `paws_dagger::core`)
-/// that builds the Tauri Linux builder from `builder_dir` (see
-/// [`write_builder_dockerfile`] — Dagger's own BuildKit layer caching means
-/// the slow system-dependency install only actually runs once per unchanged
-/// Dockerfile, not on every `paws ci` invocation), then installs
-/// dependencies and runs `<package manager> run tauri build` for `project`
-/// — which itself runs the frontend build (via `tauri.conf.json`'s
-/// `beforeBuildCommand`) before compiling the Rust shell, so this crate
-/// never has to sequence that itself. Runs `test`/`lint` afterward only if
-/// the project actually defines them — unlike `paws-node`'s plain pipeline,
-/// `build`+`test` aren't required here (a fresh Tauri scaffold has neither;
-/// `tauri build` is the meaningful step).
-pub fn dagger_pipeline_args(project: &NodeProject, source_dir: &str, builder_dir: &str) -> Vec<String> {
+/// Writes the embedded Tauri Android builder Dockerfile to a temp directory
+/// and returns that directory's path, suitable for
+/// `android_dagger_pipeline_args`'s `builder_dir` argument.
+pub fn write_android_builder_dockerfile() -> Result<PathBuf> {
+    write_dockerfile("tauri-android", TAURI_ANDROID_DOCKERFILE)
+}
+
+fn pipeline_args(
+    project: &NodeProject,
+    source_dir: &str,
+    builder_dir: &str,
+    tauri_subcommand: &[&str],
+) -> Vec<String> {
     let pm = project.package_manager;
     let created_unix = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let build_args = format!("BUILDER_VERSION=dev,BUILDER_REVISION=unknown,BUILDER_CREATED={created_unix}");
@@ -85,11 +98,11 @@ pub fn dagger_pipeline_args(project: &NodeProject, source_dir: &str, builder_dir
         push_exec(setup.iter().map(|s| s.to_string()).collect());
     }
     push_exec(pm.install_args(project.has_lockfile).iter().map(|s| s.to_string()).collect());
-    // `<pm> run tauri build` — the "tauri" script (aliasing `@tauri-apps/cli`,
-    // which every `create-tauri-app` scaffold defines) takes "build" as a
-    // positional argument, not a second script name.
+    // `<pm> run tauri [android] build` — the "tauri" script (aliasing
+    // `@tauri-apps/cli`, which every `create-tauri-app` scaffold defines)
+    // takes the subcommand as positional arguments, not a second script name.
     let mut tauri_build = pm.run_script_args("tauri");
-    tauri_build.push("build".to_string());
+    tauri_build.extend(tauri_subcommand.iter().map(|s| s.to_string()));
     push_exec(tauri_build);
     if project.has_test_script {
         push_exec(pm.run_script_args("test"));
@@ -100,6 +113,32 @@ pub fn dagger_pipeline_args(project: &NodeProject, source_dir: &str, builder_dir
 
     args.push("stdout".into());
     args
+}
+
+/// Builds the `dagger core <chain>` argument list (see `paws_dagger::core`)
+/// that builds the Tauri Linux builder from `builder_dir` (see
+/// [`write_builder_dockerfile`] — Dagger's own BuildKit layer caching means
+/// the slow system-dependency install only actually runs once per unchanged
+/// Dockerfile, not on every `paws ci` invocation), then installs
+/// dependencies and runs `<package manager> run tauri build` for `project`
+/// — which itself runs the frontend build (via `tauri.conf.json`'s
+/// `beforeBuildCommand`) before compiling the Rust shell, so this crate
+/// never has to sequence that itself. Runs `test`/`lint` afterward only if
+/// the project actually defines them — unlike `paws-node`'s plain pipeline,
+/// `build`+`test` aren't required here (a fresh Tauri scaffold has neither;
+/// `tauri build` is the meaningful step).
+pub fn dagger_pipeline_args(project: &NodeProject, source_dir: &str, builder_dir: &str) -> Vec<String> {
+    pipeline_args(project, source_dir, builder_dir, &["build"])
+}
+
+/// Same as [`dagger_pipeline_args`], but builds against the Tauri Android
+/// builder (see [`write_android_builder_dockerfile`]) and runs
+/// `<package manager> run tauri android build` instead. Assumes the target
+/// repo has already run `tauri android init` (`src-tauri/gen/android`
+/// committed) — `paws` builds what's there, it doesn't scaffold mobile
+/// projects itself.
+pub fn android_dagger_pipeline_args(project: &NodeProject, source_dir: &str, builder_dir: &str) -> Vec<String> {
+    pipeline_args(project, source_dir, builder_dir, &["android", "build"])
 }
 
 #[cfg(test)]
@@ -179,5 +218,29 @@ mod tests {
         let args = dagger_pipeline_args(&with_both, "/host/src", "/tmp/some-builder-dir");
         assert!(args.contains(&"--args=npm,run,test".to_string()));
         assert!(args.contains(&"--args=npm,run,lint".to_string()));
+    }
+
+    #[test]
+    fn tauri_android_builder_dockerfile_exists() {
+        let dockerfile = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("builders/tauri-android")
+            .join("Dockerfile");
+        assert!(dockerfile.is_file(), "missing {dockerfile:?}");
+    }
+
+    #[test]
+    fn write_android_builder_dockerfile_materializes_the_embedded_dockerfile() {
+        let dir = write_android_builder_dockerfile().unwrap();
+        let contents = fs::read_to_string(dir.join("Dockerfile")).unwrap();
+        assert_eq!(contents, TAURI_ANDROID_DOCKERFILE);
+    }
+
+    #[test]
+    fn android_pipeline_runs_tauri_android_build() {
+        let args = android_dagger_pipeline_args(&project(), "/host/src", "/tmp/some-android-builder-dir");
+        assert_eq!(args[2], "--path=/tmp/some-android-builder-dir");
+        assert!(args.contains(&"--args=npm,run,tauri,android,build".to_string()));
+        assert!(!args.iter().any(|a| a == "--args=npm,run,tauri,build"));
     }
 }
