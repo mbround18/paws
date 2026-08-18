@@ -1,35 +1,35 @@
 # Builders
 
-Dedicated builder images, one directory per target family, each a plain `Dockerfile` built
-through Dagger (`dagger core host directory --path=builders/<name> docker-build ...`), not through
-`docker build`/`cross` directly — so nothing beyond the `dagger` CLI itself is ever required
-(Dagger's own BuildKit-backed engine provides the layer caching, and its `--platform` support
-provides the cross-arch execution `paws release`'s smoke tests need). Most of these are
-`paws release`'s own cross-compilation targets for building `paws` itself (see
-`crates/paws-release/src/lib.rs`); `tauri-linux/` is different — it's what `paws ci --toolchain
-tauri` builds *user* Tauri projects against (see `crates/paws-tauri`), embedded into the `paws`
-binary rather than read from this directory at runtime.
+Dedicated builder images, one directory per target family, each a plain `Dockerfile`. Most of
+these are `paws release`'s own cross-compilation targets for building `paws` itself (see
+`crates/paws-release/src/lib.rs`); `tauri-linux/`/`tauri-android/` are different — they're what
+`paws ci --toolchain tauri`/`tauri-android` build *user* projects against (see
+`crates/paws-tauri`), embedded into the `paws` binary rather than read from this directory at
+runtime.
 
 Every builder image is labeled with standard OCI annotations (`org.opencontainers.image.*`),
-populated via `--build-args` at build time from the release tag/commit being built — see
-`paws_release::build_binary` in `crates/paws-release/src/lib.rs`.
+populated via `--build-args` at build time — see `../compose.yml`.
 
 ## Prebuilt images
 
 `../compose.yml` builds all of these and tags them `ghcr.io/mbround18/paws-builders:<name>-
 <version>` — a flat repo + tag, not one repo per builder, since Docker Hub doesn't support nested
 repository paths the way GHCR does. `.github/workflows/release.yaml`'s `build-builders` job pushes
-them to both GHCR and Docker Hub (same flat scheme on both) before the per-target build matrix
-starts, so `paws_release::build_binary` (via `paws_dagger::remote_image_exists` /
-`prebuilt_image_candidate`) can pull the matching tag instead of paying for the Dockerfile's own
-build from scratch on every release — this is what actually speeds CI up, `compose.yml` is just
-how the images get there. That same job also bootstraps the native `paws` binary once
-(`cargo build --release -p paws-cli`) and uploads it as a build artifact, so the per-target matrix
-below downloads it instead of repeating that compile on every leg — a staged release, not N
-independent ones. Falls back to the local `docker-build` path whenever a matching prebuilt tag
-isn't there (a fresh builder, an unreleased version, or running outside CI entirely) — building
-these images is never
-a hard requirement for `paws release` to work.
+them to both GHCR and Docker Hub (same flat scheme on both) *before* the per-target build matrix
+starts (`needs: [ci, build-builders]`). That matrix's `paws release` (via
+`paws_dagger::remote_image_exists`/`prebuilt_image_candidate` in `crates/paws-release`) pulls the
+matching tag rather than building any Dockerfile itself — deliberately pull-only, no local
+`docker-build` fallback: rebuilding here would just re-pay for a build `build-builders` already
+did once (the exact duplicated cost prebuilt images exist to remove) and would silently mask a
+`build-builders` failure instead of surfacing it. If the tag isn't there, `paws release` fails
+loudly rather than quietly falling back. `build-builders` also bootstraps the native `paws` binary
+once (`cargo build --release -p paws-cli`) and uploads it as a build artifact, so the per-target
+matrix downloads it instead of repeating that compile on every leg — a staged release, not N
+independent ones.
+
+This also means these Dockerfiles are no longer required to exist on disk wherever `paws release`
+runs — the images are `paws`'s own, centrally published by `paws`'s own release pipeline, not
+something every consuming repo needs to build itself.
 
 - `linux-gnu/` — `x86_64-unknown-linux-gnu` (native) + `aarch64-unknown-linux-gnu` (via
   `gcc-aarch64-linux-gnu`).

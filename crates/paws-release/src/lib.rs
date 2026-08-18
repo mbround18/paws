@@ -13,7 +13,6 @@
 //! Wine-enabled base image covers the Windows target the same way.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use tokio::process::Command;
@@ -106,10 +105,9 @@ pub struct BuildRequest<'a> {
     pub triple: &'a str,
     pub package: &'a str,
     pub binary_name: &'a str,
-    /// Stamped onto the builder image as `org.opencontainers.image.version`.
+    /// Version tag the prebuilt builder image was pushed under (see
+    /// [`prebuilt_image_candidate`]) — normally the release tag itself.
     pub builder_version: &'a str,
-    /// Stamped onto the builder image as `org.opencontainers.image.revision`.
-    pub builder_revision: &'a str,
 }
 
 /// The prebuilt registry image `compose.yml`/`release.yaml`'s
@@ -127,18 +125,20 @@ pub fn prebuilt_image_candidate(builder_dir: &str, version: &str) -> String {
     format!("ghcr.io/mbround18/paws-builders:{name}-{version}")
 }
 
-/// Builds `./<builder_dir>/Dockerfile` (via `dagger core ... docker-build`,
-/// getting Dagger's own BuildKit layer caching for free — no separate cache
-/// setup needed), mounts `source_dir` into it, runs `cargo build --release
-/// --target <triple> -p <package>` inside it, and exports the resulting
-/// binary to `target/dagger-release/<triple>/<binary_name>`.
+/// Pulls the prebuilt builder image ([`prebuilt_image_candidate`]) —
+/// `release.yaml`'s `build-builders` job pushes it before the target
+/// matrix starts (`needs: [ci, build-builders]`), so it's always there by
+/// the time this runs in CI — mounts `source_dir` into it, runs `cargo
+/// build --release --target <triple> -p <package>` inside it, and exports
+/// the resulting binary to `target/dagger-release/<triple>/<binary_name>`.
 ///
-/// Tries [`prebuilt_image_candidate`] first (`container from --address=...`)
-/// via `paws_dagger::remote_image_exists` — when `release.yaml`'s
-/// `build-builders` job already pushed this exact builder+version, this
-/// skips paying for the Dockerfile's own build from scratch. Falls back to
-/// the local `docker-build` path whenever it isn't there (a fresh builder,
-/// a version nothing has pushed for yet, or running outside CI entirely).
+/// Deliberately pull-only, no local `docker-build` fallback: building
+/// `./<builder_dir>/Dockerfile` from scratch here would mean every target
+/// leg re-pays for a build `build-builders` already did once, the exact
+/// duplicated cost prebuilt images exist to remove, and it would silently
+/// mask a `build-builders` failure instead of surfacing it. Anything that
+/// isn't paws's own release pipeline (a Dockerfile-less `builder_dir`, or
+/// this exact version never pushed) fails loudly here instead.
 pub async fn build_binary(request: &BuildRequest<'_>) -> Result<PathBuf> {
     let file_name = binary_file_name(request.binary_name, request.triple);
     let container_bin_path = format!("target/{}/release/{}", request.triple, file_name);
@@ -147,24 +147,17 @@ pub async fn build_binary(request: &BuildRequest<'_>) -> Result<PathBuf> {
     tokio::fs::create_dir_all(&out_dir).await.context("failed to create release output directory")?;
     let out_path = out_dir.join(&file_name);
 
-    let created_unix = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let build_args = format!(
-        "BUILDER_VERSION={},BUILDER_REVISION={},BUILDER_CREATED={created_unix}",
-        request.builder_version, request.builder_revision
-    );
-
     let prebuilt = prebuilt_image_candidate(request.builder_dir, request.builder_version);
-    let mut args: Vec<String> = if paws_dagger::remote_image_exists(&prebuilt).await {
-        vec!["container".into(), "from".into(), format!("--address={prebuilt}")]
-    } else {
-        vec![
-            "host".into(),
-            "directory".into(),
-            format!("--path={}", request.builder_dir),
-            "docker-build".into(),
-            format!("--build-args={build_args}"),
-        ]
-    };
+    if !paws_dagger::remote_image_exists(&prebuilt).await {
+        anyhow::bail!(
+            "prebuilt builder image {prebuilt} not found - push it first (docker compose build \
+             && docker compose push against ./compose.yml, or let release.yaml's build-builders \
+             job do it) before running `paws release --target {}`",
+            request.triple
+        );
+    }
+
+    let mut args: Vec<String> = vec!["container".into(), "from".into(), format!("--address={prebuilt}")];
 
     args.extend([
         "with-mounted-directory".into(),

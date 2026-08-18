@@ -97,13 +97,17 @@ Renovate waits for required checks regardless of branch protection.
 `.github/workflows/release.yaml` triggers on any `v*` tag push (or manual dispatch). It first
 calls `ci.yaml` as a reusable workflow — a release build is gated by the same fmt/clippy/test/
 build check as every other push, dogfooding `paws ci` on `paws` itself — then runs a
-`build-builders` job (`docker compose build`/`push` against `../compose.yml`, logged into GHCR
-with `GHCR_TOKEN` and Docker Hub with `DOCKER_TOKEN`) that pushes every `builders/*` image to both
-registries before the per-target matrix starts. That matrix, per target, builds `paws` with `paws
-release` (bootstrapped from a host-native build of itself — see `prebuilt_image_candidate`/
-`remote_image_exists` in `crates/paws-release`/`crates/paws-dagger` for how it finds the image
-`build-builders` just pushed instead of rebuilding the Dockerfile from scratch), smoke-tests it,
-packages a `.zip`, and uploads it to the tag's GitHub Release, marked prerelease iff the tag
+`build-builders` job that bootstraps a native `paws` binary once (uploaded as a build artifact for
+the matrix below to reuse) and builds/pushes every `builders/*` image to both GHCR (`GHCR_TOKEN`)
+and Docker Hub (`DOCKER_TOKEN`) via `docker compose build`/`push` against `../compose.yml`. Only
+once that job succeeds (`needs: [ci, build-builders]`) does the per-target matrix start: each leg
+downloads the bootstrapped binary and runs `paws release`, which *pulls* the matching prebuilt
+image (`prebuilt_image_candidate`/`remote_image_exists` in `crates/paws-release`/
+`crates/paws-dagger`) rather than building any Dockerfile itself — deliberately pull-only, no
+local-build fallback, so a `build-builders` failure fails loudly instead of silently getting
+papered over by every leg quietly rebuilding its own copy. Each leg smoke-tests the binary,
+packages a `.zip`, and uploads it to the tag's GitHub Release (`generate_release_notes: true`,
+picking up merged PRs since the previous tag automatically), marked prerelease iff the tag
 contains a `-` (semver convention).
 
 Every build and smoke test goes through `dagger core` (see `crates/paws-release` and

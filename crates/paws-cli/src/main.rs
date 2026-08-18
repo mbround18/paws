@@ -579,10 +579,14 @@ async fn main() -> anyhow::Result<()> {
             skip_smoke_test,
         } => {
             let tag = tag.or_else(|| std::env::var("GITHUB_REF_NAME").ok());
-            let version = tag
-                .as_deref()
-                .map(|t| t.trim_start_matches('v').to_string())
-                .ok_or_else(|| anyhow::anyhow!("--tag is required (or set $GITHUB_REF_NAME)"))?;
+            let raw_tag =
+                tag.clone().ok_or_else(|| anyhow::anyhow!("--tag is required (or set $GITHUB_REF_NAME)"))?;
+            // Archive names drop the "v" prefix (established convention, matches
+            // prereleases already published); the prebuilt builder image tag does
+            // not — `release.yaml`'s build-builders job tags it from the raw
+            // ref/tag name (`v0.0.1-prerelease.2`), so `builder_version` below
+            // must match that exactly, not the stripped archive-naming version.
+            let version = raw_tag.trim_start_matches('v').to_string();
 
             let target_config = paws_release::target_config(&target).ok_or_else(|| {
                 anyhow::anyhow!(
@@ -594,15 +598,13 @@ async fn main() -> anyhow::Result<()> {
             paws_dagger::ensure_available().await?;
 
             println!("release: building {binary_name} for {target} via {}...", target_config.builder_dir);
-            let builder_revision = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "unknown".to_string());
             let binary_path = paws_release::build_binary(&paws_release::BuildRequest {
                 builder_dir: target_config.builder_dir,
                 source_dir: &source,
                 triple: &target,
                 package: &package,
                 binary_name: &binary_name,
-                builder_version: &version,
-                builder_revision: &builder_revision,
+                builder_version: &raw_tag,
             })
             .await?;
             println!("release: built {}", binary_path.display());
