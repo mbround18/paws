@@ -198,6 +198,8 @@ enum Commands {
         #[arg(long)]
         pr: bool,
     },
+    /// Install the `dagger` CLI (most other subcommands need it on PATH).
+    Init,
     /// Run the audit/compliance scanner suite.
     Audit,
     /// Publish generated docs (e.g. rustdoc) to GitHub Pages.
@@ -504,6 +506,27 @@ async fn main() -> anyhow::Result<()> {
 
             let version = compute_new_version(&tag_source, &request).await?;
             println!("{version}");
+        }
+        Commands::Init => {
+            let install_dir = paws_dagger::install_cli().await.context("failed to install the dagger CLI")?;
+            println!("dagger CLI installed to {}", install_dir.display());
+
+            // Prepend to this process's own PATH so the sanity check below
+            // (and any subcommand run later in the same shell invocation)
+            // can find it immediately, without waiting on a shell restart —
+            // this only affects this process and its children, so users
+            // still need `$HOME/.local/bin` on PATH for future shells (the
+            // `$GITHUB_PATH` append inside `install_cli` covers CI for free).
+            if let Some(existing) = std::env::var_os("PATH") {
+                let mut paths = vec![install_dir.clone()];
+                paths.extend(std::env::split_paths(&existing));
+                if let Ok(joined) = std::env::join_paths(paths) {
+                    unsafe { std::env::set_var("PATH", joined) };
+                }
+            }
+
+            paws_dagger::ensure_available().await.context("dagger was installed but isn't runnable")?;
+            println!("init: dagger is ready (add {} to PATH for future shells)", install_dir.display());
         }
         Commands::Audit => {
             // Local pre-check only: `paws-audit`'s detection logic decides

@@ -32,6 +32,54 @@ pub async fn ensure_available() -> Result<()> {
     }
 }
 
+/// Installs the `dagger` CLI itself via its official install script
+/// (`https://dl.dagger.io/dagger/install.sh`) — the same script
+/// `.github/workflows/ci.yaml`/`release.yaml` already use, ported here so
+/// `paws init` (and `actions/paws-up`) don't need their own copy of it.
+/// Not a `dagger`/`docker`/`cross` spawn itself (it shells to `sh`, running
+/// the fetched installer script), so it sits outside ADR-0001's "route
+/// container execution through Dagger" scope — this installs the tool that
+/// scope is about, it doesn't execute a pipeline.
+///
+/// The script's own default install location (`./bin`, relative to
+/// whatever the current directory happens to be — confirmed by reading the
+/// script itself, not assumed) isn't useful for this; `BIN_DIR` is pinned
+/// to `$HOME/.local/bin` instead, mirroring `actions/paws-up`'s own install
+/// directory. In a GitHub Actions run (`$GITHUB_PATH` set), that directory
+/// is also appended there so a later step's `dagger` calls resolve without
+/// the caller having to touch `PATH` itself.
+pub async fn install_cli() -> Result<std::path::PathBuf> {
+    let home = std::env::var("HOME").context("HOME is not set - can't determine an install directory")?;
+    let install_dir = std::path::PathBuf::from(home).join(".local").join("bin");
+    tokio::fs::create_dir_all(&install_dir).await.context("failed to create the dagger install directory")?;
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg("curl -fsSL https://dl.dagger.io/dagger/install.sh | sh")
+        .env("BIN_DIR", &install_dir)
+        .output()
+        .await
+        .context("failed to run the dagger install script")?;
+
+    if !output.status.success() {
+        anyhow::bail!("dagger install script failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    if let Ok(github_path) = std::env::var("GITHUB_PATH") {
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&github_path)
+            .await
+            .context("failed to open $GITHUB_PATH for appending")?;
+        file.write_all(format!("{}\n", install_dir.display()).as_bytes())
+            .await
+            .context("failed to append the dagger install directory to $GITHUB_PATH")?;
+    }
+
+    Ok(install_dir)
+}
+
 pub async fn call(invocation: DaggerCall) -> Result<String> {
     let output = Command::new("dagger")
         .arg("call")

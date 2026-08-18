@@ -27,6 +27,7 @@ provider-specific scripting.
 
 | Command | What it does |
 | --- | --- |
+| `paws init` | Install the `dagger` CLI, which most other subcommands need on `PATH` |
 | `paws ci` | Build, lint, and test a Node or Rust project |
 | `paws semver` | Compute the next version from PR labels, branch name, or an explicit bump |
 | `paws docker` | Resolve and build a container image the way `docker-compose`-aware pipelines do |
@@ -59,12 +60,14 @@ cd paws
 cargo install --path crates/paws-cli
 ```
 
-Most subcommands also need the [`dagger` CLI](https://docs.dagger.io/install) on your `PATH`.
+Most subcommands also need the `dagger` CLI on your `PATH` — run `paws init` to install it
+(or see https://docs.dagger.io/install for other options).
 
-**In a GitHub Actions workflow**, once a release exists:
+**In a GitHub Actions workflow**, once a release exists — `actions/paws-up` installs `paws` and
+runs `paws init` for you:
 
 ```yaml
-- uses: mbround18/paws/actions/setup-paws@main
+- uses: mbround18/paws/actions/paws-up@main
 - run: paws ci --toolchain rust
 ```
 

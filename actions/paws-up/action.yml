@@ -1,8 +1,9 @@
-name: "Setup paws"
+name: "paws up"
 author: mbround18
 description: >-
-  Downloads a paws release binary for the current runner and puts it on PATH.
-  Composite (not Docker-based) so paws's own Dagger calls talk to the
+  Downloads a paws release binary for the current runner, puts it on PATH,
+  and installs the dagger CLI via `paws init` (most paws subcommands need
+  it). Composite (not Docker-based) so paws's own Dagger calls talk to the
   runner's real Docker daemon directly, with no Docker-in-Docker nesting.
 branding:
   icon: "download"
@@ -20,6 +21,13 @@ inputs:
     description: "Token used to query/download releases (avoids low anonymous rate limits)."
     required: false
     default: ${{ github.token }}
+  install-dagger:
+    description: >-
+      Also run `paws init` to install the dagger CLI, which most paws
+      subcommands need on PATH. Set to "false" to skip if the runner
+      already has it (e.g. a self-hosted runner with dagger pre-installed).
+    required: false
+    default: "true"
 
 outputs:
   version:
@@ -104,3 +112,9 @@ runs:
         # actually runs, not just that the download succeeded" standard the
         # release pipeline itself holds every binary to.
         "$install_dir/$exe_name" --version
+
+    - if: ${{ inputs.install-dagger == 'true' }}
+      shell: bash
+      # $GITHUB_PATH was updated in the previous step, so `paws` already
+      # resolves here without needing the install directory spelled out.
+      run: paws init

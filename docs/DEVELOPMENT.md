@@ -121,16 +121,24 @@ as skipped; see `builders/macos/README.md`.
 ## Reusable GitHub Actions
 
 `./actions/*` holds composite GitHub Actions for consuming `paws` from other workflows —
-`actions/setup-paws` downloads a release binary for the runner and puts it on `PATH`
-(`uses: mbround18/paws/actions/setup-paws@main`). Composite rather than Docker-based, for the
-same reason as `paws release`'s own build path (docs/adr/0001): a Docker-based action runs inside
-a container, which would put `paws`'s own Dagger/Docker calls behind an extra
-Docker-in-Docker layer. See `actions/setup-paws/README.md` for inputs/outputs.
+`actions/paws-up` downloads a release binary for the runner, puts it on `PATH`, and runs `paws
+init` to install the `dagger` CLI (`uses: mbround18/paws/actions/paws-up@main`). Composite rather
+than Docker-based, for the same reason as `paws release`'s own build path (docs/adr/0001): a
+Docker-based action runs inside a container, which would put `paws`'s own Dagger/Docker calls
+behind an extra Docker-in-Docker layer. See `actions/paws-up/README.md` for inputs/outputs.
+
+`paws init` (`crates/paws-dagger::install_cli`) runs `dagger`'s own official install script
+(the same one `.github/workflows/ci.yaml`/`release.yaml` already used inline), pinning `BIN_DIR`
+to `$HOME/.local/bin` rather than the script's own default (`./bin`, relative to whatever the
+current directory happens to be — confirmed by reading the script, not assumed) and appending
+that directory to `$GITHUB_PATH` when running inside a GitHub Actions job. It shells to `sh`, not
+`dagger`/`docker`/`cross`, so it sits outside ADR-0001's scope — it installs the tool that ADR is
+about, it doesn't execute a pipeline.
 
 Note: `release.yaml`'s own bootstrap step still builds `paws` from source (`cargo build --release
--p paws-cli`) rather than using `setup-paws`, deliberately — the very first release has nothing
+-p paws-cli`) rather than using `paws-up`, deliberately — the very first release has nothing
 to download yet, and building from source has no bootstrap-order dependency on a prior release
-existing. `setup-paws` is for other consumers of `paws`, not `paws`'s own release pipeline.
+existing. `paws-up` is for other consumers of `paws`, not `paws`'s own release pipeline.
 
 ## Dependency updates
 

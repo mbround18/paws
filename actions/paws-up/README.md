@@ -1,13 +1,14 @@
-# setup-paws
+# paws up
 
-Downloads a `paws` release binary for the runner it's running on and puts it on `PATH`. Composite,
-not Docker-based — deliberately, so `paws`'s own Dagger calls talk to the runner's real Docker
-daemon directly, with no Docker-in-Docker nesting to work around.
+Downloads a `paws` release binary for the runner it's running on, puts it on `PATH`, and runs
+`paws init` to install the `dagger` CLI (most `paws` subcommands need it). Composite, not
+Docker-based — deliberately, so `paws`'s own Dagger calls talk to the runner's real Docker daemon
+directly, with no Docker-in-Docker nesting to work around.
 
 ## Usage
 
 ```yaml
-- uses: mbround18/paws/actions/setup-paws@main
+- uses: mbround18/paws/actions/paws-up@main
   with:
     version: v0.0.1-prerelease.1 # or omit for the most recent release
 
@@ -20,6 +21,7 @@ daemon directly, with no Docker-in-Docker nesting to work around.
 | --- | --- | --- |
 | `version` | `latest` | A specific tag (e.g. `v0.0.1-prerelease.1`), or `latest` for the most recent GitHub Release. **Prereleases are included** when resolving `latest` — this action exists to dogfood `paws` fast, including prerelease iteration, not just pin to stable. |
 | `github-token` | `${{ github.token }}` | Used for the release-list/download API calls, to avoid low anonymous rate limits. |
+| `install-dagger` | `true` | Also run `paws init` to install the `dagger` CLI. Set to `"false"` to skip if the runner already has it. |
 
 ## Outputs
 
