@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  # Lets release.yaml call this as a reusable workflow, so a release build
+  # always goes through the same fmt/clippy/test/build gate as every push.
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build, test, lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry/build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build workspace
+        run: cargo build --workspace
+
+      # SC-002: cargo test --workspace passes with zero failures on every commit.
+      # This also runs paws-provision's SC-005 concurrency-timing test and
+      # paws-docker's real-Docker-daemon e2e suite (FR-007) — ubuntu-latest
+      # runners ship Docker; tests that need rustup/corepack/uv skip
+      # gracefully (rather than failing) if a given tool isn't present.
+      - name: Test workspace
+        run: cargo test --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # SC-004 + docs/adr/0001: zero direct `Command::new("dagger"/"docker"/"cross")`
+      # call sites outside crates/paws-dagger (paws-docker's e2e tests excepted).
+      - name: SC-004 lint (container-engine call-site check)
+        run: ./scripts/check-dagger-callsites.sh
+
+  # spec.md FR-008: `paws ci --toolchain node` and `--toolchain rust` must
+  # each be exercised end-to-end against a real fixture project, not just
+  # unit-tested. Separate job: needs the real `dagger` CLI + a Dagger engine
+  # (itself running in Docker) and depends on `gh-reusable`'s Dagger module
+  # being reachable on GitHub, so it's kept independent of the fast unit-test
+  # job above rather than blocking it on external/slower infrastructure.
+  ci-e2e:
+    name: paws ci end-to-end (dagger)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry/build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build paws
+        run: cargo build -p paws-cli
+
+      - name: Install dagger CLI
+        run: curl -fsSL https://dl.dagger.io/dagger/install.sh | BIN_DIR=/usr/local/bin sh
+
+      - name: paws ci --toolchain rust (examples/rust-fixture)
+        working-directory: examples/rust-fixture
+        run: ../../target/debug/paws ci --toolchain rust
+
+      - name: paws ci --toolchain node (examples/node-fixture)
+        working-directory: examples/node-fixture
+        run: ../../target/debug/paws ci --toolchain node
