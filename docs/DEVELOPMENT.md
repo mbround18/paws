@@ -46,6 +46,19 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   `paws release` needs nothing beyond the `dagger` CLI. Only the GitHub REST API calls (plain
   HTTPS, no process spawn) and packaging (`zip`, a host utility, not a second build backend)
   fall outside that seam.
+- `crates/paws-node` — native multi-package-manager Node support: detects npm/yarn/pnpm/bun
+  (lockfile-first, falling back to `package.json`'s `packageManager` field) and Vite/Next.js
+  frameworks, and builds the `dagger core` pipeline `paws ci --toolchain node` runs. No `dagger`
+  CLI dependency itself — it only produces the argument list `paws-dagger::core` executes.
+- `crates/paws-tauri` — Tauri desktop-app support, layered on `paws-node` (a Tauri project is a
+  Node project with `src-tauri/tauri.conf.json`). Doesn't reimplement the frontend-then-Rust build
+  ordering itself — Tauri's own CLI already sequences that via `tauri.conf.json`'s
+  `beforeBuildCommand`. Builds against `builders/tauri-linux/Dockerfile` (Rust + Node + the
+  GTK/WebKit libs Tauri's Linux backend needs), embedded into the binary via `include_str!` and
+  materialized to a temp dir at runtime (`write_builder_dockerfile`) — a plain repo-relative path
+  would resolve against the *target* repo `paws ci` is running in, not `paws`'s own source tree,
+  since `paws` (unlike `paws-release`, which only ever builds itself) is meant to run from
+  anywhere. Linux-only for now.
 
 ## CI
 

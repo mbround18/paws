@@ -61,3 +61,8 @@ part of `paws` itself.
 - `next-fixture/` — a real `create-next-app` scaffold (TypeScript, App Router, ESLint), with a
   `test.mjs` asserting `.next/BUILD_ID` exists post-build. Exercises `paws-node`'s
   `Framework::NextJs` detection and a real `next build` (Turbopack) + `eslint` run.
+- `tauri-fixture/` — a real `npm create tauri-app@latest -- --template vanilla-ts --manager npm`
+  scaffold; the target for `paws ci --toolchain tauri`. Exercises `crates/paws-tauri`'s detection
+  (`src-tauri/tauri.conf.json`) and a real, full `tauri build` — frontend build via
+  `beforeBuildCommand`, then Rust bundling into `.deb`/`.rpm`/`.AppImage` — run against the
+  `builders/tauri-linux` Dockerfile through Dagger.

@@ -8,13 +8,15 @@ see [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) for how a new stack actually gets ad
 
 Confirmed directly against the code, not from memory:
 
-- **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node`
+- **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node`, `tauri`
   (`crates/paws-cli/src/main.rs`). Node execution is now natively multi-package-manager
   (`crates/paws-node` — npm/yarn/pnpm/bun, detected from lockfiles or `package.json`'s
   `packageManager` field, no longer the old `pnpmBuildAndTest`-only interim path) and
   framework-aware (Vite, Next.js, or plain, informational for now). Verified for real against
   fixtures covering all 4 package managers plus real `create-vite`/`create-next-app` scaffolds
-  (including a React+TSX one) — see `examples/README.md`.
+  (including a React+TSX one) — see `examples/README.md`. `tauri` (`crates/paws-tauri`) builds a
+  Tauri app through a dedicated `builders/tauri-linux` Dockerfile via Dagger, verified for real
+  against a `create-tauri-app` scaffold (`examples/tauri-fixture`) — Linux-only so far.
 - **`paws provision`** (concurrent toolchain installers): `rust`, `node`, `python`
   (`paws_provision::Ecosystem`). `gh-reusable` (the TS system `paws` is replacing) already has
   `setupGo`/`setupRuby`/`setupJava`/`setupTerraform`/`setupPulumi` — none of those ecosystems are
@@ -51,15 +53,27 @@ Confirmed directly against the code, not from memory:
 | Rust + React | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Rust (Actix/Axum), React | Backend API + Static UI | 🚧 |
 | Node + Rust | JS/TS, Rust | npm/yarn/pnpm/bun & cargo | Node.js, Rust, napi-rs or neon | Native Node bindings (.node) | 📋 |
 | React + Rust | JS/TS, Rust | npm/yarn/pnpm/bun & cargo | React, Rust, wasm-pack | WebAssembly (.wasm) + React UI | 📋 |
-| Tauri + Rust | Rust, HTML/CSS/JS | cargo | Tauri, Rust, OS Webview (WebKit/WebView2) | Desktop App Installer | 📋 |
+| Tauri + Rust | Rust, HTML/CSS/JS | cargo | Tauri, Rust, OS Webview (WebKit/WebView2) | Desktop App Installer | ✅ |
 | Tauri + Node + Rust | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Tauri, Node.js (Sidecar), Rust | Desktop App + Node Backend Process | 📋 |
-| Tauri + React + Rust | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Tauri, React, Rust, Vite/Next.js | Desktop App (React UI) | 📋 |
+| Tauri + React + Rust | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Tauri, React, Rust, Vite/Next.js | Desktop App (React UI) | 🚧 |
 | Tauri + React + Node + Rust | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Tauri, React, Node.js, Rust | Desktop App + Embedded Node APIs | 📋 |
 
-`Node + Rust`/`React + Rust`/every Tauri row need real new capability, not just wiring: native
-addon builds (`napi-rs`/`neon`), `wasm-pack` WebAssembly builds, and Tauri's own bundler are each
-a distinct toolchain `paws` doesn't drive today, on top of whatever multi-ecosystem provisioning
-already gets you partway (see `examples/multi-ecosystem-fixture`).
+`paws ci --toolchain tauri` (`crates/paws-tauri`) detects a Tauri project (`src-tauri/tauri.conf.json`)
+and runs `<package manager> run tauri build` against a dedicated `builders/tauri-linux` Dockerfile
+(Rust + Node + the GTK/WebKit libs Tauri's Linux backend needs), through Dagger like every other
+builder — Tauri's own CLI handles the frontend-then-Rust sequencing via `tauri.conf.json`'s
+`beforeBuildCommand`, so `paws` never has to. Verified for real, full (non-`--no-bundle`) build —
+producing `.deb`/`.rpm`/`.AppImage` — against a real `create-tauri-app` vanilla-ts scaffold
+(`examples/tauri-fixture`); marked ✅ only for that plain-TS case. The React/Vue rows should follow
+the same code path (the pipeline is package-manager-driven, not framework-driven) but aren't
+independently verified yet, hence 🚧 rather than ✅. Linux-only for now — no macOS/Windows Tauri
+builder exists yet, and the Node-sidecar row is a distinct capability (spawning a persistent Node
+process alongside the Tauri shell) this crate doesn't attempt.
+
+`Node + Rust`/`React + Rust` need real new capability, not just wiring: native addon builds
+(`napi-rs`/`neon`) and `wasm-pack` WebAssembly builds are each a distinct toolchain `paws` doesn't
+drive today, on top of whatever multi-ecosystem provisioning already gets you partway (see
+`examples/multi-ecosystem-fixture`).
 
 ## JVM / Go stacks
 
