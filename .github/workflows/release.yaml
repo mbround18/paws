@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.0.1-prerelease.1); must already exist"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  # Dogfooding: `paws ci` (fmt/clippy/build/test) gates the release the same
+  # way it gates every other push — a release build never skips its own CI.
+  ci:
+    uses: ./.github/workflows/ci.yaml
+
+  release:
+    name: build & publish (${{ matrix.target }})
+    needs: ci
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - x86_64-pc-windows-gnu
+          # Build/link-verified only (see builders/macos/README.md) — no
+          # Mach-O execution environment exists to smoke-test them, so
+          # `paws release` builds, honestly skips the smoke test, and
+          # packages anyway rather than failing the leg.
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry/build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install dagger CLI
+        run: curl -fsSL https://dl.dagger.io/dagger/install.sh | BIN_DIR=/usr/local/bin sh
+
+      # Bootstrap: build `paws` for the runner's own (host) target, so the
+      # freshly-built binary can drive the actual release build below — the
+      # dogfooding step the release relies on. Everything past this point —
+      # cross-target build (via ./builders/*), the QEMU/Wine-backed smoke
+      # test, packaging — is `paws release` orchestrating Dagger; this job
+      # needs nothing beyond Rust + `dagger` (Docker is already on this
+      # runner, but `paws`/Dagger are the only things that ever talk to it).
+      - name: Bootstrap host paws binary
+        run: cargo build --release -p paws-cli
+
+      - name: paws release --target ${{ matrix.target }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ inputs.tag || github.ref_name }}
+        run: |
+          # A tag with a "-" (e.g. v0.0.1-prerelease.1) is a semver
+          # prerelease; a plain vX.Y.Z tag is a full release.
+          prerelease_flag=""
+          case "$GITHUB_REF_NAME" in
+            *-*) prerelease_flag="--prerelease" ;;
+          esac
+          ./target/release/paws release \
+            --target ${{ matrix.target }} \
+            --tag "$GITHUB_REF_NAME" \
+            $prerelease_flag
