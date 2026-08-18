@@ -130,7 +130,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build and test a language target (node, rust, tauri, tauri-android, ...).
+    /// Build and test a language target (node, rust, python, tauri, tauri-android, ...).
     Ci {
         #[arg(long)]
         toolchain: Option<String>,
@@ -339,6 +339,20 @@ async fn main() -> anyhow::Result<()> {
                     print!("{output}");
                     println!("ci: tauri android build succeeded");
                 }
+                Some("python") => {
+                    let dir = std::env::current_dir()?;
+                    let project = paws_python::detect_project(&dir)
+                        .context("failed to detect a Python project in the current directory")?;
+                    println!(
+                        "ci: python project ({}) ({})",
+                        if project.has_lockfile { "uv.lock present" } else { "no uv.lock" },
+                        dir.display()
+                    );
+                    let args = paws_python::dagger_pipeline_args(&project, &dir.to_string_lossy());
+                    let output = paws_dagger::core(&args).await?;
+                    print!("{output}");
+                    println!("ci: python build/test succeeded");
+                }
                 Some("rust") => {
                     let source = std::env::current_dir()?.to_string_lossy().to_string();
                     let succeeded =
@@ -348,7 +362,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Some(other) => anyhow::bail!(
-                    "unsupported --toolchain '{other}'; expected 'node', 'rust', 'tauri', or 'tauri-android'"
+                    "unsupported --toolchain '{other}'; expected 'node', 'rust', 'python', 'tauri', or 'tauri-android'"
                 ),
                 None => anyhow::bail!("--toolchain is required (e.g. --toolchain node)"),
             }

@@ -12,6 +12,7 @@ members = [
     "crates/paws-release",
     "crates/paws-node",
     "crates/paws-tauri",
+    "crates/paws-python",
 ]
 
 [workspace.package]

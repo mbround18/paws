@@ -605,6 +605,7 @@ dependencies = [
  "paws-docs",
  "paws-node",
  "paws-provision",
+ "paws-python",
  "paws-release",
  "paws-semver",
  "paws-tauri",
@@ -661,6 +662,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "tokio",
+]
+
+[[package]]
+name = "paws-python"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]
