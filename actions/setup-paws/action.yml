@@ -1,0 +1,106 @@
+name: "Setup paws"
+author: mbround18
+description: >-
+  Downloads a paws release binary for the current runner and puts it on PATH.
+  Composite (not Docker-based) so paws's own Dagger calls talk to the
+  runner's real Docker daemon directly, with no Docker-in-Docker nesting.
+branding:
+  icon: "download"
+  color: "green"
+
+inputs:
+  version:
+    description: >-
+      paws version to install, e.g. "v0.0.1-prerelease.1". Defaults to the
+      most recent GitHub Release (prereleases included — this is meant for
+      fast dogfooding iteration, not just stable pins).
+    required: false
+    default: "latest"
+  github-token:
+    description: "Token used to query/download releases (avoids low anonymous rate limits)."
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  version:
+    description: "The resolved paws version that was installed."
+    value: ${{ steps.install.outputs.version }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: install
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+
+        case "$(uname -s)" in
+          Linux) os=linux ;;
+          Darwin) os=macos ;;
+          MINGW*|MSYS*|CYGWIN*) os=windows ;;
+          *) echo "::error::Unsupported OS: $(uname -s)"; exit 1 ;;
+        esac
+
+        case "$(uname -m)" in
+          x86_64|amd64) arch=x86_64 ;;
+          arm64|aarch64) arch=aarch64 ;;
+          *) echo "::error::Unsupported architecture: $(uname -m)"; exit 1 ;;
+        esac
+
+        case "$os" in
+          linux)
+            # Auto-detect musl vs gnu rather than assuming — a plain uname
+            # can't tell you this, but the presence of musl's loader can.
+            libc=gnu
+            if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then
+              libc=musl
+            fi
+            target="${arch}-unknown-linux-${libc}"
+            exe_name="paws"
+            ;;
+          macos)
+            target="${arch}-apple-darwin"
+            exe_name="paws"
+            ;;
+          windows)
+            target="x86_64-pc-windows-gnu"
+            exe_name="paws.exe"
+            ;;
+        esac
+        echo "Resolved target: $target"
+
+        version="$INPUT_VERSION"
+        if [ "$version" = "latest" ]; then
+          version="$(gh release list --repo mbround18/paws --limit 1 --json tagName -q '.[0].tagName')"
+          if [ -z "$version" ]; then
+            echo "::error::No releases found for mbround18/paws"
+            exit 1
+          fi
+        fi
+        echo "Resolved version: $version"
+
+        version_no_v="${version#v}"
+        archive="paws-${version_no_v}-${target}.zip"
+        url="https://github.com/mbround18/paws/releases/download/${version}/${archive}"
+        echo "Downloading: $url"
+
+        install_dir="$HOME/.local/bin"
+        mkdir -p "$install_dir"
+
+        tmp_dir="$(mktemp -d)"
+        trap 'rm -rf "$tmp_dir"' EXIT
+
+        curl -fsSL -o "$tmp_dir/$archive" "$url"
+        unzip -o -j "$tmp_dir/$archive" -d "$install_dir"
+        chmod +x "$install_dir/$exe_name"
+
+        echo "$install_dir" >> "$GITHUB_PATH"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+        # Sanity check before trusting this install — same "verify it
+        # actually runs, not just that the download succeeded" standard the
+        # release pipeline itself holds every binary to.
+        "$install_dir/$exe_name" --version

@@ -91,6 +91,20 @@ execution, not just "it compiled"). The 2 macOS targets build real, verified Mac
 `dagger`/Wine — so `paws release` builds and packages them while honestly reporting the smoke test
 as skipped; see `builders/macos/README.md`.
 
+## Reusable GitHub Actions
+
+`./actions/*` holds composite GitHub Actions for consuming `paws` from other workflows —
+`actions/setup-paws` downloads a release binary for the runner and puts it on `PATH`
+(`uses: mbround18/paws/actions/setup-paws@main`). Composite rather than Docker-based, for the
+same reason as `paws release`'s own build path (docs/adr/0001): a Docker-based action runs inside
+a container, which would put `paws`'s own Dagger/Docker calls behind an extra
+Docker-in-Docker layer. See `actions/setup-paws/README.md` for inputs/outputs.
+
+Note: `release.yaml`'s own bootstrap step still builds `paws` from source (`cargo build --release
+-p paws-cli`) rather than using `setup-paws`, deliberately — the very first release has nothing
+to download yet, and building from source has no bootstrap-order dependency on a prior release
+existing. `setup-paws` is for other consumers of `paws`, not `paws`'s own release pipeline.
+
 ## Dependency updates
 
 [Renovate](https://docs.renovatebot.com/) is configured via `renovate.json`: minor/patch updates

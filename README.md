@@ -57,6 +57,13 @@ cargo install --path crates/paws-cli
 
 Most subcommands also need the [`dagger` CLI](https://docs.dagger.io/install) on your `PATH`.
 
+**In a GitHub Actions workflow**, once a release exists:
+
+```yaml
+- uses: mbround18/paws/actions/setup-paws@main
+- run: paws ci --toolchain rust
+```
+
 ## Quickstart
 
 ```sh
