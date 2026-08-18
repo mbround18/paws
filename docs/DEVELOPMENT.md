@@ -99,11 +99,16 @@ calls `ci.yaml` as a reusable workflow — a release build is gated by the same 
 build check as every other push, dogfooding `paws ci` on `paws` itself — then runs two jobs in
 parallel: `bootstrap` (builds a native `paws` binary once, uploaded as a build artifact) and
 `build-builders`, a **matrix over each builder name** (one runner per builder, not all 7 on a
-single runner — building them concurrently on one machine exhausted its disk) that builds/pushes
-`builders/<name>/Dockerfile` to GHCR (`docker compose build --push`, `GHCR_TOKEN`) and copies the
-manifest to Docker Hub (`docker buildx imagetools create`, `DOCKER_TOKEN`) against `../compose.yml`
-— `--push`/`imagetools create` deliberately never load a full image into the runner's local Docker
-daemon, which is what caused the disk exhaustion in the first place. Only once both jobs succeed
+single runner — building them concurrently on one machine exhausted its disk) that builds
+`builders/<name>/Dockerfile` and pushes it to both GHCR (`GHCR_TOKEN`) and Docker Hub
+(`DOCKER_TOKEN`) in a single `docker compose build --push` against `../compose.yml` (`image:` is
+the GHCR ref, `build.tags` adds the Docker Hub one) — deliberately never loading a full image into
+the runner's local Docker daemon, which is what caused the disk exhaustion in the first place. It
+then re-verifies both pushes actually landed (`docker buildx imagetools inspect`), since `docker
+compose build --push` has been observed to silently load an image locally instead of pushing it
+(exit 0, no error, only the registry cache actually landed) without reproducing locally against
+the same compose file — a real gap the verification step exists to catch loudly instead of
+surfacing later as a confusing "image not found" in `paws release`. Only once both jobs succeed
 (`needs: [ci, bootstrap, build-builders]`) does the per-target matrix start: each leg downloads
 the bootstrapped binary and runs `paws release`, which *pulls* the matching prebuilt image
 (`prebuilt_image_candidate`/`remote_image_exists` in `crates/paws-release`/`crates/paws-dagger`)

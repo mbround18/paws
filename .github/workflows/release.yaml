@@ -110,16 +110,22 @@ jobs:
           username: mbround18
           password: ${{ secrets.DOCKER_TOKEN }}
 
-      - name: Build & push ${{ matrix.builder }} to GHCR
+      # compose.yml's build.tags pushes the Docker Hub ref in the same
+      # build as the primary (image:) GHCR ref — one push, both registries.
+      - name: Build & push ${{ matrix.builder }}
         run: docker compose build --push ${{ matrix.builder }}
 
-      # Registry-to-registry manifest copy, not a local pull/tag/push — no
-      # full image ever touches this runner's disk for this step.
-      - name: Copy ${{ matrix.builder }} to Docker Hub
+      # Safety net for a real, reproduced failure mode: `docker compose
+      # build --push` has been observed silently loading the image into
+      # the runner's local Docker daemon instead of pushing it (no error,
+      # exit 0, only the BuildKit registry *cache* actually landed) - not
+      # reproducible locally with the same compose.yml, so this doesn't
+      # trust the previous step's success alone. Fails loudly here instead
+      # of downstream as a confusing "image not found" in `paws release`.
+      - name: Verify ${{ matrix.builder }} actually landed in both registries
         run: |
-          docker buildx imagetools create \
-            --tag "docker.io/mbround18/paws-builders:${{ matrix.builder }}-${VERSION}" \
-            "ghcr.io/mbround18/paws-builders:${{ matrix.builder }}-${VERSION}"
+          docker buildx imagetools inspect "ghcr.io/mbround18/paws-builders:${{ matrix.builder }}-${VERSION}" >/dev/null
+          docker buildx imagetools inspect "docker.io/mbround18/paws-builders:${{ matrix.builder }}-${VERSION}" >/dev/null
 
   release:
     name: build & publish (${{ matrix.target }})

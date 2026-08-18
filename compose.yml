@@ -12,10 +12,25 @@
 # (mbround18/paws-builders:linux-gnu-v0.0.1), not one repo per builder —
 # Docker Hub doesn't support nested repository paths
 # (docker.io/<namespace>/<repo>/<subpath> isn't a thing there, only GHCR
-# allows that), so both registries need the same flat scheme for this to
-# actually push. GHCR is the primary `image:` tag here; the Docker Hub
-# push (same flat scheme) happens as a `docker tag`/`docker push` step in
-# release.yaml, since compose only carries one `image:` per service.
+# allows that), so both registries need the same flat scheme.
+#
+# Each service tags to GHCR *and* Docker Hub in the same build via
+# `build.tags` (https://docs.docker.com/reference/compose-file/build/#tags)
+# — `image:` is the GHCR ref, `build.tags` adds the Docker Hub one — rather
+# than a separate `docker buildx imagetools create` copy step afterward.
+# Verified for real against a pair of local test registries: a single
+# `docker compose build --push` with both set pushed the same manifest to
+# both refs in one shot. This also sidesteps a real, reproduced bug: on
+# GitHub's runner (Docker Compose v2.38.2), `docker compose build --push`
+# with only `image:` set silently loaded the built image into the local
+# Docker daemon instead of pushing it at all (no "pushing manifest" line,
+# just "exporting to docker image format" / "importing to docker") — only
+# the BuildKit registry *cache* got pushed, not the image. That exact
+# failure didn't reproduce locally with the same compose.yml pattern, so
+# release.yaml's build-builders job also verifies the push landed
+# (`docker buildx imagetools inspect`) and fails loudly if it didn't,
+# rather than let it surface later as a confusing "not found" in
+# `paws release`.
 #
 # cache_from/cache_to use BuildKit's registry cache exporter
 # (type=registry), one shared "cache-<name>" tag per builder on GHCR only
@@ -54,6 +69,8 @@ services:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-linux-gnu
       cache_to:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-linux-gnu,mode=max
+      tags:
+        - docker.io/mbround18/paws-builders:linux-gnu-${VERSION:-dev}
     image: ghcr.io/mbround18/paws-builders:linux-gnu-${VERSION:-dev}
 
   linux-musl-x86_64:
@@ -67,6 +84,8 @@ services:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-linux-musl-x86_64
       cache_to:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-linux-musl-x86_64,mode=max
+      tags:
+        - docker.io/mbround18/paws-builders:linux-musl-x86_64-${VERSION:-dev}
     image: ghcr.io/mbround18/paws-builders:linux-musl-x86_64-${VERSION:-dev}
 
   linux-musl-aarch64:
@@ -80,6 +99,8 @@ services:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-linux-musl-aarch64
       cache_to:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-linux-musl-aarch64,mode=max
+      tags:
+        - docker.io/mbround18/paws-builders:linux-musl-aarch64-${VERSION:-dev}
     image: ghcr.io/mbround18/paws-builders:linux-musl-aarch64-${VERSION:-dev}
 
   windows-gnu:
@@ -93,6 +114,8 @@ services:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-windows-gnu
       cache_to:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-windows-gnu,mode=max
+      tags:
+        - docker.io/mbround18/paws-builders:windows-gnu-${VERSION:-dev}
     image: ghcr.io/mbround18/paws-builders:windows-gnu-${VERSION:-dev}
 
   macos:
@@ -106,6 +129,8 @@ services:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-macos
       cache_to:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-macos,mode=max
+      tags:
+        - docker.io/mbround18/paws-builders:macos-${VERSION:-dev}
     image: ghcr.io/mbround18/paws-builders:macos-${VERSION:-dev}
 
   tauri-linux:
@@ -119,6 +144,8 @@ services:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-tauri-linux
       cache_to:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-tauri-linux,mode=max
+      tags:
+        - docker.io/mbround18/paws-builders:tauri-linux-${VERSION:-dev}
     image: ghcr.io/mbround18/paws-builders:tauri-linux-${VERSION:-dev}
 
   tauri-android:
@@ -132,4 +159,6 @@ services:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-tauri-android
       cache_to:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-tauri-android,mode=max
+      tags:
+        - docker.io/mbround18/paws-builders:tauri-android-${VERSION:-dev}
     image: ghcr.io/mbround18/paws-builders:tauri-android-${VERSION:-dev}

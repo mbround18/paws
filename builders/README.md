@@ -31,11 +31,20 @@ not N independent ones.
 Building them concurrently on one machine exhausted a real GitHub-hosted runner's disk ("no space
 left on device": every builder here is a full toolchain image — JDK+Android SDK/NDK, osxcross,
 GTK/WebKit — and `docker compose build`'s default behavior duplicates each one's storage once for
-BuildKit's own cache and again importing it into the local Docker daemon). Each matrix leg instead
-runs `docker compose build --push <builder>`, which pushes straight from BuildKit to GHCR without
-ever loading the image into the runner's local daemon, then `docker buildx imagetools create` to
-copy the manifest to Docker Hub registry-to-registry — no local pull/tag/push round-trip, verified
-directly against a pair of local test registries.
+BuildKit's own cache and again importing it into the local Docker daemon). Each matrix leg runs
+`docker compose build --push <builder>`, which pushes to both registries in the same build —
+`image:` is the GHCR ref, `compose.yml`'s `build.tags` adds the Docker Hub one — rather than a
+separate copy step, verified directly against a pair of local test registries.
+
+`build-builders` also re-verifies both pushes actually landed (`docker buildx imagetools
+inspect`), rather than trusting the build step's exit code alone: a real, reproduced bug had
+`docker compose build --push` (with only `image:` set, no `build.tags`) silently load the built
+image into the runner's local Docker daemon instead of pushing it — no error, exit 0, only the
+BuildKit registry *cache* actually landed in the registry. That exact failure didn't reproduce
+locally against the same `compose.yml` pattern (a Docker Compose version difference is the leading
+suspect — the runner ran v2.38.2), so this doesn't assume `build.tags` fully closes it; the
+verification step is what actually catches a repeat, loudly, instead of it surfacing later as a
+confusing "image not found" in `paws release`.
 
 This also means these Dockerfiles are no longer required to exist on disk wherever `paws release`
 runs — the images are `paws`'s own, centrally published by `paws`'s own release pipeline, not
