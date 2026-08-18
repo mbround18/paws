@@ -46,12 +46,15 @@ jobs:
       - name: SC-004 lint (container-engine call-site check)
         run: ./scripts/check-dagger-callsites.sh
 
-  # spec.md FR-008: `paws ci --toolchain node` and `--toolchain rust` must
-  # each be exercised end-to-end against a real fixture project, not just
-  # unit-tested. Separate job: needs the real `dagger` CLI + a Dagger engine
-  # (itself running in Docker) and depends on `gh-reusable`'s Dagger module
-  # being reachable on GitHub, so it's kept independent of the fast unit-test
-  # job above rather than blocking it on external/slower infrastructure.
+  # spec.md FR-008: `paws ci --toolchain node`, `--toolchain rust`, and
+  # `--toolchain python` must each be exercised end-to-end against a real
+  # fixture project, not just unit-tested. Separate job: needs the real
+  # `dagger` CLI + a Dagger engine (itself running in Docker), so it's kept
+  # independent of the fast unit-test job above rather than blocking it on
+  # slower infrastructure. All three toolchains build native
+  # `paws-dagger::core` pipelines now (no `gh-reusable` dependency) — this
+  # job's separation is purely about needing real Dagger, not an external
+  # dependency.
   ci-e2e:
     name: paws ci end-to-end (dagger)
     runs-on: ubuntu-latest

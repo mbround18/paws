@@ -37,7 +37,9 @@ pub fn detect_project(dir: &Path) -> Result<PythonProject> {
     if !is_python_project(dir) {
         anyhow::bail!("no pyproject.toml found in {}", dir.display());
     }
-    Ok(PythonProject { has_lockfile: dir.join("uv.lock").is_file() })
+    Ok(PythonProject {
+        has_lockfile: dir.join("uv.lock").is_file(),
+    })
 }
 
 /// Builds the `dagger core <chain>` argument list (see `paws_dagger::core`)
@@ -49,7 +51,11 @@ pub fn dagger_pipeline_args(project: &PythonProject, source_dir: &str) -> Vec<St
 
 /// Same as [`dagger_pipeline_args`], with an explicit Python version
 /// (selects the `astral/uv:python<version>-trixie-slim` image tag).
-pub fn dagger_pipeline_args_with_version(project: &PythonProject, source_dir: &str, python_version: &str) -> Vec<String> {
+pub fn dagger_pipeline_args_with_version(
+    project: &PythonProject,
+    source_dir: &str,
+    python_version: &str,
+) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "container".into(),
         "from".into(),
@@ -66,7 +72,11 @@ pub fn dagger_pipeline_args_with_version(project: &PythonProject, source_dir: &s
         args.push(format!("--args={}", command_args.join(",")));
     };
 
-    let mut sync = vec!["uv".to_string(), "sync".to_string(), "--all-groups".to_string()];
+    let mut sync = vec![
+        "uv".to_string(),
+        "sync".to_string(),
+        "--all-groups".to_string(),
+    ];
     if project.has_lockfile {
         sync.push("--frozen".to_string());
     }
@@ -84,7 +94,8 @@ mod tests {
     use std::fs;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("paws-python-test-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("paws-python-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -93,7 +104,10 @@ mod tests {
     #[test]
     fn detects_python_project_from_pyproject_toml() {
         let dir = temp_dir("detect");
-        assert!(!is_python_project(&dir), "should not detect before pyproject.toml exists");
+        assert!(
+            !is_python_project(&dir),
+            "should not detect before pyproject.toml exists"
+        );
         fs::write(dir.join("pyproject.toml"), "[project]\nname = \"x\"\n").unwrap();
         assert!(is_python_project(&dir));
         fs::remove_dir_all(&dir).unwrap();
@@ -137,7 +151,9 @@ mod tests {
 
     #[test]
     fn pipeline_omits_frozen_flag_without_a_lockfile() {
-        let project = PythonProject { has_lockfile: false };
+        let project = PythonProject {
+            has_lockfile: false,
+        };
         let args = dagger_pipeline_args(&project, "/host/src");
         assert!(args.contains(&"--args=uv,sync,--all-groups".to_string()));
         assert!(!args.iter().any(|a| a.contains("--frozen")));

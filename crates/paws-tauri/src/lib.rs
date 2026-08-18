@@ -46,7 +46,8 @@ const TAURI_ANDROID_DOCKERFILE: &str = include_str!("../../../builders/tauri-and
 
 fn write_dockerfile(name: &str, contents: &str) -> Result<PathBuf> {
     let dir = std::env::temp_dir().join("paws-builders").join(name);
-    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create temp dir for the {name} builder Dockerfile"))?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create temp dir for the {name} builder Dockerfile"))?;
     std::fs::write(dir.join("Dockerfile"), contents)
         .with_context(|| format!("failed to write the {name} builder Dockerfile"))?;
     Ok(dir)
@@ -73,8 +74,12 @@ fn pipeline_args(
     tauri_subcommand: &[&str],
 ) -> Vec<String> {
     let pm = project.package_manager;
-    let created_unix = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let build_args = format!("BUILDER_VERSION=dev,BUILDER_REVISION=unknown,BUILDER_CREATED={created_unix}");
+    let created_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let build_args =
+        format!("BUILDER_VERSION=dev,BUILDER_REVISION=unknown,BUILDER_CREATED={created_unix}");
 
     let mut args: Vec<String> = vec![
         "host".into(),
@@ -97,7 +102,12 @@ fn pipeline_args(
     if let Some(setup) = pm.setup_args() {
         push_exec(setup.iter().map(|s| s.to_string()).collect());
     }
-    push_exec(pm.install_args(project.has_lockfile).iter().map(|s| s.to_string()).collect());
+    push_exec(
+        pm.install_args(project.has_lockfile)
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    );
     // `<pm> run tauri [android] build` — the "tauri" script (aliasing
     // `@tauri-apps/cli`, which every `create-tauri-app` scaffold defines)
     // takes the subcommand as positional arguments, not a second script name.
@@ -127,7 +137,11 @@ fn pipeline_args(
 /// the project actually defines them — unlike `paws-node`'s plain pipeline,
 /// `build`+`test` aren't required here (a fresh Tauri scaffold has neither;
 /// `tauri build` is the meaningful step).
-pub fn dagger_pipeline_args(project: &NodeProject, source_dir: &str, builder_dir: &str) -> Vec<String> {
+pub fn dagger_pipeline_args(
+    project: &NodeProject,
+    source_dir: &str,
+    builder_dir: &str,
+) -> Vec<String> {
     pipeline_args(project, source_dir, builder_dir, &["build"])
 }
 
@@ -137,7 +151,11 @@ pub fn dagger_pipeline_args(project: &NodeProject, source_dir: &str, builder_dir
 /// repo has already run `tauri android init` (`src-tauri/gen/android`
 /// committed) — `paws` builds what's there, it doesn't scaffold mobile
 /// projects itself.
-pub fn android_dagger_pipeline_args(project: &NodeProject, source_dir: &str, builder_dir: &str) -> Vec<String> {
+pub fn android_dagger_pipeline_args(
+    project: &NodeProject,
+    source_dir: &str,
+    builder_dir: &str,
+) -> Vec<String> {
     pipeline_args(project, source_dir, builder_dir, &["android", "build"])
 }
 
@@ -148,7 +166,8 @@ mod tests {
     use std::fs;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("paws-tauri-test-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("paws-tauri-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("src-tauri")).unwrap();
         dir
@@ -157,7 +176,10 @@ mod tests {
     #[test]
     fn detects_tauri_project_from_config_file() {
         let dir = temp_dir("detect");
-        assert!(!is_tauri_project(&dir), "should not detect before tauri.conf.json exists");
+        assert!(
+            !is_tauri_project(&dir),
+            "should not detect before tauri.conf.json exists"
+        );
         fs::write(dir.join("src-tauri").join("tauri.conf.json"), "{}").unwrap();
         assert!(is_tauri_project(&dir));
         fs::remove_dir_all(&dir).unwrap();
@@ -238,7 +260,8 @@ mod tests {
 
     #[test]
     fn android_pipeline_runs_tauri_android_build() {
-        let args = android_dagger_pipeline_args(&project(), "/host/src", "/tmp/some-android-builder-dir");
+        let args =
+            android_dagger_pipeline_args(&project(), "/host/src", "/tmp/some-android-builder-dir");
         assert_eq!(args[2], "--path=/tmp/some-android-builder-dir");
         assert!(args.contains(&"--args=npm,run,tauri,android,build".to_string()));
         assert!(!args.iter().any(|a| a == "--args=npm,run,tauri,build"));

@@ -21,7 +21,11 @@ Confirmed directly against the code, not from memory:
   (`uv sync --all-groups [--frozen] && uv build && uv run pytest` against
   `astral/uv:python3.12-trixie-slim`) — `uv`-based projects only, matching what `gh-reusable`
   actually supports (no poetry/pipenv/pip path exists there to port). Verified for real, end to
-  end, against `examples/python-fixture` (a real `uv init` scaffold).
+  end, against `examples/python-fixture` (a real `uv init` scaffold). `rust` (`crates/paws-rust`)
+  is a native port of `gh-reusable`'s real `rustBuildAndTest` function (`cargo fmt -- --check`,
+  `cargo clippy`, `cargo build --verbose`, `cargo test --verbose`, fail-fast) against the plain
+  `rust:1-bookworm` image — no `gh-reusable` dependency left for `--toolchain rust` at all.
+  Verified for real, end to end, dogfooding `paws` on its own repo.
 - **`paws provision`** (concurrent toolchain installers): `rust`, `node`, `python`
   (`paws_provision::Ecosystem`). `gh-reusable` (the TS system `paws` is replacing) already has
   `setupGo`/`setupRuby`/`setupJava`/`setupTerraform`/`setupPulumi` — none of those ecosystems are

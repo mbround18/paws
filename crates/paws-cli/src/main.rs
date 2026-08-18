@@ -1,11 +1,11 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use paws_audit::{select_audit_scanners, RepositorySignals};
-use paws_dagger::{call, DaggerCall};
-use paws_docker::{resolve_docker_facts, DockerFactsInput, GithubContext as DockerGithubContext};
-use paws_provision::{provision_with_timing, real_installer, Ecosystem, Installer};
-use paws_release::{archive_name, package_zip, GitHubReleaseClient};
-use paws_semver::{compute_new_version, GitHubGraphQlTagSource, Increment, SemverRequest};
+use paws_audit::{RepositorySignals, select_audit_scanners};
+use paws_dagger::{DaggerCall, call};
+use paws_docker::{DockerFactsInput, GithubContext as DockerGithubContext, resolve_docker_facts};
+use paws_provision::{Ecosystem, Installer, provision_with_timing, real_installer};
+use paws_release::{GitHubReleaseClient, archive_name, package_zip};
+use paws_semver::{GitHubGraphQlTagSource, Increment, SemverRequest, compute_new_version};
 
 /// Detects which of the ecosystems `paws-provision` knows about are needed in
 /// the current directory, purely from marker files (mirrors `paws-audit`'s
@@ -30,24 +30,35 @@ fn detect_needed_ecosystems() -> Vec<Ecosystem> {
 /// it reported success — callers use this to decide their own exit code
 /// rather than always exiting 0 on a successful `dagger call` process spawn.
 async fn call_pipeline_report(function: &str, args: Vec<String>) -> anyhow::Result<bool> {
-    let output = call(DaggerCall { module: GH_REUSABLE_DAGGER_MODULE.into(), function: function.into(), args }).await?;
+    let output = call(DaggerCall {
+        module: GH_REUSABLE_DAGGER_MODULE.into(),
+        function: function.into(),
+        args,
+    })
+    .await?;
 
-    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap_or(serde_json::Value::Null);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&output).unwrap_or(serde_json::Value::Null);
     if let Some(markdown) = parsed.get("markdown").and_then(|v| v.as_str()) {
         println!("{markdown}");
     } else {
         println!("{output}");
     }
 
-    Ok(parsed.get("success").and_then(|v| v.as_bool()).unwrap_or(true))
+    Ok(parsed
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true))
 }
 
 async fn run_provisioning(ecosystems: Vec<Ecosystem>, verbose: bool) -> anyhow::Result<()> {
     if ecosystems.is_empty() {
         return Ok(());
     }
-    let tasks: Vec<(Ecosystem, Box<dyn Installer>)> =
-        ecosystems.into_iter().map(|e| (e, real_installer(e))).collect();
+    let tasks: Vec<(Ecosystem, Box<dyn Installer>)> = ecosystems
+        .into_iter()
+        .map(|e| (e, real_installer(e)))
+        .collect();
     let requested: Vec<Ecosystem> = tasks.iter().map(|(e, _)| *e).collect();
 
     let outcomes = provision_with_timing(tasks).await;
@@ -117,8 +128,7 @@ fn collect_repository_signals() -> RepositorySignals {
 /// pinned commit was verified working end-to-end (`rust-build-and-test`
 /// against `examples/rust-fixture`). Bump only after re-verifying a real
 /// `dagger call` against the new commit succeeds, not on trust.
-const GH_REUSABLE_DAGGER_MODULE: &str =
-    "github.com/mbround18/gh-reusable/packages/dagger-module@7fbda5676b56479aa458b1ecdc0313ed1a1cc934";
+const GH_REUSABLE_DAGGER_MODULE: &str = "github.com/mbround18/gh-reusable/packages/dagger-module@7fbda5676b56479aa458b1ecdc0313ed1a1cc934";
 
 /// paws: run-anywhere CI/CD pipelines, backed by Dagger.
 #[derive(Parser)]
@@ -309,7 +319,8 @@ async fn main() -> anyhow::Result<()> {
                             project.package_manager.as_str(),
                             dir.display()
                         );
-                        let args = paws_node::dagger_pipeline_args(&project, &dir.to_string_lossy());
+                        let args =
+                            paws_node::dagger_pipeline_args(&project, &dir.to_string_lossy());
                         let output = paws_dagger::core(&args).await?;
                         print!("{output}");
                         println!("ci: node build/test succeeded");
@@ -347,7 +358,11 @@ async fn main() -> anyhow::Result<()> {
                         .context("failed to detect a Python project in the current directory")?;
                     println!(
                         "ci: python project ({}) ({})",
-                        if project.has_lockfile { "uv.lock present" } else { "no uv.lock" },
+                        if project.has_lockfile {
+                            "uv.lock present"
+                        } else {
+                            "no uv.lock"
+                        },
                         dir.display()
                     );
                     let args = paws_python::dagger_pipeline_args(&project, &dir.to_string_lossy());
@@ -356,12 +371,18 @@ async fn main() -> anyhow::Result<()> {
                     println!("ci: python build/test succeeded");
                 }
                 Some("rust") => {
-                    let source = std::env::current_dir()?.to_string_lossy().to_string();
-                    let succeeded =
-                        call_pipeline_report("rust-build-and-test", vec!["--source".into(), source]).await?;
-                    if !succeeded {
-                        anyhow::bail!("ci failed: see report above");
+                    let dir = std::env::current_dir()?;
+                    if !paws_rust::is_rust_project(&dir) {
+                        anyhow::bail!(
+                            "--toolchain rust given, but no Cargo.toml found in {}",
+                            dir.display()
+                        );
                     }
+                    println!("ci: rust project ({})", dir.display());
+                    let args = paws_rust::dagger_pipeline_args(&dir.to_string_lossy());
+                    let output = paws_dagger::core(&args).await?;
+                    print!("{output}");
+                    println!("ci: rust build/test succeeded");
                 }
                 Some(other) => anyhow::bail!(
                     "unsupported --toolchain '{other}'; expected 'node', 'rust', 'python', 'tauri', or 'tauri-android'"
@@ -385,9 +406,13 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let image = image
                 .or_else(|| std::env::var("GITHUB_REPOSITORY").ok())
-                .ok_or_else(|| anyhow::anyhow!("--image is required (or set $GITHUB_REPOSITORY)"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("--image is required (or set $GITHUB_REPOSITORY)")
+                })?;
             let version = version.unwrap_or_else(|| {
-                std::env::var("GITHUB_SHA").map(|sha| sha.chars().take(7).collect()).unwrap_or_default()
+                std::env::var("GITHUB_SHA")
+                    .map(|sha| sha.chars().take(7).collect())
+                    .unwrap_or_default()
             });
             let git_ref = std::env::var("GITHUB_REF").unwrap_or_default();
             let event_name = std::env::var("GITHUB_EVENT_NAME").unwrap_or_default();
@@ -508,7 +533,9 @@ async fn main() -> anyhow::Result<()> {
             println!("{version}");
         }
         Commands::Init => {
-            let install_dir = paws_dagger::install_cli().await.context("failed to install the dagger CLI")?;
+            let install_dir = paws_dagger::install_cli()
+                .await
+                .context("failed to install the dagger CLI")?;
             println!("dagger CLI installed to {}", install_dir.display());
 
             // Prepend to this process's own PATH so the sanity check below
@@ -525,8 +552,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            paws_dagger::ensure_available().await.context("dagger was installed but isn't runnable")?;
-            println!("init: dagger is ready (add {} to PATH for future shells)", install_dir.display());
+            paws_dagger::ensure_available()
+                .await
+                .context("dagger was installed but isn't runnable")?;
+            println!(
+                "init: dagger is ready (add {} to PATH for future shells)",
+                install_dir.display()
+            );
         }
         Commands::Audit => {
             // Local pre-check only: `paws-audit`'s detection logic decides
@@ -556,7 +588,10 @@ async fn main() -> anyhow::Result<()> {
             let docs_dir = paws_docs::build_docs(&workspace).await?;
             println!("docs: built at {}", docs_dir.display());
         }
-        Commands::Provision { toolchains, verbose } => {
+        Commands::Provision {
+            toolchains,
+            verbose,
+        } => {
             if toolchains.is_empty() {
                 anyhow::bail!("--toolchains is required (e.g. --toolchains rust,node,python)");
             }
@@ -579,8 +614,9 @@ async fn main() -> anyhow::Result<()> {
             skip_smoke_test,
         } => {
             let tag = tag.or_else(|| std::env::var("GITHUB_REF_NAME").ok());
-            let raw_tag =
-                tag.clone().ok_or_else(|| anyhow::anyhow!("--tag is required (or set $GITHUB_REF_NAME)"))?;
+            let raw_tag = tag
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--tag is required (or set $GITHUB_REF_NAME)"))?;
             // Archive names drop the "v" prefix (established convention, matches
             // prereleases already published); the prebuilt builder image tag does
             // not — `release.yaml`'s build-builders job tags it from the raw
@@ -591,13 +627,20 @@ async fn main() -> anyhow::Result<()> {
             let target_config = paws_release::target_config(&target).ok_or_else(|| {
                 anyhow::anyhow!(
                     "unknown --target '{target}'; known targets: {}",
-                    paws_release::known_targets().iter().map(|t| t.triple).collect::<Vec<_>>().join(", ")
+                    paws_release::known_targets()
+                        .iter()
+                        .map(|t| t.triple)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
             })?;
 
             paws_dagger::ensure_available().await?;
 
-            println!("release: building {binary_name} for {target} via {}...", target_config.builder_dir);
+            println!(
+                "release: building {binary_name} for {target} via {}...",
+                target_config.builder_dir
+            );
             let binary_path = paws_release::build_binary(&paws_release::BuildRequest {
                 builder_dir: target_config.builder_dir,
                 source_dir: &source,
@@ -612,7 +655,9 @@ async fn main() -> anyhow::Result<()> {
             match (&target_config.smoke, skip_smoke_test) {
                 (_, true) => println!("release: --skip-smoke-test set, skipping"),
                 (None, false) => {
-                    println!("release: no execution environment available for {target}, skipping smoke test (build/link success only)");
+                    println!(
+                        "release: no execution environment available for {target}, skipping smoke test (build/link success only)"
+                    );
                 }
                 (Some(spec), false) => {
                     println!("release: smoke testing...");
@@ -622,7 +667,9 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let archive = archive_name(&binary_name, &version, &target);
-            let archive_path = std::path::Path::new("target").join("release-archives").join(&archive);
+            let archive_path = std::path::Path::new("target")
+                .join("release-archives")
+                .join(&archive);
             let relative_binary = binary_path.to_string_lossy().to_string();
             package_zip(&std::env::current_dir()?, &archive_path, &[relative_binary]).await?;
             println!("release: packaged {}", archive_path.display());
@@ -632,16 +679,24 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            let tag = tag.ok_or_else(|| anyhow::anyhow!("--tag is required to upload (or set $GITHUB_REF_NAME)"))?;
+            let tag = tag.ok_or_else(|| {
+                anyhow::anyhow!("--tag is required to upload (or set $GITHUB_REF_NAME)")
+            })?;
             let repository = repository
                 .or_else(|| std::env::var("GITHUB_REPOSITORY").ok())
-                .ok_or_else(|| anyhow::anyhow!("--repository is required (or set $GITHUB_REPOSITORY)"))?;
-            let (owner, repo) = repository
-                .split_once('/')
-                .ok_or_else(|| anyhow::anyhow!("--repository must be \"owner/repo\", got {repository}"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("--repository is required (or set $GITHUB_REPOSITORY)")
+                })?;
+            let (owner, repo) = repository.split_once('/').ok_or_else(|| {
+                anyhow::anyhow!("--repository must be \"owner/repo\", got {repository}")
+            })?;
             let token = std::env::var("GITHUB_TOKEN")
                 .or_else(|_| std::env::var("GH_TOKEN"))
-                .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN (or GH_TOKEN) must be set to upload a release asset"))?;
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "GITHUB_TOKEN (or GH_TOKEN) must be set to upload a release asset"
+                    )
+                })?;
 
             let client = GitHubReleaseClient::new(owner.to_string(), repo.to_string(), token);
             let release_id = client.get_or_create_release(&tag, prerelease).await?;

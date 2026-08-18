@@ -48,34 +48,62 @@ pub fn known_targets() -> Vec<TargetConfig> {
         TargetConfig {
             triple: "x86_64-unknown-linux-gnu",
             builder_dir: "builders/linux-gnu",
-            smoke: Some(SmokeTestSpec { platform: Some("linux/amd64"), image: "ubuntu:24.04", wine: false }),
+            smoke: Some(SmokeTestSpec {
+                platform: Some("linux/amd64"),
+                image: "ubuntu:24.04",
+                wine: false,
+            }),
         },
         TargetConfig {
             triple: "aarch64-unknown-linux-gnu",
             builder_dir: "builders/linux-gnu",
-            smoke: Some(SmokeTestSpec { platform: Some("linux/arm64"), image: "ubuntu:24.04", wine: false }),
+            smoke: Some(SmokeTestSpec {
+                platform: Some("linux/arm64"),
+                image: "ubuntu:24.04",
+                wine: false,
+            }),
         },
         TargetConfig {
             triple: "x86_64-unknown-linux-musl",
             builder_dir: "builders/linux-musl-x86_64",
-            smoke: Some(SmokeTestSpec { platform: Some("linux/amd64"), image: "alpine:3.20", wine: false }),
+            smoke: Some(SmokeTestSpec {
+                platform: Some("linux/amd64"),
+                image: "alpine:3.20",
+                wine: false,
+            }),
         },
         TargetConfig {
             triple: "aarch64-unknown-linux-musl",
             builder_dir: "builders/linux-musl-aarch64",
-            smoke: Some(SmokeTestSpec { platform: Some("linux/arm64"), image: "alpine:3.20", wine: false }),
+            smoke: Some(SmokeTestSpec {
+                platform: Some("linux/arm64"),
+                image: "alpine:3.20",
+                wine: false,
+            }),
         },
         TargetConfig {
             triple: "x86_64-pc-windows-gnu",
             builder_dir: "builders/windows-gnu",
-            smoke: Some(SmokeTestSpec { platform: None, image: "scottyhardy/docker-wine", wine: true }),
+            smoke: Some(SmokeTestSpec {
+                platform: None,
+                image: "scottyhardy/docker-wine",
+                wine: true,
+            }),
         },
         // Mach-O binaries: Dagger can't run a macOS container, and Wine only
         // emulates Windows PE, not Mach-O, so there's no execution
         // environment available to smoke-test these — build+link-verified
         // only (see builders/macos/README.md).
-        TargetConfig { triple: "x86_64-apple-darwin", builder_dir: "builders/macos", smoke: None },
-        TargetConfig { triple: "aarch64-apple-darwin", builder_dir: "builders/macos", smoke: None },
+        TargetConfig {
+            triple: "x86_64-apple-darwin",
+            builder_dir: "builders/macos",
+            smoke: None,
+        },
+        TargetConfig {
+            triple: "aarch64-apple-darwin",
+            builder_dir: "builders/macos",
+            smoke: None,
+        },
     ]
 }
 
@@ -121,7 +149,10 @@ pub struct BuildRequest<'a> {
 /// [`build_binary`]) — this function can't know whether the image actually
 /// exists.
 pub fn prebuilt_image_candidate(builder_dir: &str, version: &str) -> String {
-    let name = Path::new(builder_dir).file_name().and_then(|s| s.to_str()).unwrap_or(builder_dir);
+    let name = Path::new(builder_dir)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(builder_dir);
     format!("ghcr.io/mbround18/paws-builders:{name}-{version}")
 }
 
@@ -143,8 +174,12 @@ pub async fn build_binary(request: &BuildRequest<'_>) -> Result<PathBuf> {
     let file_name = binary_file_name(request.binary_name, request.triple);
     let container_bin_path = format!("target/{}/release/{}", request.triple, file_name);
 
-    let out_dir = Path::new("target").join("dagger-release").join(request.triple);
-    tokio::fs::create_dir_all(&out_dir).await.context("failed to create release output directory")?;
+    let out_dir = Path::new("target")
+        .join("dagger-release")
+        .join(request.triple);
+    tokio::fs::create_dir_all(&out_dir)
+        .await
+        .context("failed to create release output directory")?;
     let out_path = out_dir.join(&file_name);
 
     let prebuilt = prebuilt_image_candidate(request.builder_dir, request.builder_version);
@@ -157,7 +192,11 @@ pub async fn build_binary(request: &BuildRequest<'_>) -> Result<PathBuf> {
         );
     }
 
-    let mut args: Vec<String> = vec!["container".into(), "from".into(), format!("--address={prebuilt}")];
+    let mut args: Vec<String> = vec![
+        "container".into(),
+        "from".into(),
+        format!("--address={prebuilt}"),
+    ];
 
     args.extend([
         "with-mounted-directory".into(),
@@ -166,14 +205,19 @@ pub async fn build_binary(request: &BuildRequest<'_>) -> Result<PathBuf> {
         "with-workdir".into(),
         "--path=/src".into(),
         "with-exec".into(),
-        format!("--args=cargo,build,--release,--target,{},-p,{}", request.triple, request.package),
+        format!(
+            "--args=cargo,build,--release,--target,{},-p,{}",
+            request.triple, request.package
+        ),
         "file".into(),
         format!("--path={container_bin_path}"),
         "export".into(),
         format!("--path={}", out_path.display()),
     ]);
 
-    paws_dagger::core(&args).await.with_context(|| format!("dagger build failed for target {}", request.triple))?;
+    paws_dagger::core(&args)
+        .await
+        .with_context(|| format!("dagger build failed for target {}", request.triple))?;
     Ok(out_path)
 }
 
@@ -198,10 +242,19 @@ pub async fn smoke_test(binary_path: &Path, spec: &SmokeTestSpec) -> Result<Stri
     ]);
 
     if spec.wine {
-        args.extend(["with-exec".into(), format!("--args=wine,{container_path},--version")]);
+        args.extend([
+            "with-exec".into(),
+            format!("--args=wine,{container_path},--version"),
+        ]);
     } else {
-        args.extend(["with-exec".into(), format!("--args=chmod,+x,{container_path}")]);
-        args.extend(["with-exec".into(), format!("--args={container_path},--version")]);
+        args.extend([
+            "with-exec".into(),
+            format!("--args=chmod,+x,{container_path}"),
+        ]);
+        args.extend([
+            "with-exec".into(),
+            format!("--args={container_path},--version"),
+        ]);
     }
     args.push("stdout".into());
 
@@ -215,7 +268,9 @@ pub async fn smoke_test(binary_path: &Path, spec: &SmokeTestSpec) -> Result<Stri
 /// `build_binary`/`smoke_test` exist to satisfy.
 pub async fn package_zip(working_dir: &Path, archive_path: &Path, files: &[String]) -> Result<()> {
     if let Some(parent) = archive_path.parent() {
-        tokio::fs::create_dir_all(parent).await.context("failed to create archive output directory")?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .context("failed to create archive output directory")?;
     }
 
     let output = Command::new("zip")
@@ -246,7 +301,12 @@ pub struct GitHubReleaseClient {
 
 impl GitHubReleaseClient {
     pub fn new(owner: String, repo: String, token: String) -> Self {
-        Self { owner, repo, token, client: reqwest::Client::new() }
+        Self {
+            owner,
+            repo,
+            token,
+            client: reqwest::Client::new(),
+        }
     }
 
     fn api_base(&self) -> String {
@@ -265,11 +325,21 @@ impl GitHubReleaseClient {
     /// `prerelease` is true) if it doesn't exist yet. Returns the release id.
     pub async fn get_or_create_release(&self, tag: &str, prerelease: bool) -> Result<u64> {
         let get_url = format!("{}/releases/tags/{tag}", self.api_base());
-        let response = self.auth_headers(self.client.get(&get_url)).send().await.context("failed to query release by tag")?;
+        let response = self
+            .auth_headers(self.client.get(&get_url))
+            .send()
+            .await
+            .context("failed to query release by tag")?;
 
         if response.status().is_success() {
-            let body: serde_json::Value = response.json().await.context("failed to parse release response")?;
-            return body.get("id").and_then(|v| v.as_u64()).context("release response missing id");
+            let body: serde_json::Value = response
+                .json()
+                .await
+                .context("failed to parse release response")?;
+            return body
+                .get("id")
+                .and_then(|v| v.as_u64())
+                .context("release response missing id");
         }
         if response.status() != reqwest::StatusCode::NOT_FOUND {
             anyhow::bail!("unexpected status querying release: {}", response.status());
@@ -294,21 +364,33 @@ impl GitHubReleaseClient {
             let text = response.text().await.unwrap_or_default();
             anyhow::bail!("failed to create release for tag {tag}: {status}: {text}");
         }
-        let body: serde_json::Value = response.json().await.context("failed to parse created-release response")?;
-        body.get("id").and_then(|v| v.as_u64()).context("created-release response missing id")
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("failed to parse created-release response")?;
+        body.get("id")
+            .and_then(|v| v.as_u64())
+            .context("created-release response missing id")
     }
 
     /// Uploads `file_path` as a release asset, replacing any existing asset
     /// with the same name first (mirrors `gh release upload --clobber`).
     pub async fn upload_asset(&self, release_id: u64, file_path: &Path) -> Result<()> {
-        let file_name =
-            file_path.file_name().and_then(|n| n.to_str()).context("archive path has no file name")?.to_string();
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .context("archive path has no file name")?
+            .to_string();
 
         self.delete_existing_asset(release_id, &file_name).await?;
 
-        let bytes = tokio::fs::read(file_path).await.context("failed to read archive for upload")?;
-        let upload_url =
-            format!("https://uploads.github.com/repos/{}/{}/releases/{release_id}/assets?name={file_name}", self.owner, self.repo);
+        let bytes = tokio::fs::read(file_path)
+            .await
+            .context("failed to read archive for upload")?;
+        let upload_url = format!(
+            "https://uploads.github.com/repos/{}/{}/releases/{release_id}/assets?name={file_name}",
+            self.owner, self.repo
+        );
 
         let response = self
             .auth_headers(self.client.post(&upload_url))
@@ -328,19 +410,30 @@ impl GitHubReleaseClient {
 
     async fn delete_existing_asset(&self, release_id: u64, file_name: &str) -> Result<()> {
         let list_url = format!("{}/releases/{release_id}/assets", self.api_base());
-        let response =
-            self.auth_headers(self.client.get(&list_url)).send().await.context("failed to list release assets")?;
+        let response = self
+            .auth_headers(self.client.get(&list_url))
+            .send()
+            .await
+            .context("failed to list release assets")?;
         if !response.status().is_success() {
             return Ok(()); // best-effort; the upload itself will surface a clearer error if this matters
         }
         let assets: Vec<serde_json::Value> = response.json().await.unwrap_or_default();
-        let Some(existing) = assets.iter().find(|a| a.get("name").and_then(|n| n.as_str()) == Some(file_name)) else {
+        let Some(existing) = assets
+            .iter()
+            .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(file_name))
+        else {
             return Ok(());
         };
-        let Some(asset_id) = existing.get("id").and_then(|v| v.as_u64()) else { return Ok(()) };
+        let Some(asset_id) = existing.get("id").and_then(|v| v.as_u64()) else {
+            return Ok(());
+        };
 
         let delete_url = format!("{}/releases/assets/{asset_id}", self.api_base());
-        self.auth_headers(self.client.delete(&delete_url)).send().await.context("failed to delete existing asset")?;
+        self.auth_headers(self.client.delete(&delete_url))
+            .send()
+            .await
+            .context("failed to delete existing asset")?;
         Ok(())
     }
 }
@@ -351,10 +444,19 @@ mod tests {
 
     #[test]
     fn windows_targets_get_exe_suffix() {
-        assert_eq!(binary_file_name("paws", "x86_64-pc-windows-gnu"), "paws.exe");
+        assert_eq!(
+            binary_file_name("paws", "x86_64-pc-windows-gnu"),
+            "paws.exe"
+        );
         assert_eq!(binary_file_name("paws", "x86_64-unknown-linux-gnu"), "paws");
-        assert_eq!(binary_file_name("paws", "x86_64-unknown-linux-musl"), "paws");
-        assert_eq!(binary_file_name("paws", "aarch64-unknown-linux-gnu"), "paws");
+        assert_eq!(
+            binary_file_name("paws", "x86_64-unknown-linux-musl"),
+            "paws"
+        );
+        assert_eq!(
+            binary_file_name("paws", "aarch64-unknown-linux-gnu"),
+            "paws"
+        );
     }
 
     #[test]
@@ -380,21 +482,46 @@ mod tests {
     #[test]
     fn known_targets_each_have_a_matching_builder_dockerfile() {
         for target in known_targets() {
-            let dockerfile = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(target.builder_dir).join("Dockerfile");
-            assert!(dockerfile.is_file(), "missing {dockerfile:?} for target {}", target.triple);
+            let dockerfile = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(target.builder_dir)
+                .join("Dockerfile");
+            assert!(
+                dockerfile.is_file(),
+                "missing {dockerfile:?} for target {}",
+                target.triple
+            );
         }
     }
 
     #[tokio::test]
     async fn package_zip_produces_a_flat_archive_with_the_binary() {
+        // `zip`/`unzip` aren't guaranteed to be on PATH (e.g. a bare
+        // `rust:1-bookworm` container, which `paws-rust`'s own native CI
+        // pipeline uses) — skip rather than fail when they're genuinely
+        // absent, the same convention `paws-dagger`'s tests use for the
+        // `dagger` CLI.
+        if tokio::process::Command::new("zip")
+            .arg("--version")
+            .output()
+            .await
+            .is_err()
+        {
+            return;
+        }
+
         let dir = std::env::temp_dir().join(format!("paws-release-test-{}", std::process::id()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let nested = dir.join("nested");
         tokio::fs::create_dir_all(&nested).await.unwrap();
-        tokio::fs::write(nested.join("paws"), b"fake binary contents").await.unwrap();
+        tokio::fs::write(nested.join("paws"), b"fake binary contents")
+            .await
+            .unwrap();
 
         let archive_path = dir.join("out").join("paws-test.zip");
-        package_zip(&dir, &archive_path, &["nested/paws".to_string()]).await.unwrap();
+        package_zip(&dir, &archive_path, &["nested/paws".to_string()])
+            .await
+            .unwrap();
 
         assert!(archive_path.is_file());
 
@@ -408,7 +535,10 @@ mod tests {
             .unwrap();
         let listing = String::from_utf8_lossy(&list_output.stdout);
         assert!(listing.contains("paws"), "listing: {listing}");
-        assert!(!listing.contains("nested/paws"), "expected a flat archive, got: {listing}");
+        assert!(
+            !listing.contains("nested/paws"),
+            "expected a flat archive, got: {listing}"
+        );
 
         tokio::fs::remove_dir_all(&dir).await.ok();
     }

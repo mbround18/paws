@@ -20,11 +20,14 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
 - `crates/paws-dagger` — wraps the `dagger` CLI. Deliberately **not** built on the
   `dagger-sdk` Rust crate yet — Dagger's own README marks that SDK experimental and
   "not for anything mission-critical." Pipeline logic goes through this crate so the
-  day the SDK is trustworthy, only this crate needs to change. The interim `ci`/`docker`/
-  `audit` subcommands call into `gh-reusable`'s real Dagger module through here, pinned to a
+  day the SDK is trustworthy, only this crate needs to change. The interim `docker`/`audit`
+  subcommands still call into `gh-reusable`'s real Dagger module through here, pinned to a
   known-good commit (see `GH_REUSABLE_DAGGER_MODULE` in `crates/paws-cli/src/main.rs`) rather
   than trusting its floating `main` branch, which was verified broken (a stale vendored SDK
-  bundle threw at runtime) as of 2026-08-18.
+  bundle threw at runtime) as of 2026-08-18. `ci` no longer does — `node`/`python`/`rust`/
+  `tauri`/`tauri-android` all build native `paws-dagger::core` pipelines now (`crates/paws-node`/
+  `paws-python`/`paws-rust`/`paws-tauri`), so a `paws ci` run has zero dependency on
+  `gh-reusable` being reachable at all.
 - `crates/paws-semver` — native Rust port of `actions/semver` (no `dagger` CLI needed).
   The pilot crate for eventually evaluating `dagger-sdk`.
 - `crates/paws-audit` — native Rust port of the audit/compliance aggregation logic
@@ -71,6 +74,14 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   (`pyproject.toml`) — that's what `gh-reusable` actually supports, no poetry/pipenv/pip path
   exists there to port. `--frozen` is only passed when `uv.lock` is committed, the same
   lockfile-optional-install fix `paws-node` needed for `npm ci`.
+- `crates/paws-rust` — native port of `gh-reusable`'s real `rustBuildAndTest` Dagger function
+  (read directly for parity, not reimplemented from memory): `cargo fmt -- --check`, `cargo
+  clippy`, `cargo build --verbose`, `cargo test --verbose`, in that order, fail-fast. Runs
+  against the plain `rust:1-bookworm` image (the same one every other `paws`-authored Dockerfile
+  in this repo already uses) rather than `gh-reusable`'s toolchain-pin dance — verified directly
+  that image doesn't ship `rustfmt`/`clippy` by default, so a `rustup component add` step comes
+  first. This is what `paws` dogfoods itself with (`paws ci --toolchain rust` against `paws`'s
+  own repo) — no `gh-reusable` dependency for `--toolchain rust` at all anymore.
 
 ## CI
 
