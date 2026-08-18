@@ -1,11 +1,14 @@
 # Builders
 
-Dedicated builder images `paws release` uses to cross-compile itself, one directory per target
-family. Each is a plain `Dockerfile` built through Dagger (`dagger core host directory
---path=builders/<name> docker-build ...` — see `crates/paws-release/src/lib.rs`), not through
-`docker build`/`cross` directly, so building `paws` never needs anything installed beyond the
-`dagger` CLI itself (Dagger's own BuildKit-backed engine provides the layer caching, and its
-`--platform` support provides the cross-arch execution needed to smoke-test the result).
+Dedicated builder images, one directory per target family, each a plain `Dockerfile` built
+through Dagger (`dagger core host directory --path=builders/<name> docker-build ...`), not through
+`docker build`/`cross` directly — so nothing beyond the `dagger` CLI itself is ever required
+(Dagger's own BuildKit-backed engine provides the layer caching, and its `--platform` support
+provides the cross-arch execution `paws release`'s smoke tests need). Most of these are
+`paws release`'s own cross-compilation targets for building `paws` itself (see
+`crates/paws-release/src/lib.rs`); `tauri-linux/` is different — it's what `paws ci --toolchain
+tauri` builds *user* Tauri projects against (see `crates/paws-tauri`), embedded into the `paws`
+binary rather than read from this directory at runtime.
 
 Every builder image is labeled with standard OCI annotations (`org.opencontainers.image.*`),
 populated via `--build-args` at build time from the release tag/commit being built — see
@@ -25,3 +28,6 @@ populated via `--build-args` at build time from the release tag/commit being bui
   `joseluisq/docker-osxcross` use. Both targets build real, verified Mach-O binaries; neither is
   smoke-tested (no Mach-O execution environment available to `dagger`/Wine) — see
   `macos/README.md`.
+- `tauri-linux/` — Rust + Node (via NodeSource) + the GTK/WebKit libraries Tauri's Linux backend
+  links against, per https://tauri.app/start/prerequisites/#linux. Used by `paws ci --toolchain
+  tauri`, not `paws release`; see `crates/paws-tauri`.
