@@ -59,6 +59,19 @@ pub struct HelmProject {
     /// `gitops-tools` in `mbround18/helm-charts` itself; alphabetical
     /// discovery order alone gets this wrong).
     pub charts: Vec<HelmChart>,
+    /// Every distinct `http(s)://` `repository:` URL referenced across all
+    /// discovered charts' `Chart.yaml`/`Chart.lock` (sorted, deduplicated).
+    /// A fresh `helm` install has no repositories configured at all —
+    /// `helm dependency build`/`update` fails outright on a remote
+    /// dependency ("no repository definition ... please add the missing
+    /// repos via 'helm repo add'") unless each one is added first, verified
+    /// for real against `mbround18/helm-charts`'s own `meilisearch` chart
+    /// (depends on `istio-ingress` via
+    /// `https://mbround18.github.io/helm-charts`). Mirrors that repo's own
+    /// `.github/actions/setup-helm` composite action, which does the exact
+    /// same Chart.yaml/Chart.lock scan + `helm repo add --force-update` for
+    /// this same reason.
+    pub remote_repositories: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -94,19 +107,48 @@ pub fn is_helm_project(dir: &Path) -> bool {
     dir.join("Chart.yaml").is_file() || !discover_chart_relative_dirs(dir).is_empty()
 }
 
-fn load_chart(root: &Path, rel_dir: &str) -> Result<HelmChart> {
-    let chart_yaml_path = root.join(rel_dir).join("Chart.yaml");
-    let contents = std::fs::read_to_string(&chart_yaml_path)
-        .with_context(|| format!("failed to read {}", chart_yaml_path.display()))?;
+/// Parses a `Chart.yaml`/`Chart.lock` at `path` (both share the same
+/// `dependencies: [{repository, ...}]` shape; unrecognized fields, like
+/// `Chart.lock`'s `digest`/`generated`, are ignored) and returns its
+/// dependencies, or an empty list if `path` doesn't exist.
+fn read_dependencies(path: &Path) -> Result<Vec<RawDependency>> {
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
     let raw: RawChartYaml = serde_yaml::from_str(&contents)
-        .with_context(|| format!("failed to parse {}", chart_yaml_path.display()))?;
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(raw.dependencies)
+}
 
-    let local_dependencies: Vec<String> = raw
-        .dependencies
+/// Loads the chart at `root`/`rel_dir`, returning it alongside every
+/// distinct `http(s)://` `repository:` URL its `Chart.yaml`/`Chart.lock`
+/// reference — see [`HelmProject::remote_repositories`].
+fn load_chart(root: &Path, rel_dir: &str) -> Result<(HelmChart, Vec<String>)> {
+    let chart_dir = root.join(rel_dir);
+    let chart_yaml_path = chart_dir.join("Chart.yaml");
+    anyhow::ensure!(
+        chart_yaml_path.is_file(),
+        "no Chart.yaml found at {}",
+        chart_yaml_path.display()
+    );
+    let mut dependencies = read_dependencies(&chart_yaml_path)?;
+    let has_dependencies = !dependencies.is_empty();
+    dependencies.extend(read_dependencies(&chart_dir.join("Chart.lock"))?);
+
+    let local_dependencies: Vec<String> = dependencies
         .iter()
         .filter_map(|d| d.repository.strip_prefix("file://"))
         .filter_map(|rel| Path::new(rel).file_name())
         .filter_map(|name| name.to_str())
+        .map(|s| s.to_string())
+        .collect();
+
+    let remote_repositories: Vec<String> = dependencies
+        .iter()
+        .map(|d| d.repository.as_str())
+        .filter(|repo| repo.starts_with("http://") || repo.starts_with("https://"))
         .map(|s| s.to_string())
         .collect();
 
@@ -117,12 +159,15 @@ fn load_chart(root: &Path, rel_dir: &str) -> Result<HelmChart> {
         .unwrap_or(rel_dir)
         .to_string();
 
-    Ok(HelmChart {
-        has_dependencies: !raw.dependencies.is_empty(),
-        name,
-        dir: rel_dir.to_string(),
-        local_dependencies,
-    })
+    Ok((
+        HelmChart {
+            has_dependencies,
+            name,
+            dir: rel_dir.to_string(),
+            local_dependencies,
+        },
+        remote_repositories,
+    ))
 }
 
 /// Kahn's algorithm over `charts`' local `file://` dependency edges, keyed
@@ -196,13 +241,23 @@ pub fn detect_project(dir: &Path) -> Result<HelmProject> {
         );
     }
 
-    let charts: Vec<HelmChart> = rel_dirs
+    let loaded: Vec<(HelmChart, Vec<String>)> = rel_dirs
         .iter()
         .map(|rel_dir| load_chart(dir, rel_dir))
         .collect::<Result<_>>()?;
 
+    let mut remote_repositories: Vec<String> = loaded
+        .iter()
+        .flat_map(|(_, repos)| repos.iter().cloned())
+        .collect();
+    remote_repositories.sort();
+    remote_repositories.dedup();
+
+    let charts: Vec<HelmChart> = loaded.into_iter().map(|(chart, _)| chart).collect();
+
     Ok(HelmProject {
         charts: topological_order(charts),
+        remote_repositories,
     })
 }
 
@@ -233,6 +288,36 @@ fn push_exec(args: &mut Vec<String>, command_args: &[&str]) {
     args.push(format!("--args={}", command_args.join(",")));
 }
 
+/// Adds every one of `project.remote_repositories` via `helm repo add
+/// --force-update repo-<i> <url>`, then a single `helm repo update` — a
+/// fresh `helm` install (this builder's container, every single run) has no
+/// repositories configured, so any chart with a remote (non-`file://`)
+/// dependency fails `helm dependency build`/`lint`/`package` otherwise. See
+/// [`HelmProject::remote_repositories`]'s doc comment. `--force-update`
+/// mirrors `mbround18/helm-charts`'s own `setup-helm` composite action,
+/// which does the same add-per-URL + update, so re-running this against an
+/// already-configured repo (e.g. local iteration reusing a Dagger session)
+/// doesn't fail on "repository already exists".
+fn push_remote_repo_setup(args: &mut Vec<String>, project: &HelmProject) {
+    for (i, url) in project.remote_repositories.iter().enumerate() {
+        let repo_name = format!("repo-{i}");
+        push_exec(
+            args,
+            &[
+                "helm",
+                "repo",
+                "add",
+                "--force-update",
+                &repo_name,
+                url.as_str(),
+            ],
+        );
+    }
+    if !project.remote_repositories.is_empty() {
+        push_exec(args, &["helm", "repo", "update"]);
+    }
+}
+
 /// Builds the `dagger core <chain>` argument list (see `paws_dagger::core`)
 /// that builds the Helm builder from `builder_dir` (see
 /// [`write_builder_dockerfile`]) and runs `helm lint` against every chart in
@@ -246,6 +331,7 @@ pub fn lint_pipeline_args(
     builder_dir: &str,
 ) -> Vec<String> {
     let mut args = container_prefix(builder_dir, source_dir);
+    push_remote_repo_setup(&mut args, project);
     for chart in &project.charts {
         if chart.has_dependencies {
             push_exec(
@@ -273,6 +359,7 @@ pub fn package_pipeline_args(
     host_output_dir: &str,
 ) -> Vec<String> {
     let mut args = container_prefix(builder_dir, source_dir);
+    push_remote_repo_setup(&mut args, project);
     push_exec(&mut args, &["mkdir", "-p", container_output_dir]);
     for chart in &project.charts {
         if chart.has_dependencies {
@@ -416,6 +503,95 @@ mod tests {
         let project = detect_project(&dir).unwrap();
         assert_eq!(project.charts.len(), 1);
         assert!(project.charts[0].has_dependencies);
+        assert_eq!(
+            project.remote_repositories,
+            vec!["https://example.com/charts".to_string()]
+        );
+    }
+
+    #[test]
+    fn remote_repositories_are_deduplicated_and_sorted() {
+        let dir = temp_dir("remote-dedup");
+        write_chart(
+            &dir,
+            "charts/a",
+            "apiVersion: v2\nname: a\nversion: 0.1.0\ndependencies:\n- name: x\n  version: 0.1.0\n  repository: https://b.example.com\n",
+        );
+        write_chart(
+            &dir,
+            "charts/b",
+            "apiVersion: v2\nname: b\nversion: 0.1.0\ndependencies:\n- name: y\n  version: 0.1.0\n  repository: https://a.example.com\n- name: z\n  version: 0.1.0\n  repository: https://b.example.com\n",
+        );
+        let project = detect_project(&dir).unwrap();
+        assert_eq!(
+            project.remote_repositories,
+            vec![
+                "https://a.example.com".to_string(),
+                "https://b.example.com".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn chart_lock_dependencies_also_contribute_remote_repositories() {
+        let dir = temp_dir("chart-lock");
+        write_chart(
+            &dir,
+            "charts/a",
+            "apiVersion: v2\nname: a\nversion: 0.1.0\n",
+        );
+        fs::write(
+            dir.join("charts/a/Chart.lock"),
+            "dependencies:\n- name: x\n  repository: https://locked.example.com\n  version: 0.1.0\ndigest: sha256:deadbeef\ngenerated: \"2026-01-01T00:00:00Z\"\n",
+        )
+        .unwrap();
+        let project = detect_project(&dir).unwrap();
+        assert_eq!(
+            project.remote_repositories,
+            vec!["https://locked.example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn lint_pipeline_adds_remote_repos_before_any_chart_work() {
+        let dir = temp_dir("lint-remote-repo");
+        write_chart(
+            &dir,
+            "charts/a",
+            "apiVersion: v2\nname: a\nversion: 0.1.0\ndependencies:\n- name: x\n  version: 0.1.0\n  repository: https://example.com/charts\n",
+        );
+        let project = detect_project(&dir).unwrap();
+        let args = lint_pipeline_args(&project, "/host/src", "/tmp/some-builder-dir");
+
+        assert!(args.contains(
+            &"--args=helm,repo,add,--force-update,repo-0,https://example.com/charts".to_string()
+        ));
+        assert!(args.contains(&"--args=helm,repo,update".to_string()));
+        let repo_add_pos = args
+            .iter()
+            .position(|a| a.starts_with("--args=helm,repo,add"))
+            .unwrap();
+        let dep_build_pos = args
+            .iter()
+            .position(|a| a.starts_with("--args=helm,dependency,build"))
+            .unwrap();
+        assert!(
+            repo_add_pos < dep_build_pos,
+            "repo add must run before any chart's dependency build"
+        );
+    }
+
+    #[test]
+    fn lint_pipeline_skips_repo_setup_when_no_remote_dependencies() {
+        let dir = temp_dir("lint-no-remote-repo");
+        write_chart(
+            &dir,
+            "charts/a",
+            "apiVersion: v2\nname: a\nversion: 0.1.0\n",
+        );
+        let project = detect_project(&dir).unwrap();
+        let args = lint_pipeline_args(&project, "/host/src", "/tmp/some-builder-dir");
+        assert!(!args.iter().any(|a| a.starts_with("--args=helm,repo")));
     }
 
     #[test]
