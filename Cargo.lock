@@ -603,6 +603,7 @@ dependencies = [
  "paws-dagger",
  "paws-docker",
  "paws-docs",
+ "paws-flatpak",
  "paws-node",
  "paws-provision",
  "paws-python",
@@ -646,6 +647,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "tokio",
+]
+
+[[package]]
+name = "paws-flatpak"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

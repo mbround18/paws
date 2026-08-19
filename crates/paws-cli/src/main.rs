@@ -402,8 +402,27 @@ async fn main() -> anyhow::Result<()> {
                     run_dagger_core(&args, silent).await?;
                     println!("ci: rust build/test succeeded");
                 }
+                Some("flatpak") => {
+                    let dir = std::env::current_dir()?;
+                    let project = paws_flatpak::detect_project(&dir)
+                        .context("failed to detect a Flatpak manifest in the current directory")?;
+                    println!(
+                        "ci: flatpak project {} ({})",
+                        project.app_id,
+                        project.manifest_path.display()
+                    );
+                    let builder_dir = paws_flatpak::write_builder_dockerfile()
+                        .context("failed to materialize the flatpak builder Dockerfile")?;
+                    let args = paws_flatpak::dagger_pipeline_args(
+                        &project,
+                        &dir.to_string_lossy(),
+                        &builder_dir.to_string_lossy(),
+                    );
+                    run_dagger_core(&args, silent).await?;
+                    println!("ci: flatpak build succeeded");
+                }
                 Some(other) => anyhow::bail!(
-                    "unsupported --toolchain '{other}'; expected 'node', 'rust', 'python', 'tauri', or 'tauri-android'"
+                    "unsupported --toolchain '{other}'; expected 'node', 'rust', 'python', 'tauri', 'tauri-android', or 'flatpak'"
                 ),
                 None => anyhow::bail!("--toolchain is required (e.g. --toolchain node)"),
             }

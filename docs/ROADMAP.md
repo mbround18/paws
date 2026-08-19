@@ -8,8 +8,8 @@ see [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) for how a new stack actually gets ad
 
 Confirmed directly against the code, not from memory:
 
-- **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node`, `python`, `tauri`
-  (`crates/paws-cli/src/main.rs`). Node execution is now natively multi-package-manager
+- **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node`, `python`, `tauri`,
+  `tauri-android`, `flatpak` (`crates/paws-cli/src/main.rs`). Node execution is now natively multi-package-manager
   (`crates/paws-node` — npm/yarn/pnpm/bun, detected from lockfiles or `package.json`'s
   `packageManager` field, no longer the old `pnpmBuildAndTest`-only interim path) and
   framework-aware (Vite, Next.js, or plain, informational for now). Verified for real against
@@ -25,7 +25,15 @@ Confirmed directly against the code, not from memory:
   is a native port of `gh-reusable`'s real `rustBuildAndTest` function (`cargo fmt -- --check`,
   `cargo clippy`, `cargo build --verbose`, `cargo test --verbose`, fail-fast) against the plain
   `rust:1-bookworm` image — no `gh-reusable` dependency left for `--toolchain rust` at all.
-  Verified for real, end to end, dogfooding `paws` on its own repo.
+  Verified for real, end to end, dogfooding `paws` on its own repo. `flatpak`
+  (`crates/paws-flatpak`) runs `flatpak-builder --build-only` against an auto-detected manifest,
+  through `builders/flatpak` (flatpak + flatpak-builder + the Flathub freedesktop runtime/SDK/
+  rust-stable extension baked in) — needs `--insecure-root-capabilities` on the `with-exec`
+  (flatpak-builder's sandboxed build is FUSE-backed; verified directly that `fuse3` + a bare
+  device flag aren't enough on their own), and is build-only, not a full bundle export, since the
+  metadata "finish" phase needs a binary (`appstream-compose`) Debian bookworm no longer ships.
+  Verified for real, end to end, against `mbround18/oled-wallpaper`'s actual manifest — a real,
+  heavy wgpu/winit GUI app, not a synthetic fixture.
 - **`paws provision`** (concurrent toolchain installers): `rust`, `node`, `python`
   (`paws_provision::Ecosystem`). `gh-reusable` (the TS system `paws` is replacing) already has
   `setupGo`/`setupRuby`/`setupJava`/`setupTerraform`/`setupPulumi` — none of those ecosystems are

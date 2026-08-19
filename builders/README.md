@@ -90,3 +90,15 @@ against it silently exports nothing) — which is why `release.yaml`'s `build-bu
   ci --toolchain tauri-android`; see `crates/paws-tauri`. There's no `tauri-ios/` and none is
   planned — iOS builds need real Xcode/`xcodebuild`, which Apple's license restricts to genuine
   macOS; no container image can provide that the way this one provides the Android SDK/NDK.
+- `flatpak/` — `flatpak` + `flatpak-builder` + the Flathub `org.freedesktop.Platform`/`Sdk`/
+  `Sdk.Extension.rust-stable` runtime baked in at a pinned version (~2GB combined; the same
+  reason `tauri-android` bakes its SDK/NDK in rather than installing at pipeline-run time). Used
+  by `paws ci --toolchain flatpak`; see `crates/paws-flatpak`. Two real constraints shaped this:
+  `flatpak-builder`'s sandboxed build needs `--insecure-root-capabilities` on the `with-exec`
+  (verified: `fuse3` + a bare `--device /dev/fuse` aren't enough on their own — the FUSE mount
+  itself fails with "Operation not permitted" without it — still routed entirely through Dagger,
+  ADR-0001), and `paws ci` only runs `flatpak-builder --build-only`, not a full bundle export —
+  the metadata "finish" phase's own *inner* sandbox needs `appstream-compose`, a binary Debian
+  bookworm no longer ships, and that inner sandbox can't be handed a host-side workaround either.
+  Verified for real, end to end, against a genuine app (`mbround18/oled-wallpaper`'s actual
+  Flatpak manifest, a heavy wgpu/winit GUI app), not a synthetic fixture.

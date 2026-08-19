@@ -88,6 +88,21 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   that image doesn't ship `rustfmt`/`clippy` by default, so a `rustup component add` step comes
   first. This is what `paws` dogfoods itself with (`paws ci --toolchain rust` against `paws`'s
   own repo) — no `gh-reusable` dependency for `--toolchain rust` at all anymore.
+- `crates/paws-flatpak` — Flatpak app support. Detects a manifest (a `.yml`/`.yaml`/`.json` file
+  with a top-level `app-id:`/`id:` scalar, under `packaging/flatpak/`, `flatpak/`, or the repo
+  root) and runs `flatpak-builder --build-only --force-clean` against it, via
+  `builders/flatpak/Dockerfile` (embedded + materialized at runtime, same fix as `paws-tauri`,
+  same reason — `paws ci` runs from inside whatever target repo it's checking, not `paws`'s own
+  source tree). Two real constraints: the `with-exec` running `flatpak-builder` needs
+  `--insecure-root-capabilities` (verified directly — `flatpak-builder`'s sandboxed build is a
+  FUSE-backed rofiles overlay via bubblewrap, and neither `fuse3` nor a bare `--device /dev/fuse`
+  are enough on their own, the mount fails with "Operation not permitted" without it; still
+  entirely through Dagger, ADR-0001), and `--build-only` rather than a full bundle export — the
+  metadata "finish" phase's own *inner* sandbox needs `appstream-compose`, a binary Debian
+  bookworm no longer ships (superseded by `appstreamcli compose`), and that inner sandbox doesn't
+  see anything on the outer container's PATH either, so a host-side wrapper script doesn't help.
+  Verified for real, end to end, against a genuine app (`mbround18/oled-wallpaper`'s actual
+  manifest, a heavy wgpu/winit GUI app) — not a synthetic fixture.
 
 ## CI
 
