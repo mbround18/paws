@@ -14,17 +14,30 @@
 //!    directly, and it's still routed entirely through Dagger (ADR-0001),
 //!    nothing here spawns `docker`/`cross` directly.
 //! 2. `paws ci --toolchain flatpak` runs `flatpak-builder --build-only`,
-//!    not a full bundle export. The metadata "finish" phase runs
-//!    `appstream-compose` inside its *own* inner bubblewrap sandbox — a
-//!    binary Debian bookworm doesn't ship anymore (superseded by
-//!    `appstreamcli compose`), and that inner sandbox doesn't see anything
-//!    installed on the outer container's PATH, so a host-side wrapper
-//!    script doesn't help either. `--build-only` stops right after
-//!    compiling and installing into the Flatpak module tree, before that
-//!    phase ever runs — which is what CI actually needs to verify (does
-//!    the app build inside its own Flatpak sandbox), the same
+//!    not a full bundle export — still true even after switching
+//!    `builders/flatpak` from `debian:bookworm-slim` to `ubuntu:26.04`.
+//!    The original failure (metadata "finish" phase erroring on a missing
+//!    `appstream-compose` binary) really was a `flatpak-builder` version
+//!    issue — Debian bookworm ships `1.2.3`, which still shells out to that
+//!    now-removed standalone binary; Ubuntu ships `>= 1.4`, which correctly
+//!    calls `appstreamcli compose` instead (confirmed by installing both
+//!    versions side by side and diffing their behavior, not guessed). But
+//!    the version switch alone didn't fully close the gap: a full bundle
+//!    export against the same real manifest still fails inside this
+//!    pipeline's `--insecure-root-capabilities` root context
+//!    (`appstreamcli compose` errors with `file-read-error`/
+//!    `filters-but-no-output`) in a way it doesn't on a real GitHub-hosted
+//!    runner running the same `flatpak-builder`/`appstream` versions as
+//!    non-root — an environment difference not yet root-caused. Rather
+//!    than keep digging, `--build-only` (already reliable, already
+//!    verified) stays the supported scope: it stops right after compiling
+//!    and installing into the Flatpak module tree, before the phase that
+//!    hits this ever runs — which is what CI actually needs to verify
+//!    (does the app build inside its own Flatpak sandbox), the same
 //!    "build-verified, not a full package" scope `paws-release`'s macOS
-//!    targets already use for a different reason.
+//!    targets already use for a different reason. A full bundle/release
+//!    flow (e.g. `mbround18/oled-wallpaper`'s own `release.yml`) should
+//!    keep doing that itself for now, not route through `paws-flatpak`.
 
 use std::path::{Path, PathBuf};
 

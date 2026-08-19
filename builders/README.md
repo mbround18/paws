@@ -90,15 +90,32 @@ against it silently exports nothing) — which is why `release.yaml`'s `build-bu
   ci --toolchain tauri-android`; see `crates/paws-tauri`. There's no `tauri-ios/` and none is
   planned — iOS builds need real Xcode/`xcodebuild`, which Apple's license restricts to genuine
   macOS; no container image can provide that the way this one provides the Android SDK/NDK.
-- `flatpak/` — `flatpak` + `flatpak-builder` + the Flathub `org.freedesktop.Platform`/`Sdk`/
-  `Sdk.Extension.rust-stable` runtime baked in at a pinned version (~2GB combined; the same
+- `flatpak/` — `flatpak` + `flatpak-builder` + `xvfb` + the Flathub `org.freedesktop.Platform`/
+  `Sdk`/`Sdk.Extension.rust-stable` runtime baked in at a pinned version (~2GB combined; the same
   reason `tauri-android` bakes its SDK/NDK in rather than installing at pipeline-run time). Used
-  by `paws ci --toolchain flatpak`; see `crates/paws-flatpak`. Two real constraints shaped this:
-  `flatpak-builder`'s sandboxed build needs `--insecure-root-capabilities` on the `with-exec`
-  (verified: `fuse3` + a bare `--device /dev/fuse` aren't enough on their own — the FUSE mount
-  itself fails with "Operation not permitted" without it — still routed entirely through Dagger,
-  ADR-0001), and `paws ci` only runs `flatpak-builder --build-only`, not a full bundle export —
-  the metadata "finish" phase's own *inner* sandbox needs `appstream-compose`, a binary Debian
-  bookworm no longer ships, and that inner sandbox can't be handed a host-side workaround either.
+  by `paws ci --toolchain flatpak`; see `crates/paws-flatpak`. `xvfb` isn't Flatpak-specific — a
+  shared, reusable headless-display building block, the same one Playwright/browser e2e testing
+  needs, independent of Flatpak entirely.
+
+  Base is `ubuntu:26.04`, not `debian:bookworm-slim` — real root cause, not arbitrary: Debian
+  bookworm ships `flatpak-builder 1.2.3`, which shells out to a standalone `appstream-compose`
+  binary during the metadata "finish" phase that no longer exists in modern `appstream` packaging
+  (superseded by `appstreamcli compose`); Ubuntu ships `flatpak-builder >= 1.4`, which calls
+  `appstreamcli compose` directly — confirmed by installing both versions side by side and
+  diffing their behavior, not guessed. That fixes the *missing-binary* failure specifically.
+
+  `flatpak-builder`'s sandboxed build also needs `--insecure-root-capabilities` on the
+  `with-exec` (verified: `fuse3` + a bare `--device /dev/fuse` aren't enough on their own — the
+  FUSE mount itself fails with "Operation not permitted" without it — still routed entirely
+  through Dagger, ADR-0001).
+
+  `paws ci` only runs `flatpak-builder --build-only`, not a full bundle export, and that's still
+  true after the Ubuntu switch: a full bundle against the same real manifest hits a separate,
+  unresolved `appstreamcli compose` runtime difference under this pipeline's root context
+  (`file-read-error`/`filters-but-no-output`) that a real GitHub-hosted runner running the same
+  versions as non-root doesn't hit — not yet root-caused. `--build-only` (compiling and installing
+  into the module tree, before the phase that hits this ever runs) stays the supported scope; a
+  full bundle/release flow should keep using its own existing pipeline for now, not `paws-flatpak`.
+
   Verified for real, end to end, against a genuine app (`mbround18/oled-wallpaper`'s actual
   Flatpak manifest, a heavy wgpu/winit GUI app), not a synthetic fixture.

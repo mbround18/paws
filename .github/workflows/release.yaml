@@ -78,6 +78,7 @@ jobs:
           - macos
           - tauri-linux
           - tauri-android
+          - flatpak
     env:
       VERSION: ${{ inputs.tag || github.ref_name }}
       REVISION: ${{ github.sha }}

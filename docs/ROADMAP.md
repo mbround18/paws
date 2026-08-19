@@ -27,13 +27,17 @@ Confirmed directly against the code, not from memory:
   `rust:1-bookworm` image — no `gh-reusable` dependency left for `--toolchain rust` at all.
   Verified for real, end to end, dogfooding `paws` on its own repo. `flatpak`
   (`crates/paws-flatpak`) runs `flatpak-builder --build-only` against an auto-detected manifest,
-  through `builders/flatpak` (flatpak + flatpak-builder + the Flathub freedesktop runtime/SDK/
-  rust-stable extension baked in) — needs `--insecure-root-capabilities` on the `with-exec`
-  (flatpak-builder's sandboxed build is FUSE-backed; verified directly that `fuse3` + a bare
-  device flag aren't enough on their own), and is build-only, not a full bundle export, since the
-  metadata "finish" phase needs a binary (`appstream-compose`) Debian bookworm no longer ships.
-  Verified for real, end to end, against `mbround18/oled-wallpaper`'s actual manifest — a real,
-  heavy wgpu/winit GUI app, not a synthetic fixture.
+  through `builders/flatpak` (`ubuntu:26.04` + `xvfb` + flatpak + flatpak-builder + the Flathub
+  freedesktop runtime/SDK/rust-stable extension baked in) — needs `--insecure-root-capabilities`
+  on the `with-exec` (flatpak-builder's sandboxed build is FUSE-backed; verified directly that
+  `fuse3` + a bare device flag aren't enough on their own), and is build-only, not a full bundle
+  export: the base image switch from Debian fixed a real `flatpak-builder`-version-specific
+  missing-binary failure, but a full bundle still hits a separate, unresolved `appstreamcli
+  compose` runtime difference under this pipeline's root context that a real GitHub-hosted
+  runner (same versions, non-root) doesn't hit. Verified for real, end to end, against
+  `mbround18/oled-wallpaper`'s actual manifest — a real, heavy wgpu/winit GUI app, not a
+  synthetic fixture; a full bundle/release flow should keep using its own existing pipeline for
+  now (see `builders/README.md` for the full story).
 - **`paws provision`** (concurrent toolchain installers): `rust`, `node`, `python`
   (`paws_provision::Ecosystem`). `gh-reusable` (the TS system `paws` is replacing) already has
   `setupGo`/`setupRuby`/`setupJava`/`setupTerraform`/`setupPulumi` — none of those ecosystems are

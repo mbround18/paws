@@ -14,7 +14,7 @@
 
 FROM rust:1-bookworm
 
-ARG NODE_MAJOR=22
+ARG NODE_MAJOR=24
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \

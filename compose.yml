@@ -68,6 +68,17 @@
 # VERSION/REVISION/CREATED are the same build-arg names paws-release passes
 # at build time; default to "dev" so `docker buildx bake`/`docker compose
 # build` also work untagged, for local iteration on a Dockerfile itself.
+#
+# Every other version-pinning ARG each Dockerfile declares (Node major,
+# osxcross commit, macOS SDK, Android cmdline-tools/build-tools/NDK, the
+# Flathub runtime) is also passed through here from an environment
+# variable, defaulting to that Dockerfile's own default — so bumping any
+# one of them is a single `export`/CI variable change here, not a hunt
+# through individual Dockerfiles. The Dockerfile defaults still exist and
+# still matter (a bare `docker build`, without going through this file,
+# falls back to them), this is only about giving the *release* pipeline
+# (and anyone else driving builds through `compose.yml`) one place to bump
+# from.
 
 services:
   linux-gnu:
@@ -137,6 +148,8 @@ services:
         BUILDER_VERSION: ${VERSION:-dev}
         BUILDER_REVISION: ${REVISION:-unknown}
         BUILDER_CREATED: ${CREATED:-unknown}
+        OSXCROSS_COMMIT: ${OSXCROSS_COMMIT:-27d21e4977c9751d01199c7a226a6faf494c3dd9}
+        MACOS_SDK_VERSION: ${MACOS_SDK_VERSION:-14.0}
       cache_from:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-macos
       cache_to:
@@ -152,6 +165,7 @@ services:
         BUILDER_VERSION: ${VERSION:-dev}
         BUILDER_REVISION: ${REVISION:-unknown}
         BUILDER_CREATED: ${CREATED:-unknown}
+        NODE_MAJOR: ${NODE_MAJOR:-24}
       cache_from:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-tauri-linux
       cache_to:
@@ -167,6 +181,12 @@ services:
         BUILDER_VERSION: ${VERSION:-dev}
         BUILDER_REVISION: ${REVISION:-unknown}
         BUILDER_CREATED: ${CREATED:-unknown}
+        NODE_MAJOR: ${NODE_MAJOR:-24}
+        ANDROID_CMDLINE_TOOLS_VERSION: ${ANDROID_CMDLINE_TOOLS_VERSION:-9862592}
+        ANDROID_CMDLINE_TOOLS_SHA1: ${ANDROID_CMDLINE_TOOLS_SHA1:-a787f0c35d3970f2ad634f7d91a2e7bc49e2c7f5}
+        ANDROID_PLATFORM: ${ANDROID_PLATFORM:-android-34}
+        ANDROID_BUILD_TOOLS_VERSION: ${ANDROID_BUILD_TOOLS_VERSION:-34.0.0}
+        ANDROID_NDK_VERSION: ${ANDROID_NDK_VERSION:-27.0.12077973}
       cache_from:
         - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-tauri-android
       cache_to:
@@ -174,3 +194,19 @@ services:
       tags:
         - ghcr.io/mbround18/paws-builders:tauri-android-${VERSION:-dev}
         - docker.io/mbround18/paws-builders:tauri-android-${VERSION:-dev}
+
+  flatpak:
+    build:
+      context: ./builders/flatpak
+      args:
+        BUILDER_VERSION: ${VERSION:-dev}
+        BUILDER_REVISION: ${REVISION:-unknown}
+        BUILDER_CREATED: ${CREATED:-unknown}
+        FLATPAK_RUNTIME_VERSION: ${FLATPAK_RUNTIME_VERSION:-25.08}
+      cache_from:
+        - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-flatpak
+      cache_to:
+        - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-flatpak,mode=max
+      tags:
+        - ghcr.io/mbround18/paws-builders:flatpak-${VERSION:-dev}
+        - docker.io/mbround18/paws-builders:flatpak-${VERSION:-dev}

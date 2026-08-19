@@ -91,18 +91,21 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
 - `crates/paws-flatpak` — Flatpak app support. Detects a manifest (a `.yml`/`.yaml`/`.json` file
   with a top-level `app-id:`/`id:` scalar, under `packaging/flatpak/`, `flatpak/`, or the repo
   root) and runs `flatpak-builder --build-only --force-clean` against it, via
-  `builders/flatpak/Dockerfile` (embedded + materialized at runtime, same fix as `paws-tauri`,
-  same reason — `paws ci` runs from inside whatever target repo it's checking, not `paws`'s own
-  source tree). Two real constraints: the `with-exec` running `flatpak-builder` needs
+  `builders/flatpak/Dockerfile` (`ubuntu:26.04` + `xvfb`; embedded + materialized at runtime, same
+  fix as `paws-tauri`, same reason — `paws ci` runs from inside whatever target repo it's
+  checking, not `paws`'s own source tree). The `with-exec` running `flatpak-builder` needs
   `--insecure-root-capabilities` (verified directly — `flatpak-builder`'s sandboxed build is a
   FUSE-backed rofiles overlay via bubblewrap, and neither `fuse3` nor a bare `--device /dev/fuse`
   are enough on their own, the mount fails with "Operation not permitted" without it; still
-  entirely through Dagger, ADR-0001), and `--build-only` rather than a full bundle export — the
-  metadata "finish" phase's own *inner* sandbox needs `appstream-compose`, a binary Debian
-  bookworm no longer ships (superseded by `appstreamcli compose`), and that inner sandbox doesn't
-  see anything on the outer container's PATH either, so a host-side wrapper script doesn't help.
-  Verified for real, end to end, against a genuine app (`mbround18/oled-wallpaper`'s actual
-  manifest, a heavy wgpu/winit GUI app) — not a synthetic fixture.
+  entirely through Dagger, ADR-0001). `--build-only`, not a full bundle export: the base image
+  switch (from Debian, whose `flatpak-builder 1.2.3` shells out to a now-removed standalone
+  `appstream-compose` binary) fixed that specific missing-binary failure, but a full bundle still
+  hits a separate, unresolved `appstreamcli compose` runtime difference under this pipeline's
+  root context that a real GitHub-hosted runner (same versions, non-root) doesn't hit — not yet
+  root-caused, so `--build-only` (already reliable) stays the supported scope rather than forcing
+  an unresolved capability in. Verified for real, end to end, against a genuine app
+  (`mbround18/oled-wallpaper`'s actual manifest, a heavy wgpu/winit GUI app) — not a synthetic
+  fixture.
 
 ## CI
 
