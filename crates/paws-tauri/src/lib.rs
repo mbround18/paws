@@ -193,6 +193,7 @@ mod tests {
             has_test_script: false,
             has_lint_script: false,
             has_lockfile: true,
+            has_playwright: false,
         }
     }
 

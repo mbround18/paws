@@ -207,6 +207,14 @@ pub struct NodeProject {
     /// which install command variant is safe to use (see
     /// `PackageManager::install_args`).
     pub has_lockfile: bool,
+    /// Whether this is a Playwright e2e project (`@playwright/test` as a
+    /// dependency, or a `playwright.config.*` file) — a real, genuinely
+    /// different shape of Node project: a fresh `npm create playwright@latest`
+    /// scaffold has an empty `scripts` object (no `build`/`test` at all),
+    /// so it needs its own pipeline and its own exemption from
+    /// [`NodeProject::missing_required_scripts`], the same way Tauri
+    /// projects already do.
+    pub has_playwright: bool,
 }
 
 impl NodeProject {
@@ -242,6 +250,21 @@ pub fn detect_project(dir: &Path) -> Result<NodeProject> {
         .iter()
         .any(|name| dir.join(name).is_file());
 
+    let has_playwright_dep = ["dependencies", "devDependencies"].iter().any(|section| {
+        package_json
+            .get(section)
+            .and_then(|d| d.get("@playwright/test"))
+            .is_some()
+    });
+    let has_playwright_config = [
+        "playwright.config.ts",
+        "playwright.config.js",
+        "playwright.config.mjs",
+        "playwright.config.cjs",
+    ]
+    .iter()
+    .any(|config| dir.join(config).is_file());
+
     Ok(NodeProject {
         package_manager,
         framework,
@@ -249,6 +272,7 @@ pub fn detect_project(dir: &Path) -> Result<NodeProject> {
         has_test_script: has_script("test"),
         has_lint_script: has_script("lint"),
         has_lockfile,
+        has_playwright: has_playwright_dep || has_playwright_config,
     })
 }
 
@@ -288,6 +312,55 @@ pub fn dagger_pipeline_args(project: &NodeProject, source_dir: &str) -> Vec<Stri
     if project.has_lint_script {
         push_exec(pm.run_script_args("lint"));
     }
+
+    args.push("stdout".into());
+    args
+}
+
+/// Builds the `dagger core <chain>` argument list for a Playwright e2e
+/// project: install deps, `npx playwright install --with-deps` (no browser
+/// list restriction — installs whatever `playwright.config.*`'s own
+/// `projects` actually need), then `npx playwright test`. No `xvfb`
+/// involved and none needed — verified directly, end to end, against a
+/// real `npm create playwright@latest` scaffold: `playwright install
+/// --with-deps` already handles every system dependency modern headless
+/// Chromium needs on its own, the same way it would in any other CI
+/// system. `xvfb` only matters for `headed`/non-default display
+/// configurations, which this doesn't attempt to support.
+pub fn playwright_dagger_pipeline_args(project: &NodeProject, source_dir: &str) -> Vec<String> {
+    let pm = project.package_manager;
+    let mut args: Vec<String> = vec![
+        "container".into(),
+        "from".into(),
+        format!("--address={}", pm.base_image()),
+        "with-mounted-directory".into(),
+        "--path=/src".into(),
+        format!("--source={source_dir}"),
+        "with-workdir".into(),
+        "--path=/src".into(),
+    ];
+
+    let mut push_exec = |command_args: Vec<String>| {
+        args.push("with-exec".into());
+        args.push(format!("--args={}", command_args.join(",")));
+    };
+
+    if let Some(setup) = pm.setup_args() {
+        push_exec(setup.iter().map(|s| s.to_string()).collect());
+    }
+    push_exec(
+        pm.install_args(project.has_lockfile)
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    );
+    push_exec(vec![
+        "npx".into(),
+        "playwright".into(),
+        "install".into(),
+        "--with-deps".into(),
+    ]);
+    push_exec(vec!["npx".into(), "playwright".into(), "test".into()]);
 
     args.push("stdout".into());
     args
@@ -412,6 +485,7 @@ mod tests {
             has_test_script: false,
             has_lint_script: false,
             has_lockfile: false,
+            has_playwright: false,
         };
         assert_eq!(project.missing_required_scripts(), vec!["build", "test"]);
     }
@@ -424,6 +498,7 @@ mod tests {
             has_test_script: true,
             has_lint_script: false,
             has_lockfile: true,
+            has_playwright: false,
         }
     }
 
@@ -475,5 +550,49 @@ mod tests {
         let args = dagger_pipeline_args(&project, "/host/src");
         assert!(args.contains(&"--args=npm,install".to_string()));
         assert!(!args.contains(&"--args=npm,ci".to_string()));
+    }
+
+    #[test]
+    fn detects_playwright_from_dev_dependency() {
+        let dir = temp_dir("playwright-dep");
+        fs::write(dir.join("package-lock.json"), "").unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"devDependencies": {"@playwright/test": "^1.62.1"}, "scripts": {}}"#,
+        )
+        .unwrap();
+        let project = detect_project(&dir).unwrap();
+        assert!(project.has_playwright);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detects_playwright_from_config_file_when_no_dependency_listed() {
+        let dir = temp_dir("playwright-config");
+        fs::write(dir.join("package-lock.json"), "").unwrap();
+        fs::write(dir.join("package.json"), r#"{"scripts": {}}"#).unwrap();
+        fs::write(dir.join("playwright.config.ts"), "").unwrap();
+        let project = detect_project(&dir).unwrap();
+        assert!(project.has_playwright);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn plain_project_is_not_detected_as_playwright() {
+        let project = project_for(PackageManager::Npm);
+        assert!(!project.has_playwright);
+    }
+
+    #[test]
+    fn playwright_pipeline_installs_deps_and_runs_playwright_test() {
+        let mut project = project_for(PackageManager::Npm);
+        project.has_playwright = true;
+        let args = playwright_dagger_pipeline_args(&project, "/host/src");
+        assert_eq!(args[0], "container");
+        assert_eq!(args[2], "--address=node:24-trixie");
+        assert!(args.contains(&"--args=npm,ci".to_string()));
+        assert!(args.contains(&"--args=npx,playwright,install,--with-deps".to_string()));
+        assert!(args.contains(&"--args=npx,playwright,test".to_string()));
+        assert_eq!(args.last(), Some(&"stdout".to_string()));
     }
 }

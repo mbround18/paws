@@ -70,3 +70,9 @@ part of `paws` itself.
   the target for `paws ci --toolchain python`. Exercises `crates/paws-python`'s detection
   (`pyproject.toml` + `uv.lock`) and a real `uv sync --all-groups --frozen && uv build && uv run
   pytest`, run against `astral/uv:python3.12-trixie-slim` through Dagger.
+- `playwright-fixture/` — a real `npm create playwright@latest -- --quiet --lang=TypeScript
+  --no-browsers` scaffold; the target for `paws-node`'s Playwright detection. Exercises
+  `crates/paws-node`'s `has_playwright` detection (`@playwright/test` dependency or
+  `playwright.config.ts`) and its dedicated `npx playwright install --with-deps && npx playwright
+  test` pipeline, run against the plain Node base image through Dagger — verified for real, end
+  to end, all 6 example tests (chromium/webkit/firefox) passing with no `xvfb` involved.

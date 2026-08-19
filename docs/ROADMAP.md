@@ -14,7 +14,12 @@ Confirmed directly against the code, not from memory:
   `packageManager` field, no longer the old `pnpmBuildAndTest`-only interim path) and
   framework-aware (Vite, Next.js, or plain, informational for now). Verified for real against
   fixtures covering all 4 package managers plus real `create-vite`/`create-next-app` scaffolds
-  (including a React+TSX one) — see `examples/README.md`. `tauri` (`crates/paws-tauri`) builds a
+  (including a React+TSX one) — see `examples/README.md`. It also detects Playwright e2e projects
+  (`@playwright/test` dependency or a `playwright.config.*` file) and runs a dedicated
+  `npx playwright install --with-deps && npx playwright test` pipeline instead of the plain
+  build+test one — verified for real, end to end, against `examples/playwright-fixture` (a real
+  `create-playwright` scaffold); confirmed directly that no `xvfb` is needed for standard headless
+  Playwright runs, contrary to the initial assumption. `tauri` (`crates/paws-tauri`) builds a
   Tauri app through a dedicated `builders/tauri-linux` Dockerfile via Dagger, verified for real
   against a `create-tauri-app` scaffold (`examples/tauri-fixture`) — Linux-only so far. `python`
   (`crates/paws-python`) is a native port of `gh-reusable`'s real `pythonBuildAndTest` function

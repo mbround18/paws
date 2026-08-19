@@ -310,7 +310,7 @@ async fn main() -> anyhow::Result<()> {
                     let project = paws_node::detect_project(&dir)
                         .context("failed to detect a Node project in the current directory")?;
                     let missing = project.missing_required_scripts();
-                    if !is_tauri && !missing.is_empty() {
+                    if !is_tauri && !project.has_playwright && !missing.is_empty() {
                         anyhow::bail!(
                             "package.json is missing required script(s): {} (found package manager: {}, framework: {})",
                             missing.join(", "),
@@ -334,6 +334,18 @@ async fn main() -> anyhow::Result<()> {
                         );
                         run_dagger_core(&args, silent).await?;
                         println!("ci: tauri build succeeded");
+                    } else if project.has_playwright {
+                        println!(
+                            "ci: playwright project using {} ({})",
+                            project.package_manager.as_str(),
+                            dir.display()
+                        );
+                        let args = paws_node::playwright_dagger_pipeline_args(
+                            &project,
+                            &dir.to_string_lossy(),
+                        );
+                        run_dagger_core(&args, silent).await?;
+                        println!("ci: playwright tests succeeded");
                     } else {
                         println!(
                             "ci: {} project using {} ({})",
