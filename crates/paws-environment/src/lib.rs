@@ -73,13 +73,22 @@ impl Default for TagAuthor<'static> {
     }
 }
 
-/// Creates an annotated tag pointing at `ctx.sha` and pushes it — i.e. the
-/// API equivalent of `git tag -a <tag> -m <tag> && git push origin <tag>`,
-/// with no local git identity/worktree required (matches
-/// `paws-release::GitHubReleaseClient`'s Contents-API-over-git precedent).
+/// Creates an annotated tag pointing at `ctx.sha` and pushes it, then
+/// creates the matching GitHub Release (`gh-reusable`'s original
+/// `tagger.yaml` did both — `git tag && git push` followed by `gh release
+/// create --generate-notes` — so a bare tag push alone would be an
+/// incomplete replacement). No local git identity/worktree required
+/// (matches `paws-release::GitHubReleaseClient`'s Contents-API-over-git
+/// precedent). If the release creation fails after the tag already landed,
+/// that error is still returned — the tag itself is not rolled back, since
+/// `git push`-ing a tag isn't an atomic pair with creating a Release either
+/// in the system this replaces.
 pub async fn push_tag(ctx: &CiContext, tag: &str, author: &TagAuthor<'_>) -> Result<()> {
     match ctx.provider {
-        Provider::GitHub => push_tag_github(ctx, tag, author).await,
+        Provider::GitHub => {
+            push_tag_github(ctx, tag, author).await?;
+            create_release_github(ctx, tag).await
+        }
     }
 }
 
@@ -128,6 +137,32 @@ async fn push_tag_github(ctx: &CiContext, tag: &str, author: &TagAuthor<'_>) -> 
         .context("failed to reach GitHub's git/refs API")?
         .error_for_status()
         .context("GitHub rejected the tag ref")?;
+
+    Ok(())
+}
+
+/// Creates a GitHub Release for an already-pushed tag, with auto-generated
+/// notes — matches `gh-reusable`'s `tagger.yaml` (`gh release create "$TAG"
+/// --title "Release $TAG" --generate-notes`) exactly, including the
+/// `Release {tag}` title convention.
+async fn create_release_github(ctx: &CiContext, tag: &str) -> Result<()> {
+    reqwest::Client::new()
+        .post(format!(
+            "https://api.github.com/repos/{}/{}/releases",
+            ctx.owner, ctx.repo
+        ))
+        .bearer_auth(&ctx.token)
+        .header("User-Agent", "paws-environment")
+        .json(&serde_json::json!({
+            "tag_name": tag,
+            "name": format!("Release {tag}"),
+            "generate_release_notes": true,
+        }))
+        .send()
+        .await
+        .context("failed to reach GitHub's releases API")?
+        .error_for_status()
+        .context("GitHub rejected the release")?;
 
     Ok(())
 }

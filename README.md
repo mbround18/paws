@@ -115,10 +115,12 @@ for you unless `install-dagger: false` is set.
 paws semver --base v1.0.0 --prefix v --branch main
 # -> v1.0.1
 
-# Compute it AND push it as an annotated tag (attributed to "paws-bot" by
-# default), replacing a hand-rolled `git tag && git push` CI step. Needs
-# $GITHUB_TOKEN/$GH_TOKEN + $GITHUB_REPOSITORY/$GITHUB_SHA (already set in
-# GitHub Actions) — no local git identity or worktree required.
+# Compute it, push it as an annotated tag (attributed to "paws-bot" by
+# default), AND create the matching GitHub Release with auto-generated
+# notes — replacing a hand-rolled `git tag && git push && gh release
+# create` CI step. Needs $GITHUB_TOKEN/$GH_TOKEN + $GITHUB_REPOSITORY/
+# $GITHUB_SHA (already set in GitHub Actions) — no local git identity or
+# worktree required.
 paws semver --branch main --push
 
 # On a push to main, this automatically looks up the merged PR for that

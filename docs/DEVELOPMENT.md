@@ -53,11 +53,14 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   `GITHUB_*` env vars at each call site. GitHub Actions is the only implemented provider
   (`CiContext::detect`); it's shaped so a GitLab CI provider can be added later as another
   branch without touching callers. Also hosts `push_tag` — creates an annotated git tag (via
-  GitHub's `git/tags` + `git/refs` APIs, no local git identity/worktree needed) and pushes it,
-  attributed to a `paws-bot` identity by default. First (only) consumer: `paws semver --push`,
-  which replaces a hand-rolled `git tag`/`git push` CI step. Verified for real against the
-  `git/tags`/`git/refs` REST endpoints on a throwaway repo — same request/response shape the
-  Rust code sends/expects, tag created and cleaned up.
+  GitHub's `git/tags` + `git/refs` APIs, no local git identity/worktree needed), pushes it
+  (attributed to a `paws-bot` identity by default), then creates the matching GitHub Release
+  with auto-generated notes (`git/releases`, `Release {tag}` title convention). This is the
+  full replacement for `gh-reusable`'s `tagger.yaml`, which did both steps
+  (`git tag && git push` then `gh release create --generate-notes`) — a bare tag push alone
+  would have been an incomplete port. First consumer: `paws semver --push`. Verified for real
+  against the `git/tags`/`git/refs`/`releases` REST endpoints on a throwaway repo — same
+  request/response shape the Rust code sends/expects, tag and release created and cleaned up.
 - `crates/paws-audit` — native Rust port of the audit/compliance aggregation logic
   (language detection, scanner selection, finding normalization/aggregation). Running the
   actual `semgrep`/`gitleaks` containers is native too now (2026-08-19,

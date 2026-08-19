@@ -234,10 +234,12 @@ enum Commands {
         /// Whether this is a PR build (produces a `-pr.<sha>` prerelease).
         #[arg(long)]
         pr: bool,
-        /// Create and push the computed version as an annotated git tag
-        /// (GitHub's git/tags + git/refs APIs — no local git identity or
-        /// worktree needed). Replaces a hand-rolled `git tag`/`git push`
-        /// step in the calling workflow.
+        /// Create and push the computed version as an annotated git tag,
+        /// then create a matching GitHub Release with auto-generated notes
+        /// (GitHub's git/tags + git/refs + releases APIs — no local git
+        /// identity or worktree needed). Replaces a hand-rolled
+        /// `git tag`/`git push`/`gh release create` step in the calling
+        /// workflow.
         #[arg(long)]
         push: bool,
         /// Tagger identity attributed to the pushed tag.
@@ -781,8 +783,8 @@ async fn main() -> anyhow::Result<()> {
                 };
                 paws_environment::push_tag(&ctx, &version, &author)
                     .await
-                    .with_context(|| format!("failed to push tag {version}"))?;
-                eprintln!("pushed tag {version}");
+                    .with_context(|| format!("failed to push tag/release {version}"))?;
+                eprintln!("pushed tag {version} and created its release");
             }
         }
         Commands::Init => {
