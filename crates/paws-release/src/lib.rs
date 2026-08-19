@@ -111,6 +111,39 @@ pub fn target_config(triple: &str) -> Option<TargetConfig> {
     known_targets().into_iter().find(|t| t.triple == triple)
 }
 
+/// The generic Rust Linux builder Dockerfile, embedded at compile time from
+/// `builders/linux-gnu/Dockerfile` — the same Dockerfile `known_targets()`
+/// uses for paws's own `x86_64-unknown-linux-gnu`/`aarch64-unknown-linux-gnu`
+/// legs, but reused here via [`write_generic_builder_dockerfile`] +
+/// [`build_binary_local`] so a target repo with no `builders/` directory of
+/// its own (e.g. `ark-manager-web`) can still run `paws release
+/// --local-build`. Mirrors `paws-tauri`'s embed-and-materialize pattern —
+/// see that crate's `TAURI_LINUX_DOCKERFILE` for why embedding beats a
+/// repo-relative path: `paws release` runs from inside whatever repo it's
+/// releasing, not from inside `paws`'s own source tree.
+const GENERIC_LINUX_GNU_DOCKERFILE: &str = include_str!("../../../builders/linux-gnu/Dockerfile");
+
+/// Targets [`build_binary_local`] can build, i.e. ones the embedded
+/// [`GENERIC_LINUX_GNU_DOCKERFILE`] actually has a toolchain for. Deliberately
+/// narrow (linux-gnu only, no macOS/Windows) — a generic cross matrix is
+/// speculative until a second target repo actually needs it.
+pub fn local_build_targets() -> &'static [&'static str] {
+    &["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+}
+
+/// Writes the embedded generic Linux builder Dockerfile to a temp directory
+/// and returns that directory's path, suitable for [`build_binary_local`].
+pub fn write_generic_builder_dockerfile() -> Result<PathBuf> {
+    let dir = std::env::temp_dir()
+        .join("paws-builders")
+        .join("generic-linux-gnu");
+    std::fs::create_dir_all(&dir)
+        .context("failed to create temp dir for the generic linux-gnu builder Dockerfile")?;
+    std::fs::write(dir.join("Dockerfile"), GENERIC_LINUX_GNU_DOCKERFILE)
+        .context("failed to write the generic linux-gnu builder Dockerfile")?;
+    Ok(dir)
+}
+
 /// Windows targets produce `<name>.exe`; every other target produces `<name>`.
 pub fn binary_file_name(binary_name: &str, target: &str) -> String {
     if target.contains("windows") {
@@ -218,6 +251,67 @@ pub async fn build_binary(request: &BuildRequest<'_>) -> Result<PathBuf> {
     paws_dagger::core(&args)
         .await
         .with_context(|| format!("dagger build failed for target {}", request.triple))?;
+    Ok(out_path)
+}
+
+/// Same contract as [`build_binary`], but for repos outside `paws`'s own —
+/// ones with no `builders/` directory and no prebuilt `paws-builders` image
+/// to pull. Builds `builder_dir` (normally
+/// [`write_generic_builder_dockerfile`]'s output) locally via Dagger's
+/// `docker-build` (mirrors `paws-tauri::dagger_pipeline_args`'s
+/// `host directory --path=<dir> docker-build` chain) instead of pulling a
+/// prebuilt image — the one-time Dockerfile build cost that model exists to
+/// avoid inside `paws`'s own release pipeline doesn't apply here, since
+/// there's no `build-builders` job in a target repo to have paid it already.
+/// `request.builder_dir` is ignored in favor of `local_builder_dir` — kept
+/// as a separate parameter (rather than repurposing the field) so callers
+/// can't accidentally pass a paws-relative `builder_dir` here by habit.
+pub async fn build_binary_local(
+    request: &BuildRequest<'_>,
+    local_builder_dir: &Path,
+) -> Result<PathBuf> {
+    anyhow::ensure!(
+        local_build_targets().contains(&request.triple),
+        "--local-build only supports {}; got {}",
+        local_build_targets().join(", "),
+        request.triple
+    );
+
+    let file_name = binary_file_name(request.binary_name, request.triple);
+    let container_bin_path = format!("target/{}/release/{}", request.triple, file_name);
+
+    let out_dir = Path::new("target")
+        .join("dagger-release")
+        .join(request.triple);
+    tokio::fs::create_dir_all(&out_dir)
+        .await
+        .context("failed to create release output directory")?;
+    let out_path = out_dir.join(&file_name);
+
+    let args: Vec<String> = vec![
+        "host".into(),
+        "directory".into(),
+        format!("--path={}", local_builder_dir.display()),
+        "docker-build".into(),
+        "with-mounted-directory".into(),
+        "--path=/src".into(),
+        format!("--source={}", request.source_dir),
+        "with-workdir".into(),
+        "--path=/src".into(),
+        "with-exec".into(),
+        format!(
+            "--args=cargo,build,--release,--target,{},-p,{}",
+            request.triple, request.package
+        ),
+        "file".into(),
+        format!("--path={container_bin_path}"),
+        "export".into(),
+        format!("--path={}", out_path.display()),
+    ];
+
+    paws_dagger::core(&args)
+        .await
+        .with_context(|| format!("dagger local build failed for target {}", request.triple))?;
     Ok(out_path)
 }
 
@@ -492,6 +586,41 @@ mod tests {
                 target.triple
             );
         }
+    }
+
+    #[test]
+    fn write_generic_builder_dockerfile_materializes_the_embedded_dockerfile() {
+        let dir = write_generic_builder_dockerfile().unwrap();
+        let contents = std::fs::read_to_string(dir.join("Dockerfile")).unwrap();
+        assert_eq!(contents, GENERIC_LINUX_GNU_DOCKERFILE);
+    }
+
+    #[test]
+    fn generic_builder_dockerfile_matches_the_linux_gnu_builder() {
+        // Deliberately the same file (see GENERIC_LINUX_GNU_DOCKERFILE's doc
+        // comment) — this pins that assumption rather than letting the two
+        // silently drift apart.
+        let dockerfile = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("builders/linux-gnu/Dockerfile");
+        let contents = std::fs::read_to_string(dockerfile).unwrap();
+        assert_eq!(contents, GENERIC_LINUX_GNU_DOCKERFILE);
+    }
+
+    #[tokio::test]
+    async fn build_binary_local_rejects_unsupported_targets() {
+        let request = BuildRequest {
+            builder_dir: "unused",
+            source_dir: ".",
+            triple: "x86_64-apple-darwin",
+            package: "paws-cli",
+            binary_name: "paws",
+            builder_version: "v0.0.0",
+        };
+        let err = build_binary_local(&request, Path::new("/tmp/does-not-matter"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("--local-build only supports"));
     }
 
     #[tokio::test]

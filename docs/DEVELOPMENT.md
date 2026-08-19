@@ -163,6 +163,22 @@ it to the tag's GitHub Release (`generate_release_notes: true`,
 picking up merged PRs since the previous tag automatically), marked prerelease iff the tag
 contains a `-` (semver convention).
 
+That pull-only path only works for `paws`'s own repo, though — it needs a `build-builders` job
+(and a `builders/` directory) to have already pushed the image being pulled. A target repo with
+neither (e.g. `ark-manager-web`, which just wants `paws release` to replace its own
+cargo-make + `auto shipit` release job) can instead pass `--local-build`: this materializes an
+embedded generic Rust-Linux builder Dockerfile
+(`write_generic_builder_dockerfile`/`GENERIC_LINUX_GNU_DOCKERFILE` in `crates/paws-release`,
+literally the same file as `builders/linux-gnu/Dockerfile` — see that constant's doc comment) to a
+temp dir and runs a local `dagger` `docker-build` against it, the same
+embed-then-materialize-then-`docker-build` shape `paws-tauri` already uses for its own builder.
+Scoped to `paws_release::local_build_targets()` (`x86_64-unknown-linux-gnu` and
+`aarch64-unknown-linux-gnu` only) — no macOS/Windows generic builder exists yet, since nothing has
+needed one. `--package`/`--binary-name` also both take a comma-separated list now (paired 1:1,
+e.g. `--package agent,server --binary-name agent,server`), so a repo that ships more than one
+binary per release (like `ark-manager-web`'s `agent` + `server`) gets them all packaged into one
+archive instead of needing a separate `paws release` invocation per binary.
+
 Every build and smoke test goes through `dagger core` (see `crates/paws-release` and
 `builders/`) — `dagger`'s own multi-platform container execution (backed by the runner's QEMU
 `binfmt_misc` registration) handles the aarch64 legs, and a Wine-enabled base image handles the

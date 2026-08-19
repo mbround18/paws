@@ -60,9 +60,11 @@ Confirmed directly against the code, not from memory:
   Docker workflows onto `paws docker` (2026-08-18): before this, `push=true` resolved correctly
   but the pipeline had nothing to authenticate a publish with, so it built and silently published
   nothing.
-- **`paws release`**: cross-compiles **`paws` itself** (the Rust binary) for multiple OS/arch —
-  this is not a general "build any project for any target" capability, it's specific to `paws`'s
-  own release pipeline. Don't read the target matrix here as stack coverage for user projects.
+- **`paws release`**: primarily cross-compiles **`paws` itself** (the Rust binary) for multiple
+  OS/arch via its prebuilt `paws-builders` images — don't read the full target matrix here as
+  stack coverage for user projects. `--local-build` (2026-08-19) extends it to other Rust repos,
+  but narrowly: an embedded generic Linux-gnu builder only, `x86_64`/`aarch64-unknown-linux-gnu`
+  targets only, no macOS/Windows. See `docs/DEVELOPMENT.md`'s release-pipeline section.
 - **Java** is the next gap worth naming specifically, per a real `gh api users/mbround18/repos`
   audit (2026-08-18): after Rust/JS/TS, Java is the next-most-common language across
   `mbround18`'s own non-fork repos (3, all Gradle-based Hytale mods) with no `paws-provision`/

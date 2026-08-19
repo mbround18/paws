@@ -320,12 +320,22 @@ enum Commands {
         /// Host path to the source tree to build.
         #[arg(long, default_value = ".")]
         source: String,
-        /// Cargo package to build (produces one [[bin]]).
-        #[arg(long, default_value = "paws-cli")]
-        package: String,
-        /// Binary name as declared in the package's [[bin]] section.
-        #[arg(long, default_value = "paws")]
-        binary_name: String,
+        /// Cargo package(s) to build, comma-separated (one [[bin]] each) —
+        /// e.g. "agent,server". Paired 1:1 with --binary-name.
+        #[arg(long, default_value = "paws-cli", value_delimiter = ',')]
+        package: Vec<String>,
+        /// Binary name(s) as declared in each package's [[bin]] section,
+        /// comma-separated, paired 1:1 with --package. All built binaries
+        /// are packaged into one archive.
+        #[arg(long, default_value = "paws", value_delimiter = ',')]
+        binary_name: Vec<String>,
+        /// Build locally via Dagger's `docker-build` against paws's embedded
+        /// generic Rust-Linux builder instead of pulling paws's own prebuilt
+        /// builder image. Use this outside paws's own repo (e.g. a target
+        /// repo with no `builders/` directory) — only
+        /// `paws_release::local_build_targets()` are supported.
+        #[arg(long)]
+        local_build: bool,
         /// Release tag, e.g. "v0.0.1-prerelease.1". Falls back to $GITHUB_REF_NAME.
         #[arg(long)]
         tag: Option<String>,
@@ -732,12 +742,21 @@ async fn main() -> anyhow::Result<()> {
             source,
             package,
             binary_name,
+            local_build,
             tag,
             prerelease,
             repository,
             no_upload,
             skip_smoke_test,
         } => {
+            anyhow::ensure!(
+                package.len() == binary_name.len(),
+                "--package and --binary-name must list the same number of entries \
+                 (got {} package(s), {} binary-name(s))",
+                package.len(),
+                binary_name.len()
+            );
+
             let tag = tag.or_else(|| std::env::var("GITHUB_REF_NAME").ok());
             let raw_tag = tag
                 .clone()
@@ -762,41 +781,62 @@ async fn main() -> anyhow::Result<()> {
 
             paws_dagger::ensure_available().await?;
 
-            println!(
-                "release: building {binary_name} for {target} via {}...",
-                target_config.builder_dir
-            );
-            let binary_path = paws_release::build_binary(&paws_release::BuildRequest {
-                builder_dir: target_config.builder_dir,
-                source_dir: &source,
-                triple: &target,
-                package: &package,
-                binary_name: &binary_name,
-                builder_version: &raw_tag,
-            })
-            .await?;
-            println!("release: built {}", binary_path.display());
+            let local_builder_dir = if local_build {
+                Some(paws_release::write_generic_builder_dockerfile()?)
+            } else {
+                None
+            };
 
-            match (&target_config.smoke, skip_smoke_test) {
-                (_, true) => println!("release: --skip-smoke-test set, skipping"),
-                (None, false) => {
+            let mut binary_paths = Vec::with_capacity(package.len());
+            for (pkg, bin_name) in package.iter().zip(binary_name.iter()) {
+                let request = paws_release::BuildRequest {
+                    builder_dir: target_config.builder_dir,
+                    source_dir: &source,
+                    triple: &target,
+                    package: pkg,
+                    binary_name: bin_name,
+                    builder_version: &raw_tag,
+                };
+
+                let binary_path = if let Some(local_builder_dir) = &local_builder_dir {
+                    println!("release: building {bin_name} for {target} via local docker-build...");
+                    paws_release::build_binary_local(&request, local_builder_dir).await?
+                } else {
                     println!(
-                        "release: no execution environment available for {target}, skipping smoke test (build/link success only)"
+                        "release: building {bin_name} for {target} via {}...",
+                        target_config.builder_dir
                     );
+                    paws_release::build_binary(&request).await?
+                };
+                println!("release: built {}", binary_path.display());
+
+                match (&target_config.smoke, skip_smoke_test) {
+                    (_, true) => println!("release: --skip-smoke-test set, skipping"),
+                    (None, false) => {
+                        println!(
+                            "release: no execution environment available for {target}, skipping smoke test (build/link success only)"
+                        );
+                    }
+                    (Some(spec), false) => {
+                        println!("release: smoke testing {bin_name}...");
+                        let smoke_output = paws_release::smoke_test(&binary_path, spec).await?;
+                        println!("release: smoke test output: {}", smoke_output.trim());
+                    }
                 }
-                (Some(spec), false) => {
-                    println!("release: smoke testing...");
-                    let smoke_output = paws_release::smoke_test(&binary_path, spec).await?;
-                    println!("release: smoke test output: {}", smoke_output.trim());
-                }
+
+                binary_paths.push(binary_path);
             }
 
-            let archive = archive_name(&binary_name, &version, &target);
+            let archive_label = binary_name.join("+");
+            let archive = archive_name(&archive_label, &version, &target);
             let archive_path = std::path::Path::new("target")
                 .join("release-archives")
                 .join(&archive);
-            let relative_binary = binary_path.to_string_lossy().to_string();
-            package_zip(&std::env::current_dir()?, &archive_path, &[relative_binary]).await?;
+            let relative_binaries: Vec<String> = binary_paths
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            package_zip(&std::env::current_dir()?, &archive_path, &relative_binaries).await?;
             println!("release: packaged {}", archive_path.display());
 
             if no_upload {
