@@ -160,7 +160,10 @@ Author a new `@func()` (or extend `gh-reusable`'s existing `packages/dagger-modu
   get away from (see `docs/DEVELOPMENT.md`'s "Origin" section) — `paws`'s own release mechanism would
   depend on `gh-reusable` (or a new TS module) staying in sync and reachable, the same risk
   already flagged and mitigated elsewhere in this project by pinning `GH_REUSABLE_DAGGER_MODULE`
-  to a known-good commit after its floating `main` branch was found broken.
+  to a known-good commit after its floating `main` branch was found broken (as of 2026-08-19 this
+  risk has been eliminated entirely rather than just pinned — `paws` dropped its last runtime
+  dependency on `gh-reusable`, and the `GH_REUSABLE_DAGGER_MODULE` constant no longer exists in
+  the codebase).
 * Bad, because it's meaningfully more work to stand up (a new module, its own `dagger.json`, a
   place to host/version it) than writing a Dockerfile, for a capability (`docker-build` +
   `with-exec` + `export`) Dagger's own core types already provide directly.

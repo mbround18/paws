@@ -20,17 +20,15 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
 - `crates/paws-dagger` — wraps the `dagger` CLI. Deliberately **not** built on the
   `dagger-sdk` Rust crate yet — Dagger's own README marks that SDK experimental and
   "not for anything mission-critical." Pipeline logic goes through this crate so the
-  day the SDK is trustworthy, only this crate needs to change. `paws audit` is the sole
-  remaining subcommand that still calls into `gh-reusable`'s real Dagger module through
-  here (its scanner orchestration — running `semgrep`/`gitleaks`), pinned to a known-good
-  commit (see `GH_REUSABLE_DAGGER_MODULE` in `crates/paws-cli/src/main.rs`) rather than
-  trusting its floating `main` branch, which was verified broken (a stale vendored SDK
-  bundle threw at runtime) as of 2026-08-18. Every other subcommand — `ci`
-  (`node`/`python`/`rust`/`tauri`/`tauri-android`/`flatpak`), `docker`, `release`, `semver`,
-  `helm` — builds native `paws-dagger::core` pipelines now, zero dependency on `gh-reusable`
-  being reachable at all. `docker` was the last one to drop it (2026-08-19): `dockerRelease`
-  (a `gh-reusable` Dagger Function) used to build+tag+push docker.io/ghcr.io; `paws-docker`'s
-  own `Container.withRegistryAuth`/`Container.publish` calls do that natively now, the same
+  day the SDK is trustworthy, only this crate needs to change. As of 2026-08-19, **no
+  subcommand calls into `gh-reusable`'s Dagger module at all anymore** — `docker` and
+  `audit` were the last two (see below and `crates/paws-audit`'s own notes), both dropped
+  the same day. Every subcommand — `ci` (`node`/`python`/`rust`/`tauri`/`tauri-android`/
+  `flatpak`), `docker`, `release`, `semver`, `helm`, `audit` — builds native
+  `paws-dagger::core` pipelines now, zero runtime dependency on `gh-reusable` being
+  reachable at all. `docker` dropped it first: `dockerRelease` (a `gh-reusable` Dagger
+  Function) used to build+tag+push docker.io/ghcr.io; `paws-docker`'s own
+  `Container.withRegistryAuth`/`Container.publish` calls do that natively now, the same
   primitives already used for arbitrary registries (Artifactory, private registries — see
   below). `paws ci` streams a running pipeline's output live by
   default (`core_streaming`, `dagger core --progress=plain`) instead of buffering everything and
@@ -42,8 +40,24 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
 - `crates/paws-semver` — native Rust port of `actions/semver` (no `dagger` CLI needed).
   The pilot crate for eventually evaluating `dagger-sdk`.
 - `crates/paws-audit` — native Rust port of the audit/compliance aggregation logic
-  (language detection, scanner selection, finding normalization/aggregation); running the
-  actual `semgrep`/`gitleaks` containers still goes through `paws-dagger`.
+  (language detection, scanner selection, finding normalization/aggregation). Running the
+  actual `semgrep`/`gitleaks` containers is native too now (2026-08-19,
+  `scanner_json_pipeline_args`/`scanner_exit_code_pipeline_args`, through `paws-dagger`
+  directly) — `paws audit` was the last subcommand depending on `gh-reusable`'s Dagger
+  module at all, so `paws` has zero runtime dependency on it left. Ported byte-for-byte
+  from `runSemgrepScanner`/`runGitleaksScanner` (same images, same commands, same
+  empty-output fallback) — real catch along the way: `dagger core`'s `--args` value is
+  comma/CSV-parsed, and the scan scripts' embedded `"` (needed for the JSON fallback
+  content) broke that parser, so the script is written to a file (`with-new-file`) and run
+  as `sh <path>` instead of inlined into `--args`. Verified for real, end to end, through
+  the actual `paws audit` CLI against a real fixture with genuine findings in both
+  scanners (a Stripe key, an `eval()` call) — not just the clean/no-findings case. A
+  broader scanner catalog (the 95+ scanners `audit-mcp`
+  <https://github.com/mbround18/audit-mcp> already knows how to run, across every
+  language) is a deliberate, separate future expansion, not this pass's scope —
+  `audit-mcp`'s own execution engine (a direct Docker API client, not Dagger) isn't reused
+  as-is either way, since routing all container execution through Dagger is a hard
+  invariant here (`docs/adr/0001`); what's reused is its scanner-catalog shape.
 - `crates/paws-docker` — native Rust port of `docker-facts`/`docker-release`'s resolution
   logic (compose discovery, tag generation, push gating); has a real e2e test suite that
   builds `examples/`' fixtures against an actual Docker daemon, including a BuildKit-only

@@ -51,14 +51,18 @@ Confirmed directly against the code, not from memory:
 - **`paws audit`** (language detection for scanner selection): detects `rust`, `node`, `python`,
   `go`, `docker` signals (`paws_audit::LanguageFamily`) — detection only, not execution. A repo
   with a `go.mod` gets audited correctly; `paws ci --toolchain go` doesn't exist.
-  `paws audit`'s exit code (2026-08-19): `gh-reusable`'s `audit` Dagger function has no top-level
-  `success`/`decision`/`outcome` field (same shape of gap `dockerRelease` had — see `paws docker`
-  below), but it does compute a real nested status,
-  `report.outputs.auditSummary.overallStatus` (`"pass"|"findings"|"degraded"|"failed"`, from
-  `audit-types.ts`/`audit-logic.ts`). `pipeline_report_succeeded` in `crates/paws-cli` now reads
-  it — deliberately only `"failed"` (a scanner itself errored) fails `paws audit`;
-  `"findings"` (scanners ran clean but found real issues) stays non-fatal, since there's no
-  severity-threshold concept yet to decide which findings should block a build.
+  As of 2026-08-19, `paws audit` no longer depends on `gh-reusable` at all — scanner execution
+  (`semgrep`/`gitleaks`, the only two scanners `gh-reusable`'s `audit` function ran) is native
+  `crates/paws-audit` logic running through `paws-dagger::core`, a byte-for-byte port of
+  `gh-reusable`'s `runSemgrepScanner`/`runGitleaksScanner` shell scripts. `AuditOverallStatus`
+  (`Pass`/`Findings`/`Degraded`/`Failed`, ported from `audit-types.ts`/`audit-logic.ts`) is
+  computed locally in Rust rather than read back out of a TS pipeline's report — deliberately only
+  `Failed` (a scanner itself errored) fails `paws audit`; `Findings` (scanners ran clean but found
+  real issues) stays non-fatal, since there's no severity-threshold concept yet to decide which
+  findings should block a build. Building this surfaced two real `dagger core --args` CSV-parsing
+  bugs (embedded raw newlines get silently truncated; embedded literal double-quotes break the
+  parser entirely) — fixed by writing scanner scripts via `with-new-file` instead of inlining them
+  into `--args`.
 - **`paws docker`**: any `docker-compose.yml`/`Dockerfile`-based project, regardless of source
   language — this one's already stack-agnostic, since it works from the compose file / Dockerfile
   contract rather than a language-specific build step. Registry auth
@@ -72,9 +76,9 @@ Confirmed directly against the code, not from memory:
   make arbitrary registries work (`--registries myco.jfrog.io --registry-username
   myco.jfrog.io=you`, token read from a derived `$MYCO_JFROG_IO_TOKEN`-style env var) —
   Artifactory, a private registry, anything `dockerRelease` (the `gh-reusable` function this
-  replaced) had no way to authenticate to. `paws audit` is now the only subcommand still calling
-  into `gh-reusable` at all (its scanner orchestration — running `semgrep`/`gitleaks` — queued as
-  its own, separate native-port piece of work, a different shape of problem than build/publish).
+  replaced) had no way to authenticate to. With `paws audit`'s native scanner port landing the
+  same day (see above), `paws` now has zero runtime dependency on `gh-reusable` for any
+  subcommand.
 - **`paws release`**: primarily cross-compiles **`paws` itself** (the Rust binary) for multiple
   OS/arch via its prebuilt `paws-builders` images — don't read the full target matrix here as
   stack coverage for user projects. `--local-build` (2026-08-19) extends it to other Rust repos,

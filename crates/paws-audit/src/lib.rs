@@ -2,10 +2,23 @@
 //!
 //! Parity source (read directly): `packages/dagger-module/src/audit-types.ts` (shapes) and
 //! `packages/dagger-module/src/audit-logic.ts` (detection, scanner selection, aggregation,
-//! finding normalization). This crate only ports the pure aggregation/detection logic —
-//! actually running `semgrep`/`gitleaks` is still `paws-dagger`'s job (see `paws-cli`'s
-//! `Audit` handler); this crate turns their raw output into the same summary shape
-//! downstream tooling already consumes (spec.md User Story 4, FR-006).
+//! finding normalization, and — as of the scanner-execution functions below —
+//! `runSemgrepScanner`/`runGitleaksScanner` in `packages/dagger-module/src/index.ts`, ported
+//! byte-for-byte: same images, same commands, same empty-output fallback). `paws-cli`'s
+//! `Audit` handler drives [`scanner_json_pipeline_args`]/[`scanner_exit_code_pipeline_args`]
+//! (one call each per [`ScannerConfig`], covering both scanners) through
+//! `paws-dagger::core` directly — no `gh-reusable` Dagger Function call anywhere in `paws
+//! audit` anymore (it was the last subcommand still depending on `gh-reusable` at all).
+//! Real scanner catalog beyond semgrep/gitleaks (the 95+ scanners across every language
+//! `audit-mcp` <https://github.com/mbround18/audit-mcp> already catalogs and knows how to
+//! run) is a deliberately separate, later expansion — this crate's `ScannerName`/
+//! `AUDIT_SCANNER_REGISTRY` are already shaped to add more the same way
+//! (`ScannerConfig.image` + a script), but doing all of them at once wasn't this pass's
+//! scope. `audit-mcp` itself runs scanners via a direct Docker API client (`bollard`), not
+//! Dagger — deliberately not reused as-is here despite the "based on audit-mcp" starting
+//! point, since routing all container execution through Dagger (never a direct Docker
+//! spawn) is a hard invariant elsewhere in `paws` (see `docs/adr/0001`); what's actually
+//! reused is its scanner-catalog *shape* (name/image/command), not its execution engine.
 
 use std::collections::HashMap;
 
@@ -366,6 +379,106 @@ pub fn select_audit_scanners(
             }
         })
         .collect()
+}
+
+/// Where a scanner's JSON report ends up inside its own container — needed
+/// both to build the run script (below) and to know what path to read back
+/// afterward.
+fn scanner_output_path(name: ScannerName) -> &'static str {
+    match name {
+        ScannerName::Semgrep => "/tmp/semgrep.json",
+        ScannerName::Gitleaks => "/tmp/gitleaks.json",
+    }
+}
+
+/// The `sh` script each scanner runs — parity ports of `runSemgrepScanner`/
+/// `runGitleaksScanner`'s exact commands (`packages/dagger-module/src/index.ts`),
+/// including the empty-output fallback (a clean run can leave the report file
+/// empty/absent depending on scanner version, which [`parse_scanner_findings`]
+/// needs *some* valid JSON to parse rather than nothing at all). `set -eu` means
+/// a real scanner failure aborts before the fallback write — paired with
+/// `--expect=ANY` on the `with-exec` that runs it (see
+/// [`scanner_pipeline_prefix`]) so a real failure doesn't also fail the whole
+/// `dagger core` call, just leaves the exit code to reflect it.
+fn scanner_script(name: ScannerName) -> &'static str {
+    match name {
+        ScannerName::Semgrep => {
+            "set -eu\n\
+             semgrep scan --config \"$SEMGREP_CONFIG\" --json --output /tmp/semgrep.json /src\n\
+             if [ ! -s /tmp/semgrep.json ]; then printf '{\"results\":[]}' > /tmp/semgrep.json; fi"
+        }
+        ScannerName::Gitleaks => {
+            "set -eu\n\
+             gitleaks detect --source=/src --report-format=json --report-path=/tmp/gitleaks.json --redact --exit-code=0\n\
+             if [ ! -s /tmp/gitleaks.json ]; then printf '[]' > /tmp/gitleaks.json; fi"
+        }
+    }
+}
+
+/// The `dagger core <chain>` prefix both [`scanner_json_pipeline_args`] and
+/// [`scanner_exit_code_pipeline_args`] build on: pulls `scanner.image`, mounts
+/// `source_dir` at `/src`, and runs [`scanner_script`] — written to a file and
+/// executed as `sh <path>` rather than inlined into `with-exec --args`, not for
+/// style but because it has to be: `dagger core`'s `--args` value is
+/// comma/CSV-parsed, and this script's embedded `"` characters (needed for the
+/// JSON fallback content) broke that parser — verified for real (`invalid
+/// argument ... parse error ... bare " in non-quoted-field`) before switching to
+/// `with-new-file` + `sh <path>`, which sidesteps the CSV parsing entirely.
+fn scanner_pipeline_prefix(source_dir: &str, scanner: &ScannerConfig) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "container".into(),
+        "from".into(),
+        format!("--address={}", scanner.image),
+        "with-mounted-directory".into(),
+        "--path=/src".into(),
+        format!("--source={source_dir}"),
+        "with-workdir".into(),
+        "--path=/src".into(),
+    ];
+    if scanner.name == ScannerName::Semgrep {
+        args.extend([
+            "with-env-variable".into(),
+            "--name=SEMGREP_CONFIG".into(),
+            "--value=auto".into(),
+        ]);
+    }
+    args.extend([
+        "with-new-file".into(),
+        "--path=/scan.sh".into(),
+        format!("--contents={}", scanner_script(scanner.name)),
+        "with-exec".into(),
+        "--expect=ANY".into(),
+        "--args=sh,/scan.sh".into(),
+    ]);
+    args
+}
+
+/// Builds the `dagger core <chain>` argument list that runs `scanner` and
+/// returns its report file's contents (via `paws_dagger::core`, whose return
+/// value is exactly what [`parse_scanner_findings`] expects to parse) — verified
+/// for real against both scanners with genuine findings (a `semgrep`
+/// `eval()`-detected finding, a `gitleaks` high-entropy secret finding), not
+/// just the empty/no-findings case.
+pub fn scanner_json_pipeline_args(source_dir: &str, scanner: &ScannerConfig) -> Vec<String> {
+    let mut args = scanner_pipeline_prefix(source_dir, scanner);
+    args.extend([
+        "file".into(),
+        format!("--path={}", scanner_output_path(scanner.name)),
+        "contents".into(),
+    ]);
+    args
+}
+
+/// Same prefix as [`scanner_json_pipeline_args`] (replays from Dagger's own
+/// cache rather than re-running the scan), but returns the scan command's exit
+/// code instead — [`normalize_scanner_status`] needs both the exit code and the
+/// findings count, and `dagger core`'s chains are strictly linear (`exit-code`
+/// and `file`/`contents` are two different terminal calls on the same
+/// `with-exec`'d container, so getting both needs two invocations, not one).
+pub fn scanner_exit_code_pipeline_args(source_dir: &str, scanner: &ScannerConfig) -> Vec<String> {
+    let mut args = scanner_pipeline_prefix(source_dir, scanner);
+    args.push("exit-code".into());
+    args
 }
 
 /// Ported from `createSkippedScannerResult`.
@@ -883,5 +996,64 @@ mod tests {
             .find(|s| s.name == ScannerName::Gitleaks)
             .unwrap();
         assert!(!gitleaks.should_run);
+    }
+
+    fn scanner(name: ScannerName) -> ScannerConfig {
+        select_audit_scanners(&detect_language_families(&signals(&["Cargo.toml"])), true)
+            .into_iter()
+            .find(|s| s.name == name)
+            .unwrap()
+    }
+
+    #[test]
+    fn semgrep_json_pipeline_pulls_the_registry_image_and_reads_its_report() {
+        let args = scanner_json_pipeline_args("/host/src", &scanner(ScannerName::Semgrep));
+        assert_eq!(args[0], "container");
+        assert_eq!(args[2], "--address=returntocorp/semgrep:1.81.0");
+        assert!(args.contains(&"--source=/host/src".to_string()));
+        assert!(args.contains(&"--name=SEMGREP_CONFIG".to_string()));
+        assert_eq!(args[args.len() - 3], "file");
+        assert_eq!(args[args.len() - 2], "--path=/tmp/semgrep.json");
+        assert_eq!(args.last(), Some(&"contents".to_string()));
+    }
+
+    #[test]
+    fn gitleaks_json_pipeline_has_no_semgrep_config_env() {
+        let args = scanner_json_pipeline_args("/host/src", &scanner(ScannerName::Gitleaks));
+        assert_eq!(args[2], "--address=zricethezav/gitleaks:v8.24.2");
+        assert!(!args.iter().any(|a| a == "--name=SEMGREP_CONFIG"));
+        assert_eq!(args[args.len() - 2], "--path=/tmp/gitleaks.json");
+    }
+
+    #[test]
+    fn exit_code_pipeline_shares_the_json_pipelines_prefix() {
+        let scanner = scanner(ScannerName::Semgrep);
+        let json_args = scanner_json_pipeline_args("/host/src", &scanner);
+        let exit_args = scanner_exit_code_pipeline_args("/host/src", &scanner);
+
+        // Identical up to the terminal call - same build, so Dagger's own
+        // cache makes the second invocation replay instead of re-scanning.
+        let json_prefix = &json_args[..json_args.len() - 3];
+        let exit_prefix = &exit_args[..exit_args.len() - 1];
+        assert_eq!(json_prefix, exit_prefix);
+        assert_eq!(exit_args.last(), Some(&"exit-code".to_string()));
+    }
+
+    #[test]
+    fn scanner_scripts_never_embed_a_raw_newline_inside_one_with_exec_args_token() {
+        // dagger core's --args value is comma/CSV-parsed - an embedded
+        // newline inside a single comma-separated field gets silently
+        // truncated (verified for real). The scanner scripts avoid this by
+        // never going through --args at all (with-new-file + `sh <path>`
+        // instead), but this pins the actual with-exec args token used stays
+        // newline-free as a regression guard on that choice.
+        for name in [ScannerName::Semgrep, ScannerName::Gitleaks] {
+            let args = scanner_json_pipeline_args("/host/src", &scanner(name));
+            let exec_args_token = args
+                .iter()
+                .find(|a| a.starts_with("--args="))
+                .expect("with-exec --args token");
+            assert!(!exec_args_token.contains('\n'));
+        }
     }
 }

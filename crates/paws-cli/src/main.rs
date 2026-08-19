@@ -1,7 +1,6 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use paws_audit::{RepositorySignals, select_audit_scanners};
-use paws_dagger::{DaggerCall, call};
 use paws_docker::{
     DockerFactsInput, GithubContext as DockerGithubContext, docker_hub_tags,
     native_publish_pipeline_args, registry_token_env_var, resolve_docker_facts, tags_for_registry,
@@ -25,80 +24,6 @@ fn detect_needed_ecosystems() -> Vec<Ecosystem> {
         ecosystems.push(Ecosystem::Python);
     }
     ecosystems
-}
-
-/// Reads a pipeline report's pass/fail signal. Most `gh-reusable` Dagger
-/// functions return a top-level `success: bool`, but `dockerRelease`
-/// (read directly from `packages/dagger-module/src/index.ts`) doesn't have
-/// that field at all — it reports `decision: "publish"|"skip"|"failed"` and
-/// `outcome: "success"|"failure"` instead. Trusting only `success` meant a
-/// real publish failure (verified for real: a `dockerRelease` call that hit
-/// an error building/publishing a leg) parsed as `unwrap_or(true)` and
-/// exited 0 anyway — the calling GitHub Actions step, and the job around
-/// it, reported green while the image never actually published. `decision`
-/// is checked first since it's `dockerRelease`'s specific "did the publish
-/// itself fail" field; `outcome`/`success` are the general-purpose fallbacks
-/// every other function already uses.
-///
-/// `audit` has the exact same shape of gap: its top-level JSON is
-/// `{markdown, report, reportJson, reportMarkdown}` — no `decision`,
-/// `outcome`, or `success` at all, so every audit call used to fall all the
-/// way through to `unwrap_or(true)` and report success regardless of what
-/// the scan actually found. Unlike `dockerRelease` though, `audit` (read
-/// directly from `packages/dagger-module/src/audit-logic.ts`/`audit-types.ts`
-/// in `gh-reusable`) *does* compute a real status, just nested:
-/// `report.outputs.auditSummary.overallStatus`, one of
-/// `"pass"|"findings"|"degraded"|"failed"`. Deliberately only `"failed"`
-/// (a scanner itself errored/couldn't run) counts as a `paws audit` failure
-/// here — `"findings"` (scanners ran clean but found real issues) stays
-/// non-fatal, since `paws audit` doesn't yet have a severity-threshold
-/// concept to decide which findings should actually block a build; making
-/// any finding fail the build would silently turn every repo's first `paws
-/// audit` run red with no way to tune it. This mirrors the docker fix's
-/// actual intent — don't silently report success on a real execution
-/// failure — without overreaching into gating policy that hasn't been
-/// designed yet.
-fn pipeline_report_succeeded(parsed: &serde_json::Value) -> bool {
-    if let Some(decision) = parsed.get("decision").and_then(|v| v.as_str()) {
-        return decision != "failed";
-    }
-    if let Some(outcome) = parsed.get("outcome").and_then(|v| v.as_str()) {
-        return outcome != "failure";
-    }
-    if let Some(overall_status) = parsed
-        .pointer("/report/outputs/auditSummary/overallStatus")
-        .and_then(|v| v.as_str())
-    {
-        return overall_status != "failed";
-    }
-    parsed
-        .get("success")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true)
-}
-
-/// Calls a `gh-reusable` Dagger pipeline function, prints its human-readable
-/// `markdown` report field (falling back to the raw output if the response
-/// isn't the expected `{success, markdown, ...}` shape), and returns whether
-/// it reported success — callers use this to decide their own exit code
-/// rather than always exiting 0 on a successful `dagger call` process spawn.
-async fn call_pipeline_report(function: &str, args: Vec<String>) -> anyhow::Result<bool> {
-    let output = call(DaggerCall {
-        module: GH_REUSABLE_DAGGER_MODULE.into(),
-        function: function.into(),
-        args,
-    })
-    .await?;
-
-    let parsed: serde_json::Value =
-        serde_json::from_str(&output).unwrap_or(serde_json::Value::Null);
-    if let Some(markdown) = parsed.get("markdown").and_then(|v| v.as_str()) {
-        println!("{markdown}");
-    } else {
-        println!("{output}");
-    }
-
-    Ok(pipeline_report_succeeded(&parsed))
 }
 
 /// Runs a `dagger core <args>` pipeline, streaming its live progress to the
@@ -204,25 +129,6 @@ fn collect_repository_signals() -> RepositorySignals {
         .map(|name| (name.to_string(), std::path::Path::new(name).exists()))
         .collect()
 }
-
-/// Interim reference to `gh-reusable`'s existing TS Dagger module. Down to
-/// one remaining caller — `paws audit` (its scanner orchestration:
-/// semgrep/gitleaks, run and aggregated by the TS module, not yet ported
-/// natively). `paws docker`'s `dockerRelease` call was the other one; it's
-/// gone (`crates/paws-docker`'s `native_publish_pipeline_args` — build +
-/// `Container.withRegistryAuth` + `Container.publish`, all through Dagger
-/// directly, not `gh-reusable`), leaving this constant one native-audit
-/// port away from deletion entirely (see specs/001-paws-core-cli/tasks.md
-/// task groups 2-4).
-///
-/// Pinned to a commit, not `main`: floating `main` was verified broken as of
-/// 2026-08-18 (`33b7761`) — the module's vendored Dagger TS SDK bundle threw
-/// `TypeError: Cannot read properties of undefined (reading 'ClassDeclaration')`
-/// at runtime against this environment's dagger v0.21.8 engine, while this
-/// pinned commit was verified working end-to-end (`rust-build-and-test`
-/// against `examples/rust-fixture`). Bump only after re-verifying a real
-/// `dagger call` against the new commit succeeds, not on trust.
-const GH_REUSABLE_DAGGER_MODULE: &str = "github.com/mbround18/gh-reusable/packages/dagger-module@7fbda5676b56479aa458b1ecdc0313ed1a1cc934";
 
 /// paws: run-anywhere CI/CD pipelines, backed by Dagger.
 #[derive(Parser)]
@@ -856,13 +762,9 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         Commands::Audit => {
-            // Local pre-check only: `paws-audit`'s detection logic decides
-            // whether it's worth spinning up `dagger` at all (spec.md's
-            // "outside a Cargo/Node/Docker project entirely" edge case). The
-            // actual scan run is a single call to the real `audit` function,
-            // which does its own detection/scanner-selection/aggregation
-            // internally — `paws-audit`'s aggregation logic isn't reinvoked
-            // here since it would just be redoing what that call already did.
+            // `paws-audit`'s detection logic decides whether it's worth
+            // spinning up `dagger` at all (spec.md's "outside a Cargo/Node/
+            // Docker project entirely" edge case).
             let signals = collect_repository_signals();
             let detection = paws_audit::detect_language_families(&signals);
             let scanners = select_audit_scanners(&detection, true);
@@ -873,8 +775,65 @@ async fn main() -> anyhow::Result<()> {
 
             paws_dagger::ensure_available().await?;
             let source = std::env::current_dir()?.to_string_lossy().to_string();
-            let succeeded = call_pipeline_report("audit", vec!["--source".into(), source]).await?;
-            if !succeeded {
+
+            // Each scanner runs natively through Dagger now (no `gh-reusable`
+            // Dagger Function call) — one invocation reads the scanner's own
+            // JSON report, a second (sharing the same build/exec, so Dagger's
+            // own cache makes it fast) reads the exit code;
+            // `normalize_scanner_status` needs both to tell "clean pass" from
+            // "the scanner itself errored" apart.
+            let mut scanner_results = Vec::with_capacity(scanners.len());
+            for scanner in &scanners {
+                if !scanner.should_run {
+                    scanner_results.push(paws_audit::create_skipped_scanner_result(scanner));
+                    continue;
+                }
+                println!("audit: running {}...", scanner.step_name);
+                let started = std::time::Instant::now();
+                let raw_json =
+                    paws_dagger::core(&paws_audit::scanner_json_pipeline_args(&source, scanner))
+                        .await;
+                let exit_code_output = paws_dagger::core(
+                    &paws_audit::scanner_exit_code_pipeline_args(&source, scanner),
+                )
+                .await;
+                let duration_ms = started.elapsed().as_millis() as u64;
+
+                let result = match (raw_json, exit_code_output) {
+                    (Ok(raw_json), Ok(exit_code_raw)) => {
+                        let exit_code = exit_code_raw.trim().parse::<i32>().ok();
+                        let (findings_count, top_findings) =
+                            paws_audit::parse_scanner_findings(scanner.name, &raw_json);
+                        let status =
+                            paws_audit::normalize_scanner_status(exit_code, findings_count);
+                        paws_audit::AuditScannerResult {
+                            name: scanner.name.as_str().to_string(),
+                            family: scanner.family,
+                            status,
+                            findings_count,
+                            duration_ms,
+                            failure_reason: (status == paws_audit::ScannerStatus::Failed).then(
+                                || format!("{} exited {:?}", scanner.name.as_str(), exit_code),
+                            ),
+                            top_findings,
+                        }
+                    }
+                    (Err(err), _) | (_, Err(err)) => paws_audit::create_failed_scanner_result(
+                        scanner,
+                        duration_ms,
+                        err.to_string(),
+                    ),
+                };
+                scanner_results.push(result);
+            }
+
+            let summary = paws_audit::aggregate_audit_results(&scanner_results, &detection);
+            println!(
+                "{}",
+                paws_audit::render_audit_intelligence_section(&summary)
+            );
+
+            if summary.overall_status == paws_audit::AuditOverallStatus::Failed {
                 anyhow::bail!("audit failed: see scanner findings above");
             }
         }
@@ -1197,64 +1156,10 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use clap::CommandFactory;
 
-    use super::{Cli, pipeline_report_succeeded};
+    use super::Cli;
 
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
-    }
-
-    #[test]
-    fn pipeline_report_succeeded_reads_dockerrelease_decision_first() {
-        assert!(!pipeline_report_succeeded(
-            &serde_json::json!({"decision": "failed", "outcome": "failure"})
-        ));
-        assert!(pipeline_report_succeeded(
-            &serde_json::json!({"decision": "publish", "outcome": "success"})
-        ));
-        assert!(pipeline_report_succeeded(
-            &serde_json::json!({"decision": "skip", "outcome": "success"})
-        ));
-    }
-
-    #[test]
-    fn pipeline_report_succeeded_falls_back_to_outcome_then_success() {
-        assert!(!pipeline_report_succeeded(
-            &serde_json::json!({"outcome": "failure"})
-        ));
-        assert!(pipeline_report_succeeded(
-            &serde_json::json!({"outcome": "success"})
-        ));
-        assert!(!pipeline_report_succeeded(
-            &serde_json::json!({"success": false})
-        ));
-        // No recognized shape at all - stays permissive, matching every
-        // caller's prior behavior.
-        assert!(pipeline_report_succeeded(
-            &serde_json::json!({"markdown": "ok"})
-        ));
-    }
-
-    #[test]
-    fn pipeline_report_succeeded_reads_audit_overall_status() {
-        assert!(!pipeline_report_succeeded(&serde_json::json!({
-            "markdown": "...",
-            "report": {"outputs": {"auditSummary": {"overallStatus": "failed"}}}
-        })));
-        // "findings" (scanners ran clean but found real issues) is
-        // deliberately non-fatal - see pipeline_report_succeeded's doc
-        // comment for why paws audit doesn't yet gate on this.
-        assert!(pipeline_report_succeeded(&serde_json::json!({
-            "markdown": "...",
-            "report": {"outputs": {"auditSummary": {"overallStatus": "findings"}}}
-        })));
-        assert!(pipeline_report_succeeded(&serde_json::json!({
-            "markdown": "...",
-            "report": {"outputs": {"auditSummary": {"overallStatus": "degraded"}}}
-        })));
-        assert!(pipeline_report_succeeded(&serde_json::json!({
-            "markdown": "...",
-            "report": {"outputs": {"auditSummary": {"overallStatus": "pass"}}}
-        })));
     }
 }
