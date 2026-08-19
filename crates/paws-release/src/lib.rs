@@ -382,6 +382,17 @@ pub async fn package_zip(working_dir: &Path, archive_path: &Path, files: &[Strin
     Ok(())
 }
 
+/// Whether a `POST /releases`' `422 Unprocessable Entity` body is GitHub's
+/// specific "a release for this tag already exists" error, as opposed to
+/// some other validation failure — checked as a plain substring rather than
+/// parsing the full `{"errors": [{"code": ..., "field": ...}]}` shape,
+/// since `code":"already_exists"` combined with `field":"tag_name"` is
+/// specific enough not to false-positive on an unrelated 422, and doesn't
+/// require pinning to GitHub's exact error-array field ordering.
+fn is_tag_already_exists_error(response_body: &str) -> bool {
+    response_body.contains("\"code\":\"already_exists\"") && response_body.contains("\"tag_name\"")
+}
+
 /// Minimal GitHub REST API client for release publishing: get-or-create a
 /// release for a tag, then upload (or replace) an asset on it. Plain HTTPS
 /// calls, not a process spawn, so this isn't part of the Dagger-routing
@@ -415,9 +426,9 @@ impl GitHubReleaseClient {
             .header("X-GitHub-Api-Version", "2022-11-28")
     }
 
-    /// Finds the release for `tag`, creating it (as a prerelease if
-    /// `prerelease` is true) if it doesn't exist yet. Returns the release id.
-    pub async fn get_or_create_release(&self, tag: &str, prerelease: bool) -> Result<u64> {
+    /// Looks up the release for `tag`, returning `None` on a 404 (no release
+    /// yet) rather than erroring — callers decide what a miss means.
+    async fn fetch_release_by_tag(&self, tag: &str) -> Result<Option<u64>> {
         let get_url = format!("{}/releases/tags/{tag}", self.api_base());
         let response = self
             .auth_headers(self.client.get(&get_url))
@@ -425,18 +436,38 @@ impl GitHubReleaseClient {
             .await
             .context("failed to query release by tag")?;
 
-        if response.status().is_success() {
-            let body: serde_json::Value = response
-                .json()
-                .await
-                .context("failed to parse release response")?;
-            return body
-                .get("id")
-                .and_then(|v| v.as_u64())
-                .context("release response missing id");
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
         }
-        if response.status() != reqwest::StatusCode::NOT_FOUND {
+        if !response.status().is_success() {
             anyhow::bail!("unexpected status querying release: {}", response.status());
+        }
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("failed to parse release response")?;
+        body.get("id")
+            .and_then(|v| v.as_u64())
+            .context("release response missing id")
+            .map(Some)
+    }
+
+    /// Finds the release for `tag`, creating it (as a prerelease if
+    /// `prerelease` is true) if it doesn't exist yet. Returns the release id.
+    ///
+    /// Handles the race a parallel per-target release matrix (`release.yaml`)
+    /// creates for real: two legs can both see "no release yet" and both
+    /// attempt to create one — GitHub accepts the first and rejects the
+    /// second with `422 Unprocessable Entity` /
+    /// `{"code":"already_exists","field":"tag_name"}` (verified for real
+    /// against a genuine `v0.0.1-prerelease.16` run: the `linux-gnu` and
+    /// `linux-musl-x86_64` legs raced, `linux-musl-x86_64` lost and failed
+    /// the whole job instead of just fetching the release the other leg had
+    /// just created). Rather than treat that 422 as fatal, re-fetch by tag —
+    /// the losing leg still gets a valid release id to upload its asset to.
+    pub async fn get_or_create_release(&self, tag: &str, prerelease: bool) -> Result<u64> {
+        if let Some(id) = self.fetch_release_by_tag(tag).await? {
+            return Ok(id);
         }
 
         let create_url = format!("{}/releases", self.api_base());
@@ -453,6 +484,20 @@ impl GitHubReleaseClient {
             .await
             .context("failed to create release")?;
 
+        if response.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+            let text = response.text().await.unwrap_or_default();
+            if is_tag_already_exists_error(&text) {
+                return self.fetch_release_by_tag(tag).await?.with_context(|| {
+                    format!(
+                        "release for tag {tag} reported as already existing, but a \
+                         follow-up fetch found nothing"
+                    )
+                });
+            }
+            anyhow::bail!(
+                "failed to create release for tag {tag}: 422 Unprocessable Entity: {text}"
+            );
+        }
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
@@ -535,6 +580,23 @@ impl GitHubReleaseClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_the_real_tag_already_exists_error_body() {
+        // Captured verbatim from a real race: v0.0.1-prerelease.16's
+        // linux-gnu and linux-musl-x86_64 release.yaml legs both tried to
+        // create the same tag's release; linux-musl-x86_64 lost with
+        // exactly this body.
+        let body = r#"{"message":"Validation Failed","errors":[{"resource":"Release","code":"already_exists","field":"tag_name"}],"documentation_url":"https://docs.github.com/rest/releases/releases#create-a-release","status":"422"}"#;
+        assert!(is_tag_already_exists_error(body));
+    }
+
+    #[test]
+    fn does_not_misclassify_an_unrelated_422() {
+        let body = r#"{"message":"Validation Failed","errors":[{"resource":"Release","code":"invalid","field":"name"}]}"#;
+        assert!(!is_tag_already_exists_error(body));
+        assert!(!is_tag_already_exists_error(""));
+    }
 
     #[test]
     fn windows_targets_get_exe_suffix() {
