@@ -335,6 +335,23 @@ enum Commands {
         #[arg(long)]
         verbose: bool,
     },
+    /// Lint (and optionally package) Helm chart(s) — `charts/*/Chart.yaml`
+    /// or a root `Chart.yaml`.
+    Helm {
+        /// Host path to the source tree to scan for chart(s).
+        #[arg(long, default_value = ".")]
+        source: String,
+        /// Also `helm package` every chart after linting, exported to `--output`.
+        #[arg(long)]
+        package: bool,
+        /// Host directory packaged `.tgz`s are exported to (only with `--package`).
+        #[arg(long, default_value = "tmp")]
+        output: String,
+        /// Suppress dagger's live build progress; only print output once
+        /// the pipeline finishes (or on failure). Default is streamed live.
+        #[arg(long)]
+        silent: bool,
+    },
     /// Cross-target build, package, and publish a release binary to GitHub Releases.
     Release {
         /// Rust target triple to build, e.g. "x86_64-unknown-linux-gnu".
@@ -762,6 +779,56 @@ async fn main() -> anyhow::Result<()> {
             run_provisioning(ecosystems, verbose).await?;
             println!("provision: all requested toolchains provisioned successfully");
         }
+        Commands::Helm {
+            source,
+            package,
+            output,
+            silent,
+        } => {
+            let dir = std::path::Path::new(&source)
+                .canonicalize()
+                .unwrap_or_else(|_| source.clone().into());
+            let project = paws_helm::detect_project(&dir)
+                .context("failed to detect a Helm chart project in the given source directory")?;
+            println!(
+                "helm: found {} chart(s) in {}",
+                project.charts.len(),
+                dir.display()
+            );
+
+            paws_dagger::ensure_available().await?;
+            let builder_dir = paws_helm::write_builder_dockerfile()
+                .context("failed to materialize the helm builder Dockerfile")?;
+
+            if package {
+                let output_dir = std::path::Path::new(&output);
+                std::fs::create_dir_all(output_dir)
+                    .context("failed to create the Helm package output directory")?;
+                let host_output = output_dir
+                    .canonicalize()
+                    .context("failed to resolve the Helm package output directory")?;
+                let args = paws_helm::package_pipeline_args(
+                    &project,
+                    &dir.to_string_lossy(),
+                    &builder_dir.to_string_lossy(),
+                    "/out",
+                    &host_output.to_string_lossy(),
+                );
+                run_dagger_core(&args, silent).await?;
+                println!(
+                    "helm: lint + package succeeded, packages in {}",
+                    host_output.display()
+                );
+            } else {
+                let args = paws_helm::lint_pipeline_args(
+                    &project,
+                    &dir.to_string_lossy(),
+                    &builder_dir.to_string_lossy(),
+                );
+                run_dagger_core(&args, silent).await?;
+                println!("helm: lint succeeded");
+            }
+        }
         Commands::Release {
             target,
             source,
@@ -971,12 +1038,7 @@ mod tests {
         );
 
         assert_eq!(
-            docker_credential_args(
-                Some("mbround18".into()),
-                None,
-                Some("dtoken".into()),
-                None
-            ),
+            docker_credential_args(Some("mbround18".into()), None, Some("dtoken".into()), None),
             vec![
                 "--dockerhub-username".to_string(),
                 "mbround18".to_string(),

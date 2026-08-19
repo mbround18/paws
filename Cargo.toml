@@ -15,6 +15,7 @@ members = [
     "crates/paws-python",
     "crates/paws-rust",
     "crates/paws-flatpak",
+    "crates/paws-helm",
 ]
 
 [workspace.package]

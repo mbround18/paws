@@ -88,16 +88,24 @@ Confirmed directly against the code, not from memory:
   `game-server-management`, also depends on `gh-reusable`'s `publish.yaml` (`target: node |
   rust-crate | helm-chart` — crates.io/npm/OCI Helm-chart publishing), which nothing in `paws`
   replaces yet.
-- **No Helm-chart support at all** — surfaced converting `mbround18/helm-charts` itself
-  (2026-08-19): distinct from the OCI `publish.yaml` `helm-chart` target above, this repo's own
-  CI (`.github/workflows/helm.yml`/`gh-pages.yml`) does `helm lint`/`helm package` plus
-  `chart-releaser`-style publishing to a `gh-pages` branch (via a custom `tools/release_charts.py`
-  + a GitHub App token, not registry auth) — a fundamentally different publish mechanism from
-  OCI push. `paws` has no Helm CLI wrapping (`paws-helm` doesn't exist) and no Dagger builder for
-  it. Also worth noting: this repo's Python jobs don't fit `paws-python`'s fixed
-  `uv sync && uv build && uv run pytest` pipeline shape either — it's an internal chart-tooling
-  workspace with no package meant for `uv build`, and CI runs several separately-scoped `pytest`
-  invocations (with per-suite JUnit summaries), not one blanket `pytest` call.
+- **`paws helm`** (2026-08-19): closes the lint/package half of the Helm-chart gap above, found
+  converting `mbround18/helm-charts` itself. New `paws-helm` crate + `builders/helm/Dockerfile`
+  (Alpine + Helm's own official install script, no maintained "official" Helm image exists to
+  just pull) run `helm lint`/`helm package` for every chart under `charts/*/Chart.yaml` (or a
+  root `Chart.yaml`), ported from that repo's own `tools/chart_tasks.py` — including a real gap
+  that script worked around with an ad hoc recursive pre-build: charts with local `file://`
+  dependencies (`mbround18/helm-charts` has real 2-level chains, e.g. `bubbles-ttrpg` ->
+  `mongo` -> `gitops-tools`) need their dependencies packaged before them, which plain
+  alphabetical/discovery order gets wrong. `paws-helm` does this with a proper topological sort
+  over the local-dependency graph instead. Verified for real, end to end, against actual charts
+  pulled from `mbround18/helm-charts` (`gitops-tools` standalone, and `mongo` -> `gitops-tools`
+  for the dependency-ordering + `--package` export path) — not just unit tests.
+  Deliberately still narrow, matching the scope decided for this first cut: no `chart-releaser`/
+  `gh-pages` publishing (a GitHub-App-token based mechanism, unrelated to registry auth, and
+  fundamentally different from the OCI `publish.yaml` `helm-chart` target in the gap above), and
+  this repo's Python jobs (which don't fit `paws-python`'s fixed `uv sync && uv build && uv run
+  pytest` pipeline shape — no package meant for `uv build`, several separately-scoped `pytest`
+  invocations with per-suite JUnit summaries, not one blanket call) are still untouched.
 
 ## Status legend
 

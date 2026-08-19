@@ -604,6 +604,7 @@ dependencies = [
  "paws-docker",
  "paws-docs",
  "paws-flatpak",
+ "paws-helm",
  "paws-node",
  "paws-provision",
  "paws-python",
@@ -654,6 +655,15 @@ name = "paws-flatpak"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "paws-helm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_yaml",
 ]
 
 [[package]]

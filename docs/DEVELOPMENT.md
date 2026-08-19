@@ -115,6 +115,26 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   an unresolved capability in. Verified for real, end to end, against a genuine app
   (`mbround18/oled-wallpaper`'s actual manifest, a heavy wgpu/winit GUI app) — not a synthetic
   fixture.
+- `crates/paws-helm` — Helm chart lint/package support, wired as its own top-level `paws helm`
+  command (not a `paws ci --toolchain`, matching `paws docker`/`paws release`'s convention of a
+  separate command for a stack Dagger containerizes end to end rather than provisions a local
+  toolchain for). Detects `charts/*/Chart.yaml` (a monorepo of charts, `mbround18/helm-charts`'s
+  own layout) or a root `Chart.yaml` (a single-chart repo), and runs `helm lint` — plus `helm
+  package` with `--package` — against every chart it finds, via `builders/helm/Dockerfile`
+  (Alpine + Helm's own official install script; embedded + materialized at runtime, same pattern
+  as `paws-tauri`/`paws-flatpak`, for the same reason). Charts with local `file://` dependencies
+  get `helm dependency build --skip-refresh` first, in a topologically-sorted order — plain
+  alphabetical/discovery order gets a 2-level local dependency chain wrong (verified against a
+  real one, `mbround18/helm-charts`'s own `bubbles-ttrpg` -> `mongo` -> `gitops-tools`), which is
+  exactly the class of bug the source repo's own `tools/chart_tasks.py` worked around with an ad
+  hoc recursive pre-build; `paws-helm` does it with a proper topological sort over the
+  local-dependency graph instead. `--package`'s output directory is exported host-side the same
+  way `paws-release::build_binary` exports a built binary. Verified for real, end to end, against
+  actual charts pulled from `mbround18/helm-charts` (not just unit tests) — both a standalone
+  chart (`gitops-tools`) and the `mongo` -> `gitops-tools` dependency-ordering + `--package` path.
+  Deliberately narrow for this first cut: no `chart-releaser`/`gh-pages` publishing (a
+  GitHub-App-token based mechanism, unrelated to registry auth — see `docs/ROADMAP.md`), and that
+  repo's Python jobs are untouched (they don't fit `paws-python`'s fixed pipeline shape either).
 
 ## CI
 

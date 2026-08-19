@@ -210,3 +210,19 @@ services:
       tags:
         - ghcr.io/mbround18/paws-builders:flatpak-${VERSION:-dev}
         - docker.io/mbround18/paws-builders:flatpak-${VERSION:-dev}
+
+  helm:
+    build:
+      context: ./builders/helm
+      args:
+        BUILDER_VERSION: ${VERSION:-dev}
+        BUILDER_REVISION: ${REVISION:-unknown}
+        BUILDER_CREATED: ${CREATED:-unknown}
+        HELM_VERSION: ${HELM_VERSION:-v3.16.4}
+      cache_from:
+        - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-helm
+      cache_to:
+        - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-helm,mode=max
+      tags:
+        - ghcr.io/mbround18/paws-builders:helm-${VERSION:-dev}
+        - docker.io/mbround18/paws-builders:helm-${VERSION:-dev}

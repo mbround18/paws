@@ -35,6 +35,7 @@ provider-specific scripting.
 | `paws provision` | Install multiple toolchains (Rust, Node, Python, ...) concurrently, not one at a time |
 | `paws docs` | Build workspace documentation |
 | `paws release` | Cross-compile, smoke-test, package, and publish a release binary for Linux, Windows, and macOS |
+| `paws helm` | Lint (and optionally package) Helm chart(s) |
 
 Run `paws --help` or `paws <command> --help` for the full flag reference.
 
