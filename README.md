@@ -48,20 +48,50 @@ verified where.
 
 ## Installation
 
-**Prebuilt binaries**: published as prereleases on the
+Prebuilt binaries are published as prereleases on the
 [Releases page](https://github.com/mbround18/paws/releases) for Linux (x86_64/aarch64, glibc and
 musl), Windows (x86_64), and macOS (x86_64/aarch64) — still pre-1.0, so expect breaking changes
-between prereleases. `scripts/install.sh` automates picking the right one for your platform and
-putting it on `PATH` (the same logic `actions/paws-up` uses in CI, as a standalone script for
-local setup):
+between prereleases. Pick whichever of these fits how you're using `paws`:
+
+### Local install script (recommended for local dev)
+
+Detects your OS/arch, downloads the matching binary, and puts it on `PATH` (`~/.local/bin` by
+default) — the same logic `actions/paws-up` uses in CI, as a standalone script:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mbround18/paws/main/scripts/install.sh | sh
 ```
 
-Pin a version with `PAWS_VERSION=v0.0.1-prerelease.18 curl ... | sh`.
+Pin a version, or change the install directory, via env vars:
 
-**From source** (needs a [Rust toolchain](https://rustup.rs)):
+```sh
+PAWS_VERSION=v0.0.1-prerelease.18 PAWS_INSTALL_DIR=/usr/local/bin \
+  curl -fsSL https://raw.githubusercontent.com/mbround18/paws/main/scripts/install.sh | sh
+```
+
+This is also the pattern to wire into a downstream repo's own `Makefile`/setup docs — see
+[`mbround18/helm-charts`'s `make install-paws`](https://github.com/mbround18/helm-charts/blob/main/Makefile)
+for a real example.
+
+### GitHub Actions
+
+`actions/paws-up` installs `paws` and (by default) runs `paws init` to install `dagger` too —
+most subcommands need both:
+
+```yaml
+- uses: mbround18/paws/actions/paws-up@main
+- run: paws ci --toolchain rust
+```
+
+| Input | Default | Description |
+| --- | --- | --- |
+| `version` | `latest` | Pin a specific release, e.g. `v0.0.1-prerelease.18`, instead of tracking the newest one. |
+| `github-token` | `${{ github.token }}` | Token used to query/download the release — override if the default token's rate limit is a problem. |
+| `install-dagger` | `true` | Set to `false` to skip `paws init` (e.g. a self-hosted runner that already has `dagger` on `PATH`). |
+
+### From source
+
+Needs a [Rust toolchain](https://rustup.rs):
 
 ```sh
 git clone https://github.com/mbround18/paws.git
@@ -69,16 +99,11 @@ cd paws
 cargo install --path crates/paws-cli
 ```
 
+### After installing
+
 Most subcommands also need the `dagger` CLI on your `PATH` — run `paws init` to install it
-(or see https://docs.dagger.io/install for other options).
-
-**In a GitHub Actions workflow** — `actions/paws-up` installs `paws` and runs `paws init` for
-you:
-
-```yaml
-- uses: mbround18/paws/actions/paws-up@main
-- run: paws ci --toolchain rust
-```
+(or see https://docs.dagger.io/install for other options). `actions/paws-up` already does this
+for you unless `install-dagger: false` is set.
 
 ## Quickstart
 
