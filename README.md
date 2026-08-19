@@ -30,7 +30,7 @@ provider-specific scripting.
 | `paws init` | Install the `dagger` CLI, which most other subcommands need on `PATH` |
 | `paws ci` | Build, lint, and test a Node, Rust, Python, Tauri, or Flatpak project |
 | `paws semver` | Compute the next version from PR labels, branch name, or an explicit bump |
-| `paws docker` | Resolve and build a container image the way `docker-compose`-aware pipelines do |
+| `paws docker` | Build/tag/publish a container image to docker.io, ghcr.io, and (natively) any other registry |
 | `paws audit` | Run a security/compliance scanner suite and summarize the findings |
 | `paws provision` | Install multiple toolchains (Rust, Node, Python, ...) concurrently, not one at a time |
 | `paws docs` | Build workspace documentation |
@@ -125,6 +125,13 @@ paws docker --image ghcr.io/you/app --version 1.0.0
 # --dockerhub-username/--ghcr-username, or their $DOCKERHUB_USERNAME/
 # $GHCR_USERNAME env fallbacks)
 DOCKER_TOKEN=*** paws docker --image you/app --with-latest --dockerhub-username you
+
+# Also publish to a private registry / Artifactory / anything else beyond
+# docker.io+ghcr.io (needs $<REGISTRY>_TOKEN, e.g. $MYCO_JFROG_IO_TOKEN
+# for myco.jfrog.io - built natively through Dagger, not gh-reusable,
+# which only knows how to authenticate to docker.io/ghcr.io)
+MYCO_JFROG_IO_TOKEN=*** paws docker --image you/app --with-latest \
+  --registries myco.jfrog.io --registry-username myco.jfrog.io=you
 
 # Lint every Helm chart in the repo
 paws helm
