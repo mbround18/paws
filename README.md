@@ -158,7 +158,9 @@ JS/TS, React, and SSR frameworks all covered. `paws docker` and `paws helm` are 
 they work from a `Dockerfile`/`docker-compose.yml` or a `charts/*/Chart.yaml` layout respectively,
 regardless of what language the project underneath is written in. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full target stack list (JVM, Go, .NET, mobile, and
-more) and an honest read of what's actually built versus planned.
+more) and an honest read of what's actually built versus planned. See
+[`docs/mbround18.md`](docs/mbround18.md) for a per-repo tracker of real-world adoption across the
+author's own public repos.
 
 ## Contributing / development
 
