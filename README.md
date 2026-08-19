@@ -28,14 +28,14 @@ provider-specific scripting.
 | Command | What it does |
 | --- | --- |
 | `paws init` | Install the `dagger` CLI, which most other subcommands need on `PATH` |
-| `paws ci` | Build, lint, and test a Node or Rust project |
+| `paws ci` | Build, lint, and test a Node, Rust, Python, Tauri, or Flatpak project |
 | `paws semver` | Compute the next version from PR labels, branch name, or an explicit bump |
 | `paws docker` | Resolve and build a container image the way `docker-compose`-aware pipelines do |
 | `paws audit` | Run a security/compliance scanner suite and summarize the findings |
 | `paws provision` | Install multiple toolchains (Rust, Node, Python, ...) concurrently, not one at a time |
 | `paws docs` | Build workspace documentation |
 | `paws release` | Cross-compile, smoke-test, package, and publish a release binary for Linux, Windows, and macOS |
-| `paws helm` | Lint (and optionally package) Helm chart(s) |
+| `paws helm` | Lint, package, and publish Helm chart(s) as a real `index.yaml` repo |
 
 Run `paws --help` or `paws <command> --help` for the full flag reference.
 
@@ -89,7 +89,8 @@ most subcommands need both:
 | `github-token` | `${{ github.token }}` | Token used to query/download the release — override if the default token's rate limit is a problem. |
 | `install-dagger` | `true` | Set to `false` to skip `paws init` (e.g. a self-hosted runner that already has `dagger` on `PATH`). |
 
-### From source
+<details>
+<summary><strong>From source</strong> (only if you're building/modifying <code>paws</code> itself — see <a href="#contributing--development">Contributing / development</a>)</summary>
 
 Needs a [Rust toolchain](https://rustup.rs):
 
@@ -98,6 +99,8 @@ git clone https://github.com/mbround18/paws.git
 cd paws
 cargo install --path crates/paws-cli
 ```
+
+</details>
 
 ### After installing
 
@@ -122,6 +125,13 @@ paws docker --image ghcr.io/you/app --version 1.0.0
 # --dockerhub-username/--ghcr-username, or their $DOCKERHUB_USERNAME/
 # $GHCR_USERNAME env fallbacks)
 DOCKER_TOKEN=*** paws docker --image you/app --with-latest --dockerhub-username you
+
+# Lint every Helm chart in the repo
+paws helm
+
+# Publish them as a real chart repo (needs $GITHUB_TOKEN/$GH_TOKEN) —
+# per-chart GitHub Release + index.yaml, so `helm repo add` just works
+GITHUB_TOKEN=*** paws helm --publish --repository you/your-charts
 ```
 
 See [`specs/001-paws-core-cli/quickstart.md`](specs/001-paws-core-cli/quickstart.md) for a full,
@@ -131,9 +141,11 @@ subcommand-by-subcommand walkthrough with real example output.
 
 `paws ci` fully supports Rust, Node across all four major package managers (npm, yarn, pnpm, bun)
 with Vite/Next.js framework detection, `uv`-based Python, and Tauri desktop/Android builds — plain
-JS/TS, React, and SSR frameworks all covered. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the
-full target stack list (JVM, Go, .NET, mobile, and more) and an honest read of
-what's actually built versus planned.
+JS/TS, React, and SSR frameworks all covered. `paws docker` and `paws helm` are stack-agnostic —
+they work from a `Dockerfile`/`docker-compose.yml` or a `charts/*/Chart.yaml` layout respectively,
+regardless of what language the project underneath is written in. See
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for the full target stack list (JVM, Go, .NET, mobile, and
+more) and an honest read of what's actually built versus planned.
 
 ## Contributing / development
 
