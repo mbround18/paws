@@ -51,7 +51,15 @@ verified where.
 **Prebuilt binaries**: published as prereleases on the
 [Releases page](https://github.com/mbround18/paws/releases) for Linux (x86_64/aarch64, glibc and
 musl), Windows (x86_64), and macOS (x86_64/aarch64) — still pre-1.0, so expect breaking changes
-between prereleases.
+between prereleases. `scripts/install.sh` automates picking the right one for your platform and
+putting it on `PATH` (the same logic `actions/paws-up` uses in CI, as a standalone script for
+local setup):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mbround18/paws/main/scripts/install.sh | sh
+```
+
+Pin a version with `PAWS_VERSION=v0.0.1-prerelease.18 curl ... | sh`.
 
 **From source** (needs a [Rust toolchain](https://rustup.rs)):
 
