@@ -148,6 +148,29 @@ fn docker_credential_args(
     args
 }
 
+/// Builds the full `registriesCsv` `dockerRelease` (`gh-reusable`'s, read
+/// directly from `packages/dagger-module/src/index.ts`) actually receives:
+/// `docker.io` first, then `extra_registries` in order, deduplicated.
+/// `dockerRelease`'s own `registriesCsv` param *replaces* its
+/// `"docker.io"` default wholesale rather than adding to it — `paws
+/// docker --registries`'s own doc string ("Additional registries to
+/// mirror tags into") promises the opposite, and `paws-docker`'s local
+/// preview (`generate_tags`) already gets this right (implicit docker.io
+/// base + registries as mirrors). Without this, `--registries ghcr.io`
+/// silently drops Docker Hub entirely instead of publishing to both —
+/// caught for real converting `mbround18/steamcmd-bases`, but it was
+/// already live (unnoticed — no successful real push had hit it yet) in
+/// `mbround18/ark-manager-web`'s `docker.yml` too.
+fn full_registries_csv(extra_registries: &[String]) -> String {
+    let mut registries = vec!["docker.io".to_string()];
+    for registry in extra_registries {
+        if !registries.contains(registry) {
+            registries.push(registry.clone());
+        }
+    }
+    registries.join(",")
+}
+
 async fn run_provisioning(ecosystems: Vec<Ecosystem>, verbose: bool) -> anyhow::Result<()> {
     if ecosystems.is_empty() {
         return Ok(());
@@ -655,7 +678,7 @@ async fn main() -> anyhow::Result<()> {
             args.extend(["--canary-label".into(), canary_label]);
             args.extend(["--default-branch".into(), default_branch]);
             if !registries.is_empty() {
-                args.extend(["--registries-csv".into(), registries.join(",")]);
+                args.extend(["--registries-csv".into(), full_registries_csv(&registries)]);
             }
             if !labels.is_empty() {
                 args.extend(["--pr-labels-csv".into(), labels.join(",")]);
@@ -1097,7 +1120,7 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use clap::CommandFactory;
 
-    use super::{Cli, docker_credential_args, pipeline_report_succeeded};
+    use super::{Cli, docker_credential_args, full_registries_csv, pipeline_report_succeeded};
 
     #[test]
     fn cli_definition_is_valid() {
@@ -1196,6 +1219,30 @@ mod tests {
                 "--ghcr-token".to_string(),
                 "gh-token".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn full_registries_csv_keeps_docker_io_and_adds_extras() {
+        assert_eq!(
+            full_registries_csv(&["ghcr.io".to_string()]),
+            "docker.io,ghcr.io"
+        );
+    }
+
+    #[test]
+    fn full_registries_csv_does_not_duplicate_docker_io() {
+        assert_eq!(
+            full_registries_csv(&["docker.io".to_string(), "ghcr.io".to_string()]),
+            "docker.io,ghcr.io"
+        );
+    }
+
+    #[test]
+    fn full_registries_csv_supports_multiple_extras() {
+        assert_eq!(
+            full_registries_csv(&["ghcr.io".to_string(), "quay.io".to_string()]),
+            "docker.io,ghcr.io,quay.io"
         );
     }
 }
