@@ -51,6 +51,14 @@ Confirmed directly against the code, not from memory:
 - **`paws audit`** (language detection for scanner selection): detects `rust`, `node`, `python`,
   `go`, `docker` signals (`paws_audit::LanguageFamily`) — detection only, not execution. A repo
   with a `go.mod` gets audited correctly; `paws ci --toolchain go` doesn't exist.
+  `paws audit`'s exit code (2026-08-19): `gh-reusable`'s `audit` Dagger function has no top-level
+  `success`/`decision`/`outcome` field (same shape of gap `dockerRelease` had — see `paws docker`
+  below), but it does compute a real nested status,
+  `report.outputs.auditSummary.overallStatus` (`"pass"|"findings"|"degraded"|"failed"`, from
+  `audit-types.ts`/`audit-logic.ts`). `pipeline_report_succeeded` in `crates/paws-cli` now reads
+  it — deliberately only `"failed"` (a scanner itself errored) fails `paws audit`;
+  `"findings"` (scanners ran clean but found real issues) stays non-fatal, since there's no
+  severity-threshold concept yet to decide which findings should block a build.
 - **`paws docker`**: any `docker-compose.yml`/`Dockerfile`-based project, regardless of source
   language — this one's already stack-agnostic, since it works from the compose file / Dockerfile
   contract rather than a language-specific build step. Registry auth

@@ -36,12 +36,37 @@ fn detect_needed_ecosystems() -> Vec<Ecosystem> {
 /// is checked first since it's `dockerRelease`'s specific "did the publish
 /// itself fail" field; `outcome`/`success` are the general-purpose fallbacks
 /// every other function already uses.
+///
+/// `audit` has the exact same shape of gap: its top-level JSON is
+/// `{markdown, report, reportJson, reportMarkdown}` — no `decision`,
+/// `outcome`, or `success` at all, so every audit call used to fall all the
+/// way through to `unwrap_or(true)` and report success regardless of what
+/// the scan actually found. Unlike `dockerRelease` though, `audit` (read
+/// directly from `packages/dagger-module/src/audit-logic.ts`/`audit-types.ts`
+/// in `gh-reusable`) *does* compute a real status, just nested:
+/// `report.outputs.auditSummary.overallStatus`, one of
+/// `"pass"|"findings"|"degraded"|"failed"`. Deliberately only `"failed"`
+/// (a scanner itself errored/couldn't run) counts as a `paws audit` failure
+/// here — `"findings"` (scanners ran clean but found real issues) stays
+/// non-fatal, since `paws audit` doesn't yet have a severity-threshold
+/// concept to decide which findings should actually block a build; making
+/// any finding fail the build would silently turn every repo's first `paws
+/// audit` run red with no way to tune it. This mirrors the docker fix's
+/// actual intent — don't silently report success on a real execution
+/// failure — without overreaching into gating policy that hasn't been
+/// designed yet.
 fn pipeline_report_succeeded(parsed: &serde_json::Value) -> bool {
     if let Some(decision) = parsed.get("decision").and_then(|v| v.as_str()) {
         return decision != "failed";
     }
     if let Some(outcome) = parsed.get("outcome").and_then(|v| v.as_str()) {
         return outcome != "failure";
+    }
+    if let Some(overall_status) = parsed
+        .pointer("/report/outputs/auditSummary/overallStatus")
+        .and_then(|v| v.as_str())
+    {
+        return overall_status != "failed";
     }
     parsed
         .get("success")
@@ -908,11 +933,34 @@ mod tests {
         assert!(!pipeline_report_succeeded(
             &serde_json::json!({"success": false})
         ));
-        // No recognized shape at all (e.g. `audit`'s `{markdown, report, ...}`) -
-        // stays permissive, matching every caller's prior behavior.
+        // No recognized shape at all - stays permissive, matching every
+        // caller's prior behavior.
         assert!(pipeline_report_succeeded(
             &serde_json::json!({"markdown": "ok"})
         ));
+    }
+
+    #[test]
+    fn pipeline_report_succeeded_reads_audit_overall_status() {
+        assert!(!pipeline_report_succeeded(&serde_json::json!({
+            "markdown": "...",
+            "report": {"outputs": {"auditSummary": {"overallStatus": "failed"}}}
+        })));
+        // "findings" (scanners ran clean but found real issues) is
+        // deliberately non-fatal - see pipeline_report_succeeded's doc
+        // comment for why paws audit doesn't yet gate on this.
+        assert!(pipeline_report_succeeded(&serde_json::json!({
+            "markdown": "...",
+            "report": {"outputs": {"auditSummary": {"overallStatus": "findings"}}}
+        })));
+        assert!(pipeline_report_succeeded(&serde_json::json!({
+            "markdown": "...",
+            "report": {"outputs": {"auditSummary": {"overallStatus": "degraded"}}}
+        })));
+        assert!(pipeline_report_succeeded(&serde_json::json!({
+            "markdown": "...",
+            "report": {"outputs": {"auditSummary": {"overallStatus": "pass"}}}
+        })));
     }
 
     #[test]
