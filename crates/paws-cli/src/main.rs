@@ -725,6 +725,29 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let ctx = paws_environment::CiContext::detect()
                 .context("paws semver needs a supported CI provider's env vars")?;
+            let labels = if labels.is_empty() {
+                match paws_semver::fetch_pr_labels_for_commit(
+                    &ctx.owner, &ctx.repo, &ctx.sha, &ctx.token,
+                )
+                .await
+                {
+                    Ok(found) => {
+                        if !found.is_empty() {
+                            eprintln!("semver: auto-detected PR labels: {}", found.join(", "));
+                        }
+                        found
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "semver: couldn't auto-detect PR labels for {}, falling back to branch/patch inference: {err:#}",
+                            ctx.sha
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
+                labels
+            };
             let request = SemverRequest {
                 base,
                 prefix,

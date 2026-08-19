@@ -121,6 +121,14 @@ paws semver --base v1.0.0 --prefix v --branch main
 # GitHub Actions) — no local git identity or worktree required.
 paws semver --branch main --push
 
+# On a push to main, this automatically looks up the merged PR for that
+# commit and honors its major/minor/patch label (configurable via
+# --major-label/--minor-label/--patch-label) — no need to thread
+# `github.event.pull_request.labels` through yourself, since that context
+# doesn't exist on a push event anyway. Falls back to branch-name inference,
+# then patch, if there's no labeled PR. Pass --labels explicitly to override
+# auto-detection (e.g. from a pull_request-triggered workflow).
+
 # Build and test a project
 paws ci --toolchain rust
 

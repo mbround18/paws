@@ -202,6 +202,58 @@ impl TagSource for GitHubGraphQlTagSource {
     }
 }
 
+/// Fetches the labels of the pull request associated with `sha` (GitHub's
+/// "list pull requests associated with a commit" endpoint), so `paws semver`
+/// can respect a merged PR's `major`/`minor`/`patch` label without the
+/// caller having to thread `github.event.pull_request.labels` through
+/// itself — that context doesn't exist on the `push` event a merge-to-main
+/// actually fires (the same gap `gh-reusable`'s original `tagger.yaml` had:
+/// its `--pr-labels-csv` was always empty at the point it ran). Best-effort:
+/// returns an empty list (never an error) if there's no associated PR, so a
+/// direct branch push still falls through to branch-name/patch inference.
+pub async fn fetch_pr_labels_for_commit(
+    owner: &str,
+    repo: &str,
+    sha: &str,
+    token: &str,
+) -> Result<Vec<String>> {
+    if sha.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let client = reqwest::Client::new();
+    let response: serde_json::Value = client
+        .get(format!(
+            "https://api.github.com/repos/{owner}/{repo}/commits/{sha}/pulls"
+        ))
+        .bearer_auth(token)
+        .header("User-Agent", "paws-semver")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .context("failed to reach GitHub's commits/pulls API")?
+        .json()
+        .await
+        .context("failed to parse GitHub's commits/pulls response")?;
+
+    let prs = response
+        .as_array()
+        .context("unexpected commits/pulls response shape")?;
+
+    Ok(prs
+        .first()
+        .and_then(|pr| pr.get("labels"))
+        .and_then(|labels| labels.as_array())
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| label.get("name").and_then(|n| n.as_str()))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// Result of last-tag resolution: the tag itself and the prefix that produced it.
 /// Mirrors `tag.js`'s `getLastTag` return shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,6 +456,14 @@ mod tests {
 
     fn base_request() -> SemverRequest {
         SemverRequest::new()
+    }
+
+    #[tokio::test]
+    async fn fetch_pr_labels_for_commit_short_circuits_on_empty_sha() {
+        let labels = fetch_pr_labels_for_commit("owner", "repo", "", "token")
+            .await
+            .unwrap();
+        assert!(labels.is_empty());
     }
 
     #[tokio::test]

@@ -1,3 +1,40 @@
+## 12. Session 9 (2026-08-19, same day): steamcmd-bases real-release chase + paws semver auto-labels
+
+Asked to "release steamcmd-bases 0.1.0 to see it work." Confirming before pushing a tag surfaced
+that the just-merged `tagger` job had actually failed on its first real `main` run (missing
+`GITHUB_TOKEN` in the step env — `paws semver` now hard-requires one). Fixed via PR #16
+(`paws semver --branch main --push`, dropping the manual git-identity script entirely) —
+verified for real, `tagger` computed and pushed tag `0.0.4` correctly.
+
+**Then a second, more interesting real bug**: manually re-triggering the build against that tag
+published `mbround18/steamcmd:base-v9865c59` — a short-sha tag, not `base-0.0.4`. Root cause:
+`paws docker`'s `--version` is intentionally caller-supplied (matches its actual TS parity
+source, `docker-parity.ts`'s `generateTags`, not the older `dockerRelease` function's internal
+ref-name derivation) — `deployer.yaml` never passed `--version` at all, silently falling back to
+short-sha even on a real release. Compounding bug: `on.push.tags: ["v*"]` could never match this
+repo's actual unprefixed tag history (`0.0.2`/`0.0.3`/`0.0.4`), so a real release tag could never
+auto-trigger a build in the first place. Fixed via PR #17: a `version` job resolves the release
+version once (the pushed tag name verbatim, or `paws semver`'s computed version) and threads it
+into every matrix build's `--version`; widened the tag trigger pattern. Verified for real on
+`main`: published `mbround18/steamcmd:base-v0.0.5` to both docker.io and ghcr.io, tag `0.0.5`
+landed correctly, no manual re-trigger needed anymore — one version computed upfront, not a
+two-pass build-then-hope-a-second-run-picks-up-the-real-tag flow.
+
+**Then a design conversation, not a bug**: does `paws semver` respect PR labels? Yes in the
+logic (`detect_increment`'s label precedence was already correct and tested), but nothing
+actually fetched them — `--labels` was a plain flag the caller had to populate, and on the
+`push`-to-`main` event where the tag actually gets computed, `github.event.pull_request` doesn't
+exist (the same gap `gh-reusable`'s original `tagger.yaml` had — its `--pr-labels-csv` was always
+empty at that point too). Fixed: new `paws_semver::fetch_pr_labels_for_commit` calls GitHub's
+"list pull requests associated with a commit" endpoint and auto-populates labels when `--labels`
+isn't given, best-effort (any failure falls through to branch-name/patch inference, never fails
+the command). Verified for real against `steamcmd-bases`' actual commit history (`GET
+.../commits/928835d/pulls` correctly resolved PR #17). `README.md`/`docs/DEVELOPMENT.md` updated.
+
+**Still open**: not yet released as a new prerelease tag — do that next. `docs/mbround18.md`
+should also get `steamcmd-bases` flipped from 🚧 to ✅ now that PR #15-17 are all merged and the
+release chain is verified working end to end.
+
 ## 11. Session 8 (2026-08-19, same day): paws semver --push + new paws-environment crate
 
 User asked to bake a `--push` option into `paws semver` to replace a

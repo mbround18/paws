@@ -38,7 +38,16 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   GitHub Actions log is in). `--silent` (`paws ci --toolchain ... --silent`) falls back to the old
   captured-then-printed-once behavior for callers that want quiet logs.
 - `crates/paws-semver` — native Rust port of `actions/semver` (no `dagger` CLI needed).
-  The pilot crate for eventually evaluating `dagger-sdk`.
+  The pilot crate for eventually evaluating `dagger-sdk`. `paws semver` auto-detects PR labels
+  (2026-08-19) when `--labels` isn't given: `fetch_pr_labels_for_commit` calls GitHub's "list
+  pull requests associated with a commit" endpoint (`GET
+  /repos/{owner}/{repo}/commits/{sha}/pulls`) to find the merged PR for the current commit and
+  reads its labels — closes the same gap `gh-reusable`'s original `tagger.yaml` had, where
+  `--pr-labels-csv` was always empty because `github.event.pull_request` doesn't exist on the
+  `push` event a merge-to-main actually fires. Best-effort: any lookup failure (no associated
+  PR, network error) falls through to branch-name/patch inference rather than failing the
+  command. Verified for real against `mbround18/steamcmd-bases`'s live commit history (`GET
+  .../commits/928835d/pulls` correctly resolved PR #17).
 - `crates/paws-environment` (new, 2026-08-19) — normalizes CI-provider context (owner/repo,
   commit sha, ref, token) behind one `CiContext` type instead of subcommands hand-reading
   `GITHUB_*` env vars at each call site. GitHub Actions is the only implemented provider
