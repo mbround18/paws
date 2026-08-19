@@ -2,7 +2,10 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use paws_audit::{RepositorySignals, select_audit_scanners};
 use paws_dagger::{DaggerCall, call};
-use paws_docker::{DockerFactsInput, GithubContext as DockerGithubContext, resolve_docker_facts};
+use paws_docker::{
+    DockerFactsInput, GithubContext as DockerGithubContext, native_publish_pipeline_args,
+    native_registries, registry_token_env_var, resolve_docker_facts, tags_for_registry,
+};
 use paws_provision::{Ecosystem, Installer, provision_with_timing, real_installer};
 use paws_release::{AssetUploadMode, GitHubReleaseClient, archive_name, package_zip};
 use paws_semver::{GitHubGraphQlTagSource, Increment, SemverRequest, compute_new_version};
@@ -171,6 +174,24 @@ fn full_registries_csv(extra_registries: &[String]) -> String {
     registries.join(",")
 }
 
+/// Parses `--registry-username`'s `"<registry>=<username>"` entries into a
+/// lookup, erroring on anything that isn't a `key=value` pair rather than
+/// silently ignoring a typo'd entry.
+fn parse_registry_usernames(
+    entries: &[String],
+) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let mut usernames = std::collections::HashMap::new();
+    for entry in entries {
+        let (registry, username) = entry.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!(
+                "--registry-username entries must be \"<registry>=<username>\", got {entry:?}"
+            )
+        })?;
+        usernames.insert(registry.to_string(), username.to_string());
+    }
+    Ok(usernames)
+}
+
 async fn run_provisioning(ecosystems: Vec<Ecosystem>, verbose: bool) -> anyhow::Result<()> {
     if ecosystems.is_empty() {
         return Ok(());
@@ -314,6 +335,18 @@ enum Commands {
         /// ghcr.io.
         #[arg(long)]
         ghcr_username: Option<String>,
+        /// Username(s) for registries in --registries other than docker.io/
+        /// ghcr.io (Artifactory, a private registry, etc.), as
+        /// "<registry>=<username>" pairs, comma-separated — e.g.
+        /// "myco.jfrog.io=deploy-bot". These are built and published
+        /// natively through Dagger (`Container.withRegistryAuth`), not via
+        /// the docker.io/ghcr.io-only `dockerRelease` call. The matching
+        /// token/password is read from an env var derived from the
+        /// registry: uppercased, every non-alphanumeric character replaced
+        /// with `_`, suffixed `_TOKEN` — e.g. "myco.jfrog.io" reads
+        /// $MYCO_JFROG_IO_TOKEN.
+        #[arg(long, value_delimiter = ',')]
+        registry_username: Vec<String>,
     },
     /// Compute the next semantic version from PR labels or an explicit increment,
     /// matching `actions/semver`'s current behavior.
@@ -615,6 +648,7 @@ async fn main() -> anyhow::Result<()> {
             default_branch,
             dockerhub_username,
             ghcr_username,
+            registry_username,
         } => {
             let image = image
                 .or_else(|| std::env::var("GITHUB_REPOSITORY").ok())
@@ -713,6 +747,62 @@ async fn main() -> anyhow::Result<()> {
             let succeeded = call_pipeline_report("docker-release", args).await?;
             if !succeeded {
                 anyhow::bail!("docker release failed: see report above");
+            }
+
+            // Registries beyond docker.io/ghcr.io: dockerRelease has no way
+            // to authenticate to these at all (see native_registries's doc
+            // comment), so they're built and published natively through
+            // Dagger instead. Only actually attempted on a real publish
+            // (facts.push) — the Dockerfile itself is already validated by
+            // the dockerRelease call above regardless of how many
+            // registries it's headed to, so there's nothing to gain from
+            // also building for a registry that isn't going to be
+            // published this run.
+            let extra = native_registries(&registries);
+            if !extra.is_empty() {
+                if facts.push {
+                    let usernames = parse_registry_usernames(&registry_username)?;
+                    for registry in extra {
+                        let username = usernames.get(registry).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "--registry-username is required for {registry} (got \
+                                 --registries including it, but no matching \
+                                 --registry-username entry) to actually publish"
+                            )
+                        })?;
+                        let token_env_var = registry_token_env_var(registry);
+                        anyhow::ensure!(
+                            std::env::var(&token_env_var).is_ok(),
+                            "${token_env_var} must be set to publish to {registry}"
+                        );
+                        for tag in tags_for_registry(&facts.tags, registry) {
+                            println!("docker: publishing {tag} to {registry}...");
+                            let publish_args = native_publish_pipeline_args(
+                                &paws_docker::BuildSpec {
+                                    context: &facts.context,
+                                    dockerfile: &facts.dockerfile,
+                                    target: &facts.target,
+                                    build_args: &facts.build_args,
+                                },
+                                &paws_docker::NativeRegistryPublish {
+                                    registry,
+                                    username,
+                                    token_env_var: &token_env_var,
+                                    tag_address: tag,
+                                },
+                            );
+                            paws_dagger::core(&publish_args).await.with_context(|| {
+                                format!("failed to publish {tag} to {registry}")
+                            })?;
+                            println!("docker: published {tag}");
+                        }
+                    }
+                } else {
+                    println!(
+                        "docker: skipping native publish to {} (push not resolved for this run)",
+                        extra.join(", ")
+                    );
+                }
             }
         }
         Commands::Semver {

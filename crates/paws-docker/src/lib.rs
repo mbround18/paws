@@ -414,6 +414,121 @@ pub fn resolve_docker_facts(input: &DockerFactsInput, github: &GithubContext) ->
     }
 }
 
+/// Registries `dockerRelease` (`gh-reusable`'s, read directly from
+/// `packages/dagger-module/src/index.ts`) knows how to authenticate —
+/// `docker.io`/`ghcr.io` credentials are hardcoded there, with no generic
+/// registry+credential path at all. Anything else in `--registries` (an
+/// Artifactory instance, a private registry, ...) gets a tag computed by
+/// [`generate_tags`] same as any other registry, but needs a genuinely
+/// different publish path — see [`native_publish_pipeline_args`].
+pub const KNOWN_DOCKER_RELEASE_REGISTRIES: &[&str] = &["docker.io", "ghcr.io"];
+
+/// Registries in `registries` that `dockerRelease` can't authenticate to
+/// itself, in the order given — see [`KNOWN_DOCKER_RELEASE_REGISTRIES`].
+pub fn native_registries(registries: &[String]) -> Vec<&str> {
+    registries
+        .iter()
+        .map(|r| r.as_str())
+        .filter(|r| !KNOWN_DOCKER_RELEASE_REGISTRIES.contains(r))
+        .collect()
+}
+
+/// Derives the env var a generic registry's token/password is read from:
+/// uppercased, every non-alphanumeric character replaced with `_`, suffixed
+/// `_TOKEN` — e.g. `"myco.jfrog.io"` -> `"MYCO_JFROG_IO_TOKEN"`. Mirrors the
+/// fixed `DOCKER_TOKEN`/`GHCR_TOKEN` convention `dockerRelease` already uses
+/// for its two hardcoded registries, generalized to any registry name.
+pub fn registry_token_env_var(registry: &str) -> String {
+    let sanitized: String = registry
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("{}_TOKEN", sanitized.to_ascii_uppercase())
+}
+
+/// The subset of `tags` (as produced by [`generate_tags`], already full
+/// `registry/image:tag` addresses) that belong to `registry`.
+pub fn tags_for_registry<'a>(tags: &'a [String], registry: &str) -> Vec<&'a str> {
+    let prefix = format!("{registry}/");
+    tags.iter()
+        .map(|t| t.as_str())
+        .filter(|t| t.starts_with(&prefix))
+        .collect()
+}
+
+/// Builds the `dagger core <chain>` argument list (see `paws_dagger::core`)
+/// that builds `context`/`dockerfile`[/`target`] and publishes the result
+/// directly to `tag_address` on `registry`, authenticated via
+/// `Container.withRegistryAuth` (Dagger's own primitive — bypasses
+/// `dockerRelease` entirely, which has no way to authenticate to a
+/// registry it doesn't already hardcode). `token_env_var` is read from the
+/// *calling* environment via Dagger's `env:NAME` secret-reference syntax —
+/// verified for real that `--secret=env:VAR_NAME` resolves correctly
+/// against a live Dagger engine, not just documented behavior. One call
+/// publishes exactly one tag — `dagger core` chains are strictly linear
+/// (`Container.publish` returns the published address, not a `Container`,
+/// so nothing can chain after it), so a second tag needs a second
+/// invocation of this function; both share this same build prefix, so
+/// Dagger's own engine-level caching means the second invocation's build
+/// replays from cache rather than rebuilding (same reasoning
+/// `paws-helm`'s `publish_packages_pipeline_args`/`publish_index_pipeline_args`
+/// split relies on).
+pub fn native_publish_pipeline_args(
+    build: &BuildSpec,
+    publish: &NativeRegistryPublish,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "host".into(),
+        "directory".into(),
+        format!("--path={}", build.context),
+        "docker-build".into(),
+        format!("--dockerfile={}", build.dockerfile),
+    ];
+    if !build.target.is_empty() {
+        args.push(format!("--target={}", build.target));
+    }
+    if !build.build_args.is_empty() {
+        let joined = build
+            .build_args
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        args.push(format!("--build-args={joined}"));
+    }
+    args.extend([
+        "with-registry-auth".into(),
+        format!("--address={}", publish.registry),
+        format!("--username={}", publish.username),
+        format!("--secret=env:{}", publish.token_env_var),
+        "publish".into(),
+        format!("--address={}", publish.tag_address),
+    ]);
+    args
+}
+
+/// The build inputs [`native_publish_pipeline_args`] needs — a borrowed
+/// view over the same fields [`DockerFacts`] already carries, so callers
+/// can pass `&facts` fields straight through without repackaging.
+#[derive(Debug, Clone, Copy)]
+pub struct BuildSpec<'a> {
+    pub context: &'a str,
+    pub dockerfile: &'a str,
+    pub target: &'a str,
+    pub build_args: &'a [(String, String)],
+}
+
+/// Where and how [`native_publish_pipeline_args`] authenticates and
+/// publishes — one call publishes exactly `tag_address` to `registry`; see
+/// that function's doc comment for why one call is one tag.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeRegistryPublish<'a> {
+    pub registry: &'a str,
+    pub username: &'a str,
+    pub token_env_var: &'a str,
+    pub tag_address: &'a str,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,5 +668,105 @@ mod tests {
             false,
         );
         assert_eq!(tags, vec!["app:v1.2.3-rc.1".to_string()]);
+    }
+
+    #[test]
+    fn native_registries_excludes_docker_hub_and_ghcr() {
+        let registries = vec![
+            "docker.io".to_string(),
+            "ghcr.io".to_string(),
+            "myco.jfrog.io".to_string(),
+        ];
+        assert_eq!(native_registries(&registries), vec!["myco.jfrog.io"]);
+    }
+
+    #[test]
+    fn native_registries_is_empty_for_only_known_registries() {
+        let registries = vec!["docker.io".to_string(), "ghcr.io".to_string()];
+        assert!(native_registries(&registries).is_empty());
+    }
+
+    #[test]
+    fn registry_token_env_var_sanitizes_the_registry_name() {
+        assert_eq!(
+            registry_token_env_var("myco.jfrog.io"),
+            "MYCO_JFROG_IO_TOKEN"
+        );
+        assert_eq!(
+            registry_token_env_var("registry.example.com:5000"),
+            "REGISTRY_EXAMPLE_COM_5000_TOKEN"
+        );
+    }
+
+    #[test]
+    fn tags_for_registry_filters_to_matching_prefix_only() {
+        let tags = vec![
+            "app:v1.0.0".to_string(),
+            "ghcr.io/app:v1.0.0".to_string(),
+            "myco.jfrog.io/app:v1.0.0".to_string(),
+            "myco.jfrog.io/app:latest".to_string(),
+        ];
+        assert_eq!(
+            tags_for_registry(&tags, "myco.jfrog.io"),
+            vec!["myco.jfrog.io/app:v1.0.0", "myco.jfrog.io/app:latest"]
+        );
+    }
+
+    #[test]
+    fn native_publish_pipeline_args_builds_and_publishes_one_tag() {
+        let build_args = vec![("UBUNTU_VERSION".to_string(), "24.04".to_string())];
+        let args = native_publish_pipeline_args(
+            &BuildSpec {
+                context: ".",
+                dockerfile: "./Dockerfile",
+                target: "base",
+                build_args: &build_args,
+            },
+            &NativeRegistryPublish {
+                registry: "myco.jfrog.io",
+                username: "deploy-bot",
+                token_env_var: "MYCO_JFROG_IO_TOKEN",
+                tag_address: "myco.jfrog.io/steamcmd:base-v0.1.0",
+            },
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "host".to_string(),
+                "directory".to_string(),
+                "--path=.".to_string(),
+                "docker-build".to_string(),
+                "--dockerfile=./Dockerfile".to_string(),
+                "--target=base".to_string(),
+                "--build-args=UBUNTU_VERSION=24.04".to_string(),
+                "with-registry-auth".to_string(),
+                "--address=myco.jfrog.io".to_string(),
+                "--username=deploy-bot".to_string(),
+                "--secret=env:MYCO_JFROG_IO_TOKEN".to_string(),
+                "publish".to_string(),
+                "--address=myco.jfrog.io/steamcmd:base-v0.1.0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn native_publish_pipeline_args_omits_target_and_build_args_when_empty() {
+        let args = native_publish_pipeline_args(
+            &BuildSpec {
+                context: ".",
+                dockerfile: "./Dockerfile",
+                target: "",
+                build_args: &[],
+            },
+            &NativeRegistryPublish {
+                registry: "myco.jfrog.io",
+                username: "deploy-bot",
+                token_env_var: "MYCO_JFROG_IO_TOKEN",
+                tag_address: "myco.jfrog.io/steamcmd:v0.1.0",
+            },
+        );
+        assert!(!args.iter().any(|a| a.starts_with("--target=")));
+        assert!(!args.iter().any(|a| a.starts_with("--build-args=")));
     }
 }
