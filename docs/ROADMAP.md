@@ -63,11 +63,18 @@ Confirmed directly against the code, not from memory:
   language — this one's already stack-agnostic, since it works from the compose file / Dockerfile
   contract rather than a language-specific build step. Registry auth
   (`--dockerhub-username`/`--ghcr-username`, or their `$DOCKERHUB_USERNAME`/`$GHCR_USERNAME`
-  fallbacks, plus `$DOCKER_TOKEN`/`$GHCR_TOKEN`) is wired through to the underlying
-  `dockerRelease` call — verified for real, end to end, converting `mbround18/ark-manager-web`'s
-  Docker workflows onto `paws docker` (2026-08-18): before this, `push=true` resolved correctly
-  but the pipeline had nothing to authenticate a publish with, so it built and silently published
-  nothing.
+  fallbacks, plus `$DOCKER_TOKEN`/`$GHCR_TOKEN`) — verified for real, end to end, converting
+  `mbround18/ark-manager-web`'s Docker workflows onto `paws docker` (2026-08-18): before this,
+  `push=true` resolved correctly but the pipeline had nothing to authenticate a publish with, so
+  it built and silently published nothing. As of 2026-08-19, `paws docker` no longer depends on
+  `gh-reusable` at all — build+tag+push for docker.io/ghcr.io go through `paws-docker`'s own
+  native `Container.withRegistryAuth`/`Container.publish` calls, the same primitives that also
+  make arbitrary registries work (`--registries myco.jfrog.io --registry-username
+  myco.jfrog.io=you`, token read from a derived `$MYCO_JFROG_IO_TOKEN`-style env var) —
+  Artifactory, a private registry, anything `dockerRelease` (the `gh-reusable` function this
+  replaced) had no way to authenticate to. `paws audit` is now the only subcommand still calling
+  into `gh-reusable` at all (its scanner orchestration — running `semgrep`/`gitleaks` — queued as
+  its own, separate native-port piece of work, a different shape of problem than build/publish).
 - **`paws release`**: primarily cross-compiles **`paws` itself** (the Rust binary) for multiple
   OS/arch via its prebuilt `paws-builders` images — don't read the full target matrix here as
   stack coverage for user projects. `--local-build` (2026-08-19) extends it to other Rust repos,

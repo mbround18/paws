@@ -456,6 +456,26 @@ pub fn tags_for_registry<'a>(tags: &'a [String], registry: &str) -> Vec<&'a str>
         .collect()
 }
 
+/// The subset of `tags` that are docker.io's — [`generate_tags`] never
+/// prefixes docker.io's own tags with a registry hostname at all (a bare
+/// `"image:tag"`, or `"org/image:tag"` for a namespaced Docker Hub image —
+/// both are valid, unprefixed Docker Hub references, same as `docker push`
+/// itself accepts), so these can't be picked out by a `"docker.io/"`
+/// prefix the way [`tags_for_registry`] does for every other registry.
+/// Identified by elimination instead: whatever isn't prefixed by one of
+/// `extra_registries` (`--registries`, i.e. every registry *other* than
+/// docker.io) must be a docker.io tag.
+pub fn docker_hub_tags<'a>(tags: &'a [String], extra_registries: &[String]) -> Vec<&'a str> {
+    tags.iter()
+        .map(|t| t.as_str())
+        .filter(|t| {
+            !extra_registries
+                .iter()
+                .any(|r| t.starts_with(&format!("{r}/")))
+        })
+        .collect()
+}
+
 /// Builds the `dagger core <chain>` argument list (see `paws_dagger::core`)
 /// that builds `context`/`dockerfile`[/`target`] and publishes the result
 /// directly to `tag_address` on `registry`, authenticated via
@@ -473,10 +493,7 @@ pub fn tags_for_registry<'a>(tags: &'a [String], registry: &str) -> Vec<&'a str>
 /// replays from cache rather than rebuilding (same reasoning
 /// `paws-helm`'s `publish_packages_pipeline_args`/`publish_index_pipeline_args`
 /// split relies on).
-pub fn native_publish_pipeline_args(
-    build: &BuildSpec,
-    publish: &NativeRegistryPublish,
-) -> Vec<String> {
+fn docker_build_pipeline_prefix(build: &BuildSpec) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "host".into(),
         "directory".into(),
@@ -496,6 +513,28 @@ pub fn native_publish_pipeline_args(
             .join(",");
         args.push(format!("--build-args={joined}"));
     }
+    args
+}
+
+/// Builds the `dagger core <chain>` argument list that builds `build`
+/// without publishing anywhere — `sync` forces Dagger to actually run the
+/// build (it's lazy otherwise) and errors if it fails, without needing a
+/// registry to publish to. Used for the "validate the Dockerfile still
+/// builds" step on a PR/build-only run — `dockerRelease` (the `gh-reusable`
+/// call this crate no longer needs) used to always build regardless of
+/// whether it was about to publish; this preserves that same behavior
+/// without a registry in the loop at all.
+pub fn build_only_pipeline_args(build: &BuildSpec) -> Vec<String> {
+    let mut args = docker_build_pipeline_prefix(build);
+    args.push("sync".into());
+    args
+}
+
+pub fn native_publish_pipeline_args(
+    build: &BuildSpec,
+    publish: &NativeRegistryPublish,
+) -> Vec<String> {
+    let mut args = docker_build_pipeline_prefix(build);
     args.extend([
         "with-registry-auth".into(),
         format!("--address={}", publish.registry),
@@ -709,6 +748,57 @@ mod tests {
         assert_eq!(
             tags_for_registry(&tags, "myco.jfrog.io"),
             vec!["myco.jfrog.io/app:v1.0.0", "myco.jfrog.io/app:latest"]
+        );
+    }
+
+    #[test]
+    fn docker_hub_tags_finds_unprefixed_tags_by_elimination() {
+        let tags = vec![
+            "app:v1.0.0".to_string(),
+            "ghcr.io/app:v1.0.0".to_string(),
+            "myco.jfrog.io/app:v1.0.0".to_string(),
+        ];
+        assert_eq!(
+            docker_hub_tags(&tags, &["ghcr.io".to_string(), "myco.jfrog.io".to_string()]),
+            vec!["app:v1.0.0"]
+        );
+    }
+
+    #[test]
+    fn docker_hub_tags_handles_a_namespaced_docker_hub_image() {
+        // "mbround18/steamcmd:base-v0.1.0" has a "/" in it too, but it's
+        // still a bare (docker.io) reference, not a registry-prefixed one -
+        // elimination against known extra registries must not mistake the
+        // org/repo separator for a registry hostname.
+        let tags = vec![
+            "mbround18/steamcmd:base-v0.1.0".to_string(),
+            "ghcr.io/mbround18/steamcmd:base-v0.1.0".to_string(),
+        ];
+        assert_eq!(
+            docker_hub_tags(&tags, &["ghcr.io".to_string()]),
+            vec!["mbround18/steamcmd:base-v0.1.0"]
+        );
+    }
+
+    #[test]
+    fn build_only_pipeline_args_builds_without_a_registry() {
+        let args = build_only_pipeline_args(&BuildSpec {
+            context: ".",
+            dockerfile: "./Dockerfile",
+            target: "base",
+            build_args: &[],
+        });
+        assert_eq!(
+            args,
+            vec![
+                "host".to_string(),
+                "directory".to_string(),
+                "--path=.".to_string(),
+                "docker-build".to_string(),
+                "--dockerfile=./Dockerfile".to_string(),
+                "--target=base".to_string(),
+                "sync".to_string(),
+            ]
         );
     }
 

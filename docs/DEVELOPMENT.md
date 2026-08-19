@@ -20,14 +20,19 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
 - `crates/paws-dagger` — wraps the `dagger` CLI. Deliberately **not** built on the
   `dagger-sdk` Rust crate yet — Dagger's own README marks that SDK experimental and
   "not for anything mission-critical." Pipeline logic goes through this crate so the
-  day the SDK is trustworthy, only this crate needs to change. The interim `docker`/`audit`
-  subcommands still call into `gh-reusable`'s real Dagger module through here, pinned to a
-  known-good commit (see `GH_REUSABLE_DAGGER_MODULE` in `crates/paws-cli/src/main.rs`) rather
-  than trusting its floating `main` branch, which was verified broken (a stale vendored SDK
-  bundle threw at runtime) as of 2026-08-18. `ci` no longer does — `node`/`python`/`rust`/
-  `tauri`/`tauri-android` all build native `paws-dagger::core` pipelines now (`crates/paws-node`/
-  `paws-python`/`paws-rust`/`paws-tauri`), so a `paws ci` run has zero dependency on
-  `gh-reusable` being reachable at all. `paws ci` streams a running pipeline's output live by
+  day the SDK is trustworthy, only this crate needs to change. `paws audit` is the sole
+  remaining subcommand that still calls into `gh-reusable`'s real Dagger module through
+  here (its scanner orchestration — running `semgrep`/`gitleaks`), pinned to a known-good
+  commit (see `GH_REUSABLE_DAGGER_MODULE` in `crates/paws-cli/src/main.rs`) rather than
+  trusting its floating `main` branch, which was verified broken (a stale vendored SDK
+  bundle threw at runtime) as of 2026-08-18. Every other subcommand — `ci`
+  (`node`/`python`/`rust`/`tauri`/`tauri-android`/`flatpak`), `docker`, `release`, `semver`,
+  `helm` — builds native `paws-dagger::core` pipelines now, zero dependency on `gh-reusable`
+  being reachable at all. `docker` was the last one to drop it (2026-08-19): `dockerRelease`
+  (a `gh-reusable` Dagger Function) used to build+tag+push docker.io/ghcr.io; `paws-docker`'s
+  own `Container.withRegistryAuth`/`Container.publish` calls do that natively now, the same
+  primitives already used for arbitrary registries (Artifactory, private registries — see
+  below). `paws ci` streams a running pipeline's output live by
   default (`core_streaming`, `dagger core --progress=plain`) instead of buffering everything and
   dumping it all at the end — verified directly that `dagger core`'s default renderer writes
   nothing at all to a redirected/piped stdout until the pipeline finishes (it redraws in place via
@@ -42,7 +47,24 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
 - `crates/paws-docker` — native Rust port of `docker-facts`/`docker-release`'s resolution
   logic (compose discovery, tag generation, push gating); has a real e2e test suite that
   builds `examples/`' fixtures against an actual Docker daemon, including a BuildKit-only
-  fixture. Building/pushing the image itself still goes through `paws-dagger`.
+  fixture. Building and publishing also go natively through `paws-dagger` now (2026-08-19)
+  — `docker-build` + `Container.withRegistryAuth` + `Container.publish`, one `dagger core`
+  call per tag (`native_publish_pipeline_args`/`build_only_pipeline_args`) — not a
+  `gh-reusable` Dagger Function call. This is what makes arbitrary registries (Artifactory,
+  a private registry — anything beyond docker.io/ghcr.io, which `dockerRelease` had no way
+  to authenticate to at all) work: `paws docker --registries myco.jfrog.io
+  --registry-username myco.jfrog.io=you` reads the token from a derived env var
+  (`registry_token_env_var` — e.g. `$MYCO_JFROG_IO_TOKEN`), same shape as the existing
+  `DOCKER_TOKEN`/`GHCR_TOKEN` convention, and publishes it the same way docker.io/ghcr.io
+  do. docker.io/ghcr.io still gracefully skip (not error) on missing credentials, matching
+  `dockerRelease`'s old behavior; an explicit `--registries` entry with no matching
+  `--registry-username` fails loudly instead — a registry silently getting dropped from a
+  real publish is exactly the failure mode a real, reproduced bug this same session
+  surfaced for `--registries` (it used to replace `dockerRelease`'s default `docker.io`
+  registry outright instead of adding to it), so this errs toward loud instead of quiet.
+  Verified for real against a live local registry (`registry:2` + htpasswd auth): build and
+  registry auth both succeeded through the actual `paws docker` CLI end to end, not just the
+  underlying `dagger` calls in isolation.
 - `crates/paws-provision` — concurrent toolchain provisioning (`tokio::JoinSet`-based),
   aggregating per-ecosystem install results without one failure hiding another's. Real
   installers shell to `rustup`/`corepack`/`uv`; `paws ci` uses this internally whenever a repo

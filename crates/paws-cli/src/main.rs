@@ -3,8 +3,8 @@ use clap::{Parser, Subcommand};
 use paws_audit::{RepositorySignals, select_audit_scanners};
 use paws_dagger::{DaggerCall, call};
 use paws_docker::{
-    DockerFactsInput, GithubContext as DockerGithubContext, native_publish_pipeline_args,
-    native_registries, registry_token_env_var, resolve_docker_facts, tags_for_registry,
+    DockerFactsInput, GithubContext as DockerGithubContext, docker_hub_tags,
+    native_publish_pipeline_args, registry_token_env_var, resolve_docker_facts, tags_for_registry,
 };
 use paws_provision::{Ecosystem, Installer, provision_with_timing, real_installer};
 use paws_release::{AssetUploadMode, GitHubReleaseClient, archive_name, package_zip};
@@ -122,58 +122,6 @@ fn resolve_docker_credential(flag: Option<String>, env_var: &str) -> Option<Stri
     flag.or_else(|| std::env::var(env_var).ok())
 }
 
-/// Builds the `dockerRelease` credential args (`gh-reusable`'s
-/// `dockerhubUsername`/`ghcrUsername`/`dockerToken`/`ghcrToken` params —
-/// read directly from `packages/dagger-module/src/index.ts`). Without these,
-/// `paws docker` resolves `push=true` correctly but the underlying
-/// `dockerRelease` call has nothing to authenticate with, so it builds and
-/// silently publishes nothing (`Docker auth: false` in its own report) —
-/// this is what closes that gap.
-fn docker_credential_args(
-    dockerhub_username: Option<String>,
-    ghcr_username: Option<String>,
-    docker_token: Option<String>,
-    ghcr_token: Option<String>,
-) -> Vec<String> {
-    let mut args = Vec::new();
-    if let Some(u) = dockerhub_username {
-        args.extend(["--dockerhub-username".into(), u]);
-    }
-    if let Some(u) = ghcr_username {
-        args.extend(["--ghcr-username".into(), u]);
-    }
-    if let Some(t) = docker_token {
-        args.extend(["--docker-token".into(), t]);
-    }
-    if let Some(t) = ghcr_token {
-        args.extend(["--ghcr-token".into(), t]);
-    }
-    args
-}
-
-/// Builds the full `registriesCsv` `dockerRelease` (`gh-reusable`'s, read
-/// directly from `packages/dagger-module/src/index.ts`) actually receives:
-/// `docker.io` first, then `extra_registries` in order, deduplicated.
-/// `dockerRelease`'s own `registriesCsv` param *replaces* its
-/// `"docker.io"` default wholesale rather than adding to it — `paws
-/// docker --registries`'s own doc string ("Additional registries to
-/// mirror tags into") promises the opposite, and `paws-docker`'s local
-/// preview (`generate_tags`) already gets this right (implicit docker.io
-/// base + registries as mirrors). Without this, `--registries ghcr.io`
-/// silently drops Docker Hub entirely instead of publishing to both —
-/// caught for real converting `mbround18/steamcmd-bases`, but it was
-/// already live (unnoticed — no successful real push had hit it yet) in
-/// `mbround18/ark-manager-web`'s `docker.yml` too.
-fn full_registries_csv(extra_registries: &[String]) -> String {
-    let mut registries = vec!["docker.io".to_string()];
-    for registry in extra_registries {
-        if !registries.contains(registry) {
-            registries.push(registry.clone());
-        }
-    }
-    registries.join(",")
-}
-
 /// Parses `--registry-username`'s `"<registry>=<username>"` entries into a
 /// lookup, erroring on anything that isn't a `key=value` pair rather than
 /// silently ignoring a typo'd entry.
@@ -257,10 +205,15 @@ fn collect_repository_signals() -> RepositorySignals {
         .collect()
 }
 
-/// Interim reference to `gh-reusable`'s existing TS Dagger module. Each
-/// subcommand below routes through this until it gets its own native crate
-/// (see specs/001-paws-core-cli/tasks.md task groups 2-4); this constant is
-/// expected to shrink to nothing as that happens, not grow.
+/// Interim reference to `gh-reusable`'s existing TS Dagger module. Down to
+/// one remaining caller — `paws audit` (its scanner orchestration:
+/// semgrep/gitleaks, run and aggregated by the TS module, not yet ported
+/// natively). `paws docker`'s `dockerRelease` call was the other one; it's
+/// gone (`crates/paws-docker`'s `native_publish_pipeline_args` — build +
+/// `Container.withRegistryAuth` + `Container.publish`, all through Dagger
+/// directly, not `gh-reusable`), leaving this constant one native-audit
+/// port away from deletion entirely (see specs/001-paws-core-cli/tasks.md
+/// task groups 2-4).
 ///
 /// Pinned to a commit, not `main`: floating `main` was verified broken as of
 /// 2026-08-18 (`33b7761`) — the module's vendored Dagger TS SDK bundle threw
@@ -686,123 +639,157 @@ async fn main() -> anyhow::Result<()> {
                 },
             );
 
-            // Locally-resolved preview so `paws docker` stays useful (and
-            // testable per spec.md User Story 3) without needing `dagger` —
-            // the real `dockerRelease` function below recomputes context/
-            // dockerfile/target/push itself from the same compose-resolution
-            // and gating rules (`paws-docker` is a parity port of that logic,
-            // not a second source of truth for the actual build).
-            eprintln!(
-                "docker: resolved locally -> context={} dockerfile={} target={} push={}",
+            println!(
+                "docker: resolved -> context={} dockerfile={} target={} push={}",
                 facts.context, facts.dockerfile, facts.target, facts.push
             );
-
             paws_dagger::ensure_available().await?;
-            let source = workspace.to_string_lossy().to_string();
-            let mut args = vec!["--image".into(), image, "--source".into(), source];
-            if let Some(dockerfile) = dockerfile {
-                args.extend(["--dockerfile".into(), dockerfile]);
-            }
-            if let Some(context) = context {
-                args.extend(["--context".into(), context]);
-            }
-            if let Some(target) = target {
-                args.extend(["--target".into(), target]);
-            }
-            args.extend(["--canary-label".into(), canary_label]);
-            args.extend(["--default-branch".into(), default_branch]);
-            if !registries.is_empty() {
-                args.extend(["--registries-csv".into(), full_registries_csv(&registries)]);
-            }
-            if !labels.is_empty() {
-                args.extend(["--pr-labels-csv".into(), labels.join(",")]);
-            }
-            if push {
-                args.push("--force-push".into());
-            }
-            if prepend_target {
-                args.push("--prepend-target".into());
-            }
-            if let Ok(v) = std::env::var("GITHUB_EVENT_NAME") {
-                args.extend(["--event-name".into(), v]);
-            }
-            if let Ok(v) = std::env::var("GITHUB_REF") {
-                args.extend(["--ref".into(), v]);
-            }
-            if let Ok(v) = std::env::var("GITHUB_SHA") {
-                args.extend(["--sha".into(), v]);
-            }
-            args.extend(docker_credential_args(
-                resolve_docker_credential(dockerhub_username, "DOCKERHUB_USERNAME"),
-                resolve_docker_credential(ghcr_username, "GHCR_USERNAME"),
-                std::env::var("DOCKER_TOKEN").ok(),
-                std::env::var("GHCR_TOKEN").ok(),
-            ));
-            // NOTE: version/tag control (`--semver-prefix`/`--semver-increment`/
-            // `--tags-csv`) isn't wired through yet — it needs the same
-            // existing-tag lookup `paws-semver`'s `TagSource` already does,
-            // just not plumbed into this subcommand. Until then the real
-            // `dockerRelease` call falls back to its own defaults
-            // (patch increment, no prefix, no existing tags) for versioning.
-            let succeeded = call_pipeline_report("docker-release", args).await?;
-            if !succeeded {
-                anyhow::bail!("docker release failed: see report above");
+
+            if facts.tags.is_empty() {
+                println!("docker: no tags resolved, nothing to build/publish");
+                return Ok(());
             }
 
-            // Registries beyond docker.io/ghcr.io: dockerRelease has no way
-            // to authenticate to these at all (see native_registries's doc
-            // comment), so they're built and published natively through
-            // Dagger instead. Only actually attempted on a real publish
-            // (facts.push) — the Dockerfile itself is already validated by
-            // the dockerRelease call above regardless of how many
-            // registries it's headed to, so there's nothing to gain from
-            // also building for a registry that isn't going to be
-            // published this run.
-            let extra = native_registries(&registries);
-            if !extra.is_empty() {
-                if facts.push {
-                    let usernames = parse_registry_usernames(&registry_username)?;
-                    for registry in extra {
-                        let username = usernames.get(registry).ok_or_else(|| {
-                            anyhow::anyhow!(
+            // Every registry publishes natively through Dagger now —
+            // docker.io/ghcr.io included, not just the ones beyond them.
+            // `paws` used to delegate docker.io/ghcr.io to `gh-reusable`'s
+            // `dockerRelease` (a Dagger Function in a different repo); this
+            // routes them through the exact same `Container.withRegistryAuth`
+            // + `Container.publish` primitives already verified for real
+            // this session for arbitrary registries — no reason for the two
+            // known registries to go through a separate code path.
+            let dockerhub_username =
+                resolve_docker_credential(dockerhub_username, "DOCKERHUB_USERNAME");
+            let ghcr_username = resolve_docker_credential(ghcr_username, "GHCR_USERNAME");
+            let extra_usernames = parse_registry_usernames(&registry_username)?;
+
+            // docker.io/ghcr.io mirror `dockerRelease`'s own graceful
+            // degrade — missing credentials there just skips that
+            // registry's publish (preserves existing behavior for repos
+            // that only ever configured one of the two). A registry
+            // reached via --registries (ghcr.io or a custom one) is an
+            // explicit ask, so missing credentials for it fails loudly
+            // instead — the whole reason `--registries` silently dropping
+            // docker.io got caught earlier this session was a *silent*
+            // under-publish; an explicit registry with no way to
+            // authenticate deserves the same loud treatment, not a repeat.
+            struct DockerPublishTarget<'a> {
+                registry: String,
+                tags: Vec<&'a str>,
+                username: Option<&'a String>,
+                token_env_var: String,
+                credentials_required: bool,
+            }
+
+            let mut targets = vec![DockerPublishTarget {
+                registry: "docker.io".to_string(),
+                tags: docker_hub_tags(&facts.tags, &registries),
+                username: dockerhub_username.as_ref(),
+                token_env_var: "DOCKER_TOKEN".to_string(),
+                credentials_required: false,
+            }];
+            for registry in &registries {
+                let username = if registry == "ghcr.io" {
+                    ghcr_username.as_ref()
+                } else {
+                    extra_usernames.get(registry)
+                };
+                let token_env_var = if registry == "ghcr.io" {
+                    "GHCR_TOKEN".to_string()
+                } else {
+                    registry_token_env_var(registry)
+                };
+                targets.push(DockerPublishTarget {
+                    registry: registry.clone(),
+                    tags: tags_for_registry(&facts.tags, registry),
+                    username,
+                    token_env_var,
+                    credentials_required: registry != "ghcr.io",
+                });
+            }
+
+            if facts.push {
+                for target in &targets {
+                    let DockerPublishTarget {
+                        registry,
+                        tags,
+                        username,
+                        token_env_var,
+                        credentials_required,
+                    } = target;
+                    if tags.is_empty() {
+                        continue;
+                    }
+                    let username = match username {
+                        Some(u) => u,
+                        None if *credentials_required => {
+                            anyhow::bail!(
                                 "--registry-username is required for {registry} (got \
                                  --registries including it, but no matching \
                                  --registry-username entry) to actually publish"
-                            )
-                        })?;
-                        let token_env_var = registry_token_env_var(registry);
-                        anyhow::ensure!(
-                            std::env::var(&token_env_var).is_ok(),
-                            "${token_env_var} must be set to publish to {registry}"
-                        );
-                        for tag in tags_for_registry(&facts.tags, registry) {
-                            println!("docker: publishing {tag} to {registry}...");
-                            let publish_args = native_publish_pipeline_args(
-                                &paws_docker::BuildSpec {
-                                    context: &facts.context,
-                                    dockerfile: &facts.dockerfile,
-                                    target: &facts.target,
-                                    build_args: &facts.build_args,
-                                },
-                                &paws_docker::NativeRegistryPublish {
-                                    registry,
-                                    username,
-                                    token_env_var: &token_env_var,
-                                    tag_address: tag,
-                                },
                             );
-                            paws_dagger::core(&publish_args).await.with_context(|| {
-                                format!("failed to publish {tag} to {registry}")
-                            })?;
-                            println!("docker: published {tag}");
                         }
+                        None => {
+                            println!(
+                                "docker: no username configured for {registry}, skipping publish \
+                                 ({} tag(s))",
+                                tags.len()
+                            );
+                            continue;
+                        }
+                    };
+                    let has_token = std::env::var(token_env_var).is_ok();
+                    if !has_token {
+                        if *credentials_required {
+                            anyhow::bail!("${token_env_var} must be set to publish to {registry}");
+                        }
+                        println!(
+                            "docker: ${token_env_var} not set, skipping publish to {registry} \
+                             ({} tag(s))",
+                            tags.len()
+                        );
+                        continue;
                     }
-                } else {
-                    println!(
-                        "docker: skipping native publish to {} (push not resolved for this run)",
-                        extra.join(", ")
-                    );
+                    for tag in tags {
+                        println!("docker: publishing {tag} to {registry}...");
+                        let publish_args = native_publish_pipeline_args(
+                            &paws_docker::BuildSpec {
+                                context: &facts.context,
+                                dockerfile: &facts.dockerfile,
+                                target: &facts.target,
+                                build_args: &facts.build_args,
+                            },
+                            &paws_docker::NativeRegistryPublish {
+                                registry,
+                                username,
+                                token_env_var,
+                                tag_address: tag,
+                            },
+                        );
+                        paws_dagger::core(&publish_args)
+                            .await
+                            .with_context(|| format!("failed to publish {tag} to {registry}"))?;
+                        println!("docker: published {tag}");
+                    }
                 }
+            } else {
+                let total_tags: usize = targets.iter().map(|t| t.tags.len()).sum();
+                println!(
+                    "docker: build-only (push not resolved for this run) — validating the \
+                     Dockerfile still builds; {total_tags} tag(s) across {} registr{} would \
+                     have been published on a real push",
+                    targets.iter().filter(|t| !t.tags.is_empty()).count(),
+                    if targets.len() == 1 { "y" } else { "ies" }
+                );
+                let build_only_args =
+                    paws_docker::build_only_pipeline_args(&paws_docker::BuildSpec {
+                        context: &facts.context,
+                        dockerfile: &facts.dockerfile,
+                        target: &facts.target,
+                        build_args: &facts.build_args,
+                    });
+                run_dagger_core(&build_only_args, false).await?;
+                println!("docker: build succeeded");
             }
         }
         Commands::Semver {
@@ -1210,7 +1197,7 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use clap::CommandFactory;
 
-    use super::{Cli, docker_credential_args, full_registries_csv, pipeline_report_succeeded};
+    use super::{Cli, pipeline_report_succeeded};
 
     #[test]
     fn cli_definition_is_valid() {
@@ -1269,70 +1256,5 @@ mod tests {
             "markdown": "...",
             "report": {"outputs": {"auditSummary": {"overallStatus": "pass"}}}
         })));
-    }
-
-    #[test]
-    fn docker_credential_args_includes_only_whats_present() {
-        assert_eq!(
-            docker_credential_args(None, None, None, None),
-            Vec::<String>::new()
-        );
-
-        assert_eq!(
-            docker_credential_args(Some("mbround18".into()), None, Some("dtoken".into()), None),
-            vec![
-                "--dockerhub-username".to_string(),
-                "mbround18".to_string(),
-                "--docker-token".to_string(),
-                "dtoken".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn docker_credential_args_orders_dockerhub_before_ghcr() {
-        let args = docker_credential_args(
-            Some("dh-user".into()),
-            Some("gh-user".into()),
-            Some("dh-token".into()),
-            Some("gh-token".into()),
-        );
-        assert_eq!(
-            args,
-            vec![
-                "--dockerhub-username".to_string(),
-                "dh-user".to_string(),
-                "--ghcr-username".to_string(),
-                "gh-user".to_string(),
-                "--docker-token".to_string(),
-                "dh-token".to_string(),
-                "--ghcr-token".to_string(),
-                "gh-token".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn full_registries_csv_keeps_docker_io_and_adds_extras() {
-        assert_eq!(
-            full_registries_csv(&["ghcr.io".to_string()]),
-            "docker.io,ghcr.io"
-        );
-    }
-
-    #[test]
-    fn full_registries_csv_does_not_duplicate_docker_io() {
-        assert_eq!(
-            full_registries_csv(&["docker.io".to_string(), "ghcr.io".to_string()]),
-            "docker.io,ghcr.io"
-        );
-    }
-
-    #[test]
-    fn full_registries_csv_supports_multiple_extras() {
-        assert_eq!(
-            full_registries_csv(&["ghcr.io".to_string(), "quay.io".to_string()]),
-            "docker.io,ghcr.io,quay.io"
-        );
     }
 }
