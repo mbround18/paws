@@ -53,7 +53,13 @@ Confirmed directly against the code, not from memory:
   with a `go.mod` gets audited correctly; `paws ci --toolchain go` doesn't exist.
 - **`paws docker`**: any `docker-compose.yml`/`Dockerfile`-based project, regardless of source
   language — this one's already stack-agnostic, since it works from the compose file / Dockerfile
-  contract rather than a language-specific build step.
+  contract rather than a language-specific build step. Registry auth
+  (`--dockerhub-username`/`--ghcr-username`, or their `$DOCKERHUB_USERNAME`/`$GHCR_USERNAME`
+  fallbacks, plus `$DOCKER_TOKEN`/`$GHCR_TOKEN`) is wired through to the underlying
+  `dockerRelease` call — verified for real, end to end, converting `mbround18/ark-manager-web`'s
+  Docker workflows onto `paws docker` (2026-08-18): before this, `push=true` resolved correctly
+  but the pipeline had nothing to authenticate a publish with, so it built and silently published
+  nothing.
 - **`paws release`**: cross-compiles **`paws` itself** (the Rust binary) for multiple OS/arch —
   this is not a general "build any project for any target" capability, it's specific to `paws`'s
   own release pipeline. Don't read the target matrix here as stack coverage for user projects.

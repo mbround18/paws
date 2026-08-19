@@ -66,6 +66,41 @@ async fn run_dagger_core(args: &[String], silent: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A flag value wins over its env-var fallback — mirrors every other
+/// flag-or-$ENV resolution in this file (image/version/etc.).
+fn resolve_docker_credential(flag: Option<String>, env_var: &str) -> Option<String> {
+    flag.or_else(|| std::env::var(env_var).ok())
+}
+
+/// Builds the `dockerRelease` credential args (`gh-reusable`'s
+/// `dockerhubUsername`/`ghcrUsername`/`dockerToken`/`ghcrToken` params —
+/// read directly from `packages/dagger-module/src/index.ts`). Without these,
+/// `paws docker` resolves `push=true` correctly but the underlying
+/// `dockerRelease` call has nothing to authenticate with, so it builds and
+/// silently publishes nothing (`Docker auth: false` in its own report) —
+/// this is what closes that gap.
+fn docker_credential_args(
+    dockerhub_username: Option<String>,
+    ghcr_username: Option<String>,
+    docker_token: Option<String>,
+    ghcr_token: Option<String>,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(u) = dockerhub_username {
+        args.extend(["--dockerhub-username".into(), u]);
+    }
+    if let Some(u) = ghcr_username {
+        args.extend(["--ghcr-username".into(), u]);
+    }
+    if let Some(t) = docker_token {
+        args.extend(["--docker-token".into(), t]);
+    }
+    if let Some(t) = ghcr_token {
+        args.extend(["--ghcr-token".into(), t]);
+    }
+    args
+}
+
 async fn run_provisioning(ecosystems: Vec<Ecosystem>, verbose: bool) -> anyhow::Result<()> {
     if ecosystems.is_empty() {
         return Ok(());
@@ -198,6 +233,17 @@ enum Commands {
         labels: Vec<String>,
         #[arg(long, default_value = "main")]
         default_branch: String,
+        /// Docker Hub username to authenticate publishing with. Falls back to
+        /// $DOCKERHUB_USERNAME. Required (here or via env) to actually push
+        /// to docker.io — without it, `dockerRelease` builds but can't
+        /// authenticate, so `push=true` still publishes nothing.
+        #[arg(long)]
+        dockerhub_username: Option<String>,
+        /// GHCR username to authenticate publishing with. Falls back to
+        /// $GHCR_USERNAME. Required (here or via env) to actually push to
+        /// ghcr.io.
+        #[arg(long)]
+        ghcr_username: Option<String>,
     },
     /// Compute the next semantic version from PR labels or an explicit increment,
     /// matching `actions/semver`'s current behavior.
@@ -452,6 +498,8 @@ async fn main() -> anyhow::Result<()> {
             prepend_target,
             labels,
             default_branch,
+            dockerhub_username,
+            ghcr_username,
         } => {
             let image = image
                 .or_else(|| std::env::var("GITHUB_REPOSITORY").ok())
@@ -535,6 +583,12 @@ async fn main() -> anyhow::Result<()> {
             if let Ok(v) = std::env::var("GITHUB_SHA") {
                 args.extend(["--sha".into(), v]);
             }
+            args.extend(docker_credential_args(
+                resolve_docker_credential(dockerhub_username, "DOCKERHUB_USERNAME"),
+                resolve_docker_credential(ghcr_username, "GHCR_USERNAME"),
+                std::env::var("DOCKER_TOKEN").ok(),
+                std::env::var("GHCR_TOKEN").ok(),
+            ));
             // NOTE: version/tag control (`--semver-prefix`/`--semver-increment`/
             // `--tags-csv`) isn't wired through yet — it needs the same
             // existing-tag lookup `paws-semver`'s `TagSource` already does,
@@ -761,10 +815,56 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use clap::CommandFactory;
 
-    use super::Cli;
+    use super::{Cli, docker_credential_args};
 
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn docker_credential_args_includes_only_whats_present() {
+        assert_eq!(
+            docker_credential_args(None, None, None, None),
+            Vec::<String>::new()
+        );
+
+        assert_eq!(
+            docker_credential_args(
+                Some("mbround18".into()),
+                None,
+                Some("dtoken".into()),
+                None
+            ),
+            vec![
+                "--dockerhub-username".to_string(),
+                "mbround18".to_string(),
+                "--docker-token".to_string(),
+                "dtoken".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn docker_credential_args_orders_dockerhub_before_ghcr() {
+        let args = docker_credential_args(
+            Some("dh-user".into()),
+            Some("gh-user".into()),
+            Some("dh-token".into()),
+            Some("gh-token".into()),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--dockerhub-username".to_string(),
+                "dh-user".to_string(),
+                "--ghcr-username".to_string(),
+                "gh-user".to_string(),
+                "--docker-token".to_string(),
+                "dh-token".to_string(),
+                "--ghcr-token".to_string(),
+                "gh-token".to_string(),
+            ]
+        );
     }
 }

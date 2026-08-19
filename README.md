@@ -47,10 +47,10 @@ verified where.
 
 ## Installation
 
-**Prebuilt binaries**: not published yet — `paws`'s own release pipeline (`paws release`, see
-below) is built and verified, but no tag has been cut. Once released, binaries will be available
-on the [Releases page](https://github.com/mbround18/paws/releases) for Linux (x86_64/aarch64,
-glibc and musl), Windows (x86_64), and macOS (x86_64/aarch64).
+**Prebuilt binaries**: published as prereleases on the
+[Releases page](https://github.com/mbround18/paws/releases) for Linux (x86_64/aarch64, glibc and
+musl), Windows (x86_64), and macOS (x86_64/aarch64) — still pre-1.0, so expect breaking changes
+between prereleases.
 
 **From source** (needs a [Rust toolchain](https://rustup.rs)):
 
@@ -63,8 +63,8 @@ cargo install --path crates/paws-cli
 Most subcommands also need the `dagger` CLI on your `PATH` — run `paws init` to install it
 (or see https://docs.dagger.io/install for other options).
 
-**In a GitHub Actions workflow**, once a release exists — `actions/paws-up` installs `paws` and
-runs `paws init` for you:
+**In a GitHub Actions workflow** — `actions/paws-up` installs `paws` and runs `paws init` for
+you:
 
 ```yaml
 - uses: mbround18/paws/actions/paws-up@main
@@ -83,6 +83,11 @@ paws ci --toolchain rust
 
 # Resolve how a container image would be built/tagged/pushed
 paws docker --image ghcr.io/you/app --version 1.0.0
+
+# Actually publish (needs $DOCKER_TOKEN/$GHCR_TOKEN and the matching
+# --dockerhub-username/--ghcr-username, or their $DOCKERHUB_USERNAME/
+# $GHCR_USERNAME env fallbacks)
+DOCKER_TOKEN=*** paws docker --image you/app --with-latest --dockerhub-username you
 ```
 
 See [`specs/001-paws-core-cli/quickstart.md`](specs/001-paws-core-cli/quickstart.md) for a full,
