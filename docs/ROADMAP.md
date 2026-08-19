@@ -78,6 +78,26 @@ Confirmed directly against the code, not from memory:
   `mbround18`'s own non-fork repos (3, all Gradle-based Hytale mods) with no `paws-provision`/
   `paws-audit` precedent yet to build on — unlike Python, which had both before `paws ci
   --toolchain python` was wired.
+- **`paws publish` doesn't exist** — a real gap surfaced by a second repo audit (2026-08-19)
+  that checked which of `mbround18`'s active repos still call `gh-reusable` directly (candidates
+  for a `paws docker`/`paws ci`-style conversion, same shape as the `ark-manager-web` work
+  above). Seven of eight (`valheim-docker`, `meilisearch-operator`,
+  `cloudflare-discord-oidc-worker`, `vein-docker`, `helm-hub`, `backup-docker`,
+  `foundryvtt-docker`) only call `rust-build-n-test`/`docker-release`/`tagger` — functions `paws
+  ci`/`paws docker`/`paws semver` already cover, pure conversion work. The eighth,
+  `game-server-management`, also depends on `gh-reusable`'s `publish.yaml` (`target: node |
+  rust-crate | helm-chart` — crates.io/npm/OCI Helm-chart publishing), which nothing in `paws`
+  replaces yet.
+- **No Helm-chart support at all** — surfaced converting `mbround18/helm-charts` itself
+  (2026-08-19): distinct from the OCI `publish.yaml` `helm-chart` target above, this repo's own
+  CI (`.github/workflows/helm.yml`/`gh-pages.yml`) does `helm lint`/`helm package` plus
+  `chart-releaser`-style publishing to a `gh-pages` branch (via a custom `tools/release_charts.py`
+  + a GitHub App token, not registry auth) — a fundamentally different publish mechanism from
+  OCI push. `paws` has no Helm CLI wrapping (`paws-helm` doesn't exist) and no Dagger builder for
+  it. Also worth noting: this repo's Python jobs don't fit `paws-python`'s fixed
+  `uv sync && uv build && uv run pytest` pipeline shape either — it's an internal chart-tooling
+  workspace with no package meant for `uv build`, and CI runs several separately-scoped `pytest`
+  invocations (with per-suite JUnit summaries), not one blanket `pytest` call.
 
 ## Status legend
 
