@@ -1,13 +1,14 @@
-//! Native Helm chart lint/package support. Ported from
-//! `mbround18/helm-charts`'s own `tools/chart_tasks.py` (this repo's real
-//! usage — see `docs/ROADMAP.md`'s Helm-chart-support gap), not from
-//! `gh-reusable`, which has no Helm function to parity-port from.
-//! Deliberately scoped to `helm lint`/`helm package` only, matching that
-//! repo's Makefile's `lint-helm`/`build` targets — its separate Python test
-//! suite (which doesn't fit `paws-python`'s fixed pipeline shape either) and
-//! its `chart-releaser`/`gh-pages` publish flow (a GitHub-App-token based
-//! mechanism, unrelated to registry auth) stay out of scope for this first
-//! cut.
+//! Native Helm chart lint/package/publish support. Lint/package ported from
+//! `mbround18/helm-charts`'s own `tools/chart_tasks.py`; publish ported from
+//! that repo's `tools/release_charts.py` (both real usage — see
+//! `docs/ROADMAP.md`'s Helm-chart-support gap), not from `gh-reusable`,
+//! which has no Helm function to parity-port from. `publish_pipeline_args`
+//! covers a standard Helm chart repository (per-chart GitHub Releases +
+//! `index.yaml`, real enough that `helm repo add` against it works) —
+//! deliberately not the HTML catalog page `release_charts.py` also
+//! generates, which is that repo's own site feature, not a generic Helm
+//! concern. That repo's separate Python test suite (which doesn't fit
+//! `paws-python`'s fixed pipeline shape either) stays out of scope too.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -50,6 +51,29 @@ pub struct HelmChart {
     /// dependencies — used only to order `helm dependency build` calls, see
     /// [`topological_order`].
     local_dependencies: Vec<String>,
+    /// `Chart.yaml`'s own `name:`/`version:` — usually identical to `name`
+    /// (the directory basename) but not guaranteed to be, so [`tag`](Self::tag)/
+    /// [`archive_file_name`](Self::archive_file_name) use these, not `name`.
+    chart_name: String,
+    chart_version: String,
+}
+
+impl HelmChart {
+    /// The per-chart GitHub Release tag `paws helm --publish` creates —
+    /// `<chart-name>-<chart-version>`, matching
+    /// `mbround18/helm-charts`'s own `tools/release_charts.py` convention
+    /// (`ChartPackage.tag_name`).
+    pub fn tag(&self) -> String {
+        format!("{}-{}", self.chart_name, self.chart_version)
+    }
+
+    /// The archive `helm package` produces for this chart — Helm's own
+    /// naming convention (`<name>-<version>.tgz`), verified for real
+    /// against `mbround18/helm-charts`'s actual packaged output this
+    /// session.
+    pub fn archive_file_name(&self) -> String {
+        format!("{}-{}.tgz", self.chart_name, self.chart_version)
+    }
 }
 
 pub struct HelmProject {
@@ -76,6 +100,8 @@ pub struct HelmProject {
 
 #[derive(Deserialize, Default)]
 struct RawChartYaml {
+    name: Option<String>,
+    version: Option<String>,
     #[serde(default)]
     dependencies: Vec<RawDependency>,
 }
@@ -109,17 +135,15 @@ pub fn is_helm_project(dir: &Path) -> bool {
 
 /// Parses a `Chart.yaml`/`Chart.lock` at `path` (both share the same
 /// `dependencies: [{repository, ...}]` shape; unrecognized fields, like
-/// `Chart.lock`'s `digest`/`generated`, are ignored) and returns its
-/// dependencies, or an empty list if `path` doesn't exist.
-fn read_dependencies(path: &Path) -> Result<Vec<RawDependency>> {
+/// `Chart.lock`'s `digest`/`generated`, are ignored) and returns it, or a
+/// default (empty) value if `path` doesn't exist.
+fn read_chart_yaml(path: &Path) -> Result<RawChartYaml> {
     if !path.is_file() {
-        return Ok(Vec::new());
+        return Ok(RawChartYaml::default());
     }
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let raw: RawChartYaml = serde_yaml::from_str(&contents)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
-    Ok(raw.dependencies)
+    serde_yaml::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))
 }
 
 /// Loads the chart at `root`/`rel_dir`, returning it alongside every
@@ -133,9 +157,19 @@ fn load_chart(root: &Path, rel_dir: &str) -> Result<(HelmChart, Vec<String>)> {
         "no Chart.yaml found at {}",
         chart_yaml_path.display()
     );
-    let mut dependencies = read_dependencies(&chart_yaml_path)?;
+    let chart_yaml = read_chart_yaml(&chart_yaml_path)?;
+    let chart_name = chart_yaml
+        .name
+        .clone()
+        .with_context(|| format!("{} missing name", chart_yaml_path.display()))?;
+    let chart_version = chart_yaml
+        .version
+        .clone()
+        .with_context(|| format!("{} missing version", chart_yaml_path.display()))?;
+
+    let mut dependencies = chart_yaml.dependencies;
     let has_dependencies = !dependencies.is_empty();
-    dependencies.extend(read_dependencies(&chart_dir.join("Chart.lock"))?);
+    dependencies.extend(read_chart_yaml(&chart_dir.join("Chart.lock"))?.dependencies);
 
     let local_dependencies: Vec<String> = dependencies
         .iter()
@@ -165,6 +199,8 @@ fn load_chart(root: &Path, rel_dir: &str) -> Result<(HelmChart, Vec<String>)> {
             name,
             dir: rel_dir.to_string(),
             local_dependencies,
+            chart_name,
+            chart_version,
         },
         remote_repositories,
     ))
@@ -379,6 +415,208 @@ pub fn package_pipeline_args(
         format!("--path={container_output_dir}"),
         "export".into(),
         format!("--path={host_output_dir}"),
+    ]);
+    args
+}
+
+/// Where `paws helm --publish` is publishing to, and what it already knows
+/// about the running index — grouped into one struct so
+/// [`publish_pipeline_prefix`]/[`publish_packages_pipeline_args`]/
+/// [`publish_index_pipeline_args`] don't each carry five near-identical
+/// parameters individually.
+#[derive(Clone, Copy)]
+pub struct PublishTarget<'a> {
+    /// GitHub owner/org the per-chart releases and `index.yaml` publish to.
+    pub owner: &'a str,
+    pub repo: &'a str,
+    /// The real, currently-published `index.yaml` (fetched by the caller —
+    /// see `crates/paws-cli`'s `Commands::Helm` handler), if one exists
+    /// yet. Seeds the running index so already-published chart versions
+    /// keep their real download URLs — see [`publish_pipeline_prefix`].
+    pub existing_index_path: Option<&'a Path>,
+    /// Where each chart's package subdirectory lives inside the container.
+    pub container_packages_dir: &'a str,
+    /// Where the running `index.yaml` lives inside the container.
+    pub container_index_path: &'a str,
+}
+
+/// The shared prefix [`publish_packages_pipeline_args`]/
+/// [`publish_index_pipeline_args`] both build on: builds the Helm builder,
+/// then for every chart (dependency-order, same as
+/// [`lint_pipeline_args`]/[`package_pipeline_args`]) packages it into its
+/// *own* subdirectory under `container_packages_dir` — not the shared flat
+/// directory [`package_pipeline_args`] uses — because each chart's Helm
+/// repo index entry needs its own `--url` (its own GitHub Release download
+/// URL), and `helm repo index <dir> --url <u>` assigns `<u>` to every chart
+/// it finds in `<dir>`. One subdirectory per chart is what lets `helm repo
+/// index` do this correctly without paws having to reimplement Helm's own
+/// index-merging logic (`mbround18/helm-charts`'s own
+/// `tools/release_charts.py` had to, for exactly this reason — it never
+/// considered per-chart directories, so it hand-rolled index-merging in
+/// pure Python instead of shelling out to real Helm tooling).
+///
+/// `helm repo index --merge <container_index_path>` runs once per chart,
+/// threading the same running index file through each call — `--merge`
+/// preserves every existing entry in the given file untouched, so charts
+/// already indexed by an earlier chart's call (or seeded in from
+/// `existing_index_path`, the real currently-published `index.yaml`) keep
+/// their real, already-correct URLs. `--merge` is omitted only for the
+/// very first chart when nothing was seeded (a brand-new chart repo with
+/// no prior publish at all).
+fn publish_pipeline_prefix(
+    project: &HelmProject,
+    source_dir: &str,
+    builder_dir: &str,
+    target: &PublishTarget,
+) -> Vec<String> {
+    let PublishTarget {
+        owner,
+        repo,
+        existing_index_path,
+        container_packages_dir,
+        container_index_path,
+    } = *target;
+
+    let mut args = container_prefix(builder_dir, source_dir);
+    push_remote_repo_setup(&mut args, project);
+    push_exec(&mut args, &["mkdir", "-p", container_packages_dir]);
+
+    // The parent directory of `container_index_path` needs to exist before
+    // the first chart's `cp .../index.yaml <container_index_path>` runs —
+    // caught for real against a live throwaway repo: with no existing index
+    // seeded (a brand-new chart repo's first-ever publish), nothing else in
+    // this chain ever creates it, and `cp` failed with "No such file or
+    // directory".
+    let container_index_dir = Path::new(container_index_path)
+        .parent()
+        .and_then(|p| p.to_str())
+        .filter(|p| !p.is_empty());
+    if let Some(container_index_dir) = container_index_dir {
+        push_exec(&mut args, &["mkdir", "-p", container_index_dir]);
+    }
+
+    // The seed (if any) is mounted at a *separate* path from
+    // `container_index_path`, never written back onto directly — also
+    // caught for real: `with-mounted-file` bind-mounts it, and `cp`
+    // overwriting a bind-mounted path fails with "File exists" (unlike a
+    // plain file `cp` created itself, which overwrites fine). The very
+    // first chart merges from the seed path if one exists; every chart
+    // after that (and the seed-less first chart) merges from
+    // `container_index_path`, an ordinary file by then.
+    let seed_path = existing_index_path.map(|existing_index_path| {
+        let seed_path = format!("{container_index_path}.seed");
+        args.push("with-mounted-file".into());
+        args.push(format!("--path={seed_path}"));
+        args.push(format!("--source={}", existing_index_path.display()));
+        seed_path
+    });
+    let mut merge_from: Option<String> = seed_path;
+
+    for chart in &project.charts {
+        let chart_out_dir = format!("{container_packages_dir}/{}", chart.name);
+        if chart.has_dependencies {
+            push_exec(
+                &mut args,
+                &["helm", "dependency", "build", "--skip-refresh", &chart.dir],
+            );
+        }
+        push_exec(&mut args, &["helm", "lint", &chart.dir]);
+        push_exec(&mut args, &["mkdir", "-p", &chart_out_dir]);
+        push_exec(
+            &mut args,
+            &["helm", "package", &chart.dir, "-d", &chart_out_dir],
+        );
+
+        let download_url = format!(
+            "https://github.com/{owner}/{repo}/releases/download/{}",
+            chart.tag()
+        );
+        if let Some(merge_from) = &merge_from {
+            push_exec(
+                &mut args,
+                &[
+                    "helm",
+                    "repo",
+                    "index",
+                    &chart_out_dir,
+                    "--url",
+                    &download_url,
+                    "--merge",
+                    merge_from,
+                ],
+            );
+        } else {
+            push_exec(
+                &mut args,
+                &[
+                    "helm",
+                    "repo",
+                    "index",
+                    &chart_out_dir,
+                    "--url",
+                    &download_url,
+                ],
+            );
+        }
+        push_exec(
+            &mut args,
+            &[
+                "cp",
+                &format!("{chart_out_dir}/index.yaml"),
+                container_index_path,
+            ],
+        );
+        merge_from = Some(container_index_path.to_string());
+    }
+
+    args
+}
+
+/// Builds the `dagger core <chain>` argument list that runs
+/// [`publish_pipeline_prefix`] and exports every chart's packaged
+/// subdirectory (under `container_packages_dir`) to `host_packages_dir`.
+/// Paired with [`publish_index_pipeline_args`] — `dagger core` chains are
+/// strictly linear (each call consumes the previous one's result), so
+/// exporting two independent things (the packages *and* the index file)
+/// needs two separate chains; both share this identical prefix, so
+/// Dagger's own engine-level content-addressed caching means the second
+/// invocation's already-executed steps replay from cache rather than
+/// re-running (the same caching `paws-tauri`'s builder doc comment already
+/// relies on for its own single-chain case).
+pub fn publish_packages_pipeline_args(
+    project: &HelmProject,
+    source_dir: &str,
+    builder_dir: &str,
+    target: &PublishTarget,
+    host_packages_dir: &str,
+) -> Vec<String> {
+    let mut args = publish_pipeline_prefix(project, source_dir, builder_dir, target);
+    args.extend([
+        "directory".into(),
+        format!("--path={}", target.container_packages_dir),
+        "export".into(),
+        format!("--path={host_packages_dir}"),
+    ]);
+    args
+}
+
+/// Same as [`publish_packages_pipeline_args`], but exports the final merged
+/// `index.yaml` (a single file, so `file`/`export` — mirrors
+/// `paws-release::build_binary`'s tail for the same reason) to
+/// `host_index_path` instead.
+pub fn publish_index_pipeline_args(
+    project: &HelmProject,
+    source_dir: &str,
+    builder_dir: &str,
+    target: &PublishTarget,
+    host_index_path: &str,
+) -> Vec<String> {
+    let mut args = publish_pipeline_prefix(project, source_dir, builder_dir, target);
+    args.extend([
+        "file".into(),
+        format!("--path={}", target.container_index_path),
+        "export".into(),
+        format!("--path={host_index_path}"),
     ]);
     args
 }
@@ -655,5 +893,158 @@ mod tests {
         assert_eq!(args[args.len() - 3], "--path=/out");
         assert_eq!(args[args.len() - 2], "export");
         assert_eq!(args.last(), Some(&"--path=/host/tmp".to_string()));
+    }
+
+    #[test]
+    fn chart_tag_and_archive_file_name_use_chart_yaml_metadata() {
+        let dir = temp_dir("tag-and-archive");
+        write_chart(
+            &dir,
+            "charts/mongo",
+            "apiVersion: v2\nname: mongo\nversion: 0.1.0\n",
+        );
+        let project = detect_project(&dir).unwrap();
+        let chart = &project.charts[0];
+        assert_eq!(chart.tag(), "mongo-0.1.0");
+        assert_eq!(chart.archive_file_name(), "mongo-0.1.0.tgz");
+    }
+
+    #[test]
+    fn publish_pipeline_packages_each_chart_into_its_own_subdirectory() {
+        let dir = temp_dir("publish-args");
+        write_chart(
+            &dir,
+            "charts/a",
+            "apiVersion: v2\nname: a\nversion: 0.1.0\n",
+        );
+        write_chart(
+            &dir,
+            "charts/b",
+            "apiVersion: v2\nname: b\nversion: 0.2.0\n",
+        );
+        let project = detect_project(&dir).unwrap();
+        let target = PublishTarget {
+            owner: "mbround18",
+            repo: "helm-charts",
+            existing_index_path: None,
+            container_packages_dir: "/out",
+            container_index_path: "/idx/index.yaml",
+        };
+        let args = publish_packages_pipeline_args(
+            &project,
+            "/host/src",
+            "/tmp/some-builder-dir",
+            &target,
+            "/host/packages",
+        );
+
+        assert!(args.contains(&"--args=helm,package,charts/a,-d,/out/a".to_string()));
+        assert!(args.contains(&"--args=helm,package,charts/b,-d,/out/b".to_string()));
+        // First chart processed gets no --merge (nothing seeded yet); the
+        // second does, since the first chart's index.yaml was copied into
+        // the running index file by then.
+        assert!(args.contains(
+            &"--args=helm,repo,index,/out/a,--url,https://github.com/mbround18/helm-charts/releases/download/a-0.1.0"
+                .to_string()
+        ));
+        assert!(args.contains(
+            &"--args=helm,repo,index,/out/b,--url,https://github.com/mbround18/helm-charts/releases/download/b-0.2.0,--merge,/idx/index.yaml"
+                .to_string()
+        ));
+        assert_eq!(args[args.len() - 4], "directory");
+        assert_eq!(args[args.len() - 3], "--path=/out");
+        assert_eq!(args.last(), Some(&"--path=/host/packages".to_string()));
+    }
+
+    #[test]
+    fn publish_index_pipeline_seeds_from_an_existing_index_and_exports_the_file() {
+        let dir = temp_dir("publish-index-args");
+        write_chart(
+            &dir,
+            "charts/a",
+            "apiVersion: v2\nname: a\nversion: 0.1.0\n",
+        );
+        let project = detect_project(&dir).unwrap();
+        let existing = dir.join("seed-index.yaml");
+        fs::write(&existing, "apiVersion: v1\nentries: {}\n").unwrap();
+
+        let target = PublishTarget {
+            owner: "mbround18",
+            repo: "helm-charts",
+            existing_index_path: Some(&existing),
+            container_packages_dir: "/out",
+            container_index_path: "/idx/index.yaml",
+        };
+        let args = publish_index_pipeline_args(
+            &project,
+            "/host/src",
+            "/tmp/some-builder-dir",
+            &target,
+            "/host/index.yaml",
+        );
+
+        // The seed mounts at a *separate* path from the running index file
+        // - never written back onto directly, since a bind-mounted file
+        // can't be `cp`-overwritten (caught for real against a live
+        // throwaway repo: "cp: can't create '/idx/index.yaml': File exists").
+        assert!(args.contains(&"with-mounted-file".to_string()));
+        assert!(args.contains(&"--path=/idx/index.yaml.seed".to_string()));
+        assert!(args.contains(&format!("--source={}", existing.display())));
+        // Seeded from the start, so even the first (only) chart gets
+        // --merge, from the seed path specifically.
+        assert!(args.contains(
+            &"--args=helm,repo,index,/out/a,--url,https://github.com/mbround18/helm-charts/releases/download/a-0.1.0,--merge,/idx/index.yaml.seed"
+                .to_string()
+        ));
+        // The running index itself is a fresh `cp` target, not the mount.
+        assert!(args.contains(&"--args=cp,/out/a/index.yaml,/idx/index.yaml".to_string()));
+        assert_eq!(args[args.len() - 4], "file");
+        assert_eq!(args[args.len() - 3], "--path=/idx/index.yaml");
+        assert_eq!(args[args.len() - 2], "export");
+        assert_eq!(args.last(), Some(&"--path=/host/index.yaml".to_string()));
+    }
+
+    #[test]
+    fn publish_pipeline_merges_from_the_running_index_after_the_first_chart() {
+        let dir = temp_dir("publish-args-multi-seeded");
+        write_chart(
+            &dir,
+            "charts/a",
+            "apiVersion: v2\nname: a\nversion: 0.1.0\n",
+        );
+        write_chart(
+            &dir,
+            "charts/b",
+            "apiVersion: v2\nname: b\nversion: 0.2.0\n",
+        );
+        let project = detect_project(&dir).unwrap();
+        let existing = dir.join("seed-index.yaml");
+        fs::write(&existing, "apiVersion: v1\nentries: {}\n").unwrap();
+        let target = PublishTarget {
+            owner: "mbround18",
+            repo: "helm-charts",
+            existing_index_path: Some(&existing),
+            container_packages_dir: "/out",
+            container_index_path: "/idx/index.yaml",
+        };
+        let args = publish_packages_pipeline_args(
+            &project,
+            "/host/src",
+            "/tmp/some-builder-dir",
+            &target,
+            "/host/packages",
+        );
+
+        // First chart merges from the seed; the second merges from the
+        // running index the first chart's `cp` already wrote - not the seed
+        // again, and not without --merge either.
+        assert!(args.contains(
+            &"--args=helm,repo,index,/out/a,--url,https://github.com/mbround18/helm-charts/releases/download/a-0.1.0,--merge,/idx/index.yaml.seed"
+                .to_string()
+        ));
+        assert!(args.contains(
+            &"--args=helm,repo,index,/out/b,--url,https://github.com/mbround18/helm-charts/releases/download/b-0.2.0,--merge,/idx/index.yaml"
+                .to_string()
+        ));
     }
 }

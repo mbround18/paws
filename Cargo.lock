@@ -695,6 +695,7 @@ name = "paws-release"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "paws-dagger",
  "reqwest",
  "serde",

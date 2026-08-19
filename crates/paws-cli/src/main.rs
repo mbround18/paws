@@ -4,7 +4,7 @@ use paws_audit::{RepositorySignals, select_audit_scanners};
 use paws_dagger::{DaggerCall, call};
 use paws_docker::{DockerFactsInput, GithubContext as DockerGithubContext, resolve_docker_facts};
 use paws_provision::{Ecosystem, Installer, provision_with_timing, real_installer};
-use paws_release::{GitHubReleaseClient, archive_name, package_zip};
+use paws_release::{AssetUploadMode, GitHubReleaseClient, archive_name, package_zip};
 use paws_semver::{GitHubGraphQlTagSource, Increment, SemverRequest, compute_new_version};
 
 /// Detects which of the ecosystems `paws-provision` knows about are needed in
@@ -347,6 +347,24 @@ enum Commands {
         /// Host directory packaged `.tgz`s are exported to (only with `--package`).
         #[arg(long, default_value = "tmp")]
         output: String,
+        /// Publish: a per-chart GitHub Release (tag `<chart>-<version>`,
+        /// asset uploaded only if missing) plus a real Helm `index.yaml`
+        /// pushed to `--pages-branch`, so `helm repo add` against this
+        /// repo's GitHub Pages URL works. Does its own packaging
+        /// internally (per-chart, not the flat `--output` directory);
+        /// mutually exclusive with `--package`.
+        #[arg(long)]
+        publish: bool,
+        /// "owner/repo" to publish releases/index.yaml to. Falls back to
+        /// $GITHUB_REPOSITORY. Only used with `--publish`.
+        #[arg(long)]
+        repository: Option<String>,
+        /// Branch `index.yaml` is published to. Only used with `--publish`.
+        #[arg(long, default_value = "gh-pages")]
+        pages_branch: String,
+        /// Path to `index.yaml` on `--pages-branch`. Only used with `--publish`.
+        #[arg(long, default_value = "index.yaml")]
+        index_path: String,
         /// Suppress dagger's live build progress; only print output once
         /// the pipeline finishes (or on failure). Default is streamed live.
         #[arg(long)]
@@ -783,8 +801,18 @@ async fn main() -> anyhow::Result<()> {
             source,
             package,
             output,
+            publish,
+            repository,
+            pages_branch,
+            index_path,
             silent,
         } => {
+            anyhow::ensure!(
+                !(package && publish),
+                "--package and --publish are mutually exclusive - --publish already packages \
+                 each chart internally"
+            );
+
             let dir = std::path::Path::new(&source)
                 .canonicalize()
                 .unwrap_or_else(|_| source.clone().into());
@@ -800,7 +828,107 @@ async fn main() -> anyhow::Result<()> {
             let builder_dir = paws_helm::write_builder_dockerfile()
                 .context("failed to materialize the helm builder Dockerfile")?;
 
-            if package {
+            if publish {
+                let repository = repository
+                    .or_else(|| std::env::var("GITHUB_REPOSITORY").ok())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("--repository is required (or set $GITHUB_REPOSITORY)")
+                    })?;
+                let (owner, repo) = repository.split_once('/').ok_or_else(|| {
+                    anyhow::anyhow!("--repository must be \"owner/repo\", got {repository}")
+                })?;
+                let token = std::env::var("GITHUB_TOKEN")
+                    .or_else(|_| std::env::var("GH_TOKEN"))
+                    .map_err(|_| {
+                        anyhow::anyhow!("GITHUB_TOKEN (or GH_TOKEN) must be set to publish")
+                    })?;
+                let client = GitHubReleaseClient::new(owner.to_string(), repo.to_string(), token);
+
+                let existing = client.get_content(&index_path, &pages_branch).await?;
+                let existing_index_file = if let Some(existing) = &existing {
+                    let path = std::env::temp_dir().join("paws-helm-existing-index.yaml");
+                    tokio::fs::write(&path, &existing.content).await.context(
+                        "failed to stage the existing index.yaml for the publish pipeline",
+                    )?;
+                    println!("helm: seeding from the existing {index_path}@{pages_branch}");
+                    Some(path)
+                } else {
+                    println!(
+                        "helm: no existing {index_path}@{pages_branch} found, publishing fresh"
+                    );
+                    None
+                };
+
+                let publish_target = paws_helm::PublishTarget {
+                    owner,
+                    repo,
+                    existing_index_path: existing_index_file.as_deref(),
+                    container_packages_dir: "/out",
+                    container_index_path: "/idx/index.yaml",
+                };
+
+                let packages_dir = std::env::temp_dir().join("paws-helm-publish-packages");
+                let index_out_dir = std::env::temp_dir().join("paws-helm-publish-index");
+                tokio::fs::create_dir_all(&packages_dir).await?;
+                tokio::fs::create_dir_all(&index_out_dir).await?;
+
+                let packages_args = paws_helm::publish_packages_pipeline_args(
+                    &project,
+                    &dir.to_string_lossy(),
+                    &builder_dir.to_string_lossy(),
+                    &publish_target,
+                    &packages_dir.to_string_lossy(),
+                );
+                run_dagger_core(&packages_args, silent).await?;
+
+                let index_args = paws_helm::publish_index_pipeline_args(
+                    &project,
+                    &dir.to_string_lossy(),
+                    &builder_dir.to_string_lossy(),
+                    &publish_target,
+                    &index_out_dir.join("index.yaml").to_string_lossy(),
+                );
+                run_dagger_core(&index_args, silent).await?;
+
+                for chart in &project.charts {
+                    let tag = chart.tag();
+                    let archive_path = packages_dir
+                        .join(&chart.name)
+                        .join(chart.archive_file_name());
+                    let release_id = client.get_or_create_release(&tag, false).await?;
+                    let uploaded = client
+                        .upload_asset_with(
+                            release_id,
+                            &archive_path,
+                            "application/gzip",
+                            AssetUploadMode::SkipIfExisting,
+                        )
+                        .await?;
+                    println!(
+                        "helm: {} {} ({tag})",
+                        if uploaded {
+                            "published"
+                        } else {
+                            "already published, skipped"
+                        },
+                        chart.archive_file_name()
+                    );
+                }
+
+                let new_index = tokio::fs::read(index_out_dir.join("index.yaml"))
+                    .await
+                    .context("failed to read the generated index.yaml")?;
+                client
+                    .put_content(
+                        &index_path,
+                        &pages_branch,
+                        &new_index,
+                        "Update index.yaml",
+                        existing.as_ref().map(|e| e.sha.as_str()),
+                    )
+                    .await?;
+                println!("helm: published {index_path}@{pages_branch}");
+            } else if package {
                 let output_dir = std::path::Path::new(&output);
                 std::fs::create_dir_all(output_dir)
                     .context("failed to create the Helm package output directory")?;

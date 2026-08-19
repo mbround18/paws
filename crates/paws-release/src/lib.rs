@@ -514,14 +514,53 @@ impl GitHubReleaseClient {
 
     /// Uploads `file_path` as a release asset, replacing any existing asset
     /// with the same name first (mirrors `gh release upload --clobber`).
+    /// Thin wrapper over [`upload_asset_with`](Self::upload_asset_with) —
+    /// kept as the stable public entry point `paws release` already calls.
     pub async fn upload_asset(&self, release_id: u64, file_path: &Path) -> Result<()> {
+        self.upload_asset_with(
+            release_id,
+            file_path,
+            "application/zip",
+            AssetUploadMode::Clobber,
+        )
+        .await
+        .map(|_uploaded| ())
+    }
+
+    /// Same as [`upload_asset`](Self::upload_asset), but lets the caller
+    /// pick the upload `Content-Type` and whether a same-named existing
+    /// asset gets replaced ([`AssetUploadMode::Clobber`], `paws release`'s
+    /// binaries — a re-run of the same tag should replace them) or left
+    /// alone ([`AssetUploadMode::SkipIfExisting`], `paws helm --publish`'s
+    /// chart packages — a previously-published version must never change
+    /// underneath its already-recorded `index.yaml` digest). Returns
+    /// whether it actually uploaded (`false` under `SkipIfExisting` means
+    /// "already there, left as-is").
+    pub async fn upload_asset_with(
+        &self,
+        release_id: u64,
+        file_path: &Path,
+        content_type: &str,
+        mode: AssetUploadMode,
+    ) -> Result<bool> {
         let file_name = file_path
             .file_name()
             .and_then(|n| n.to_str())
             .context("archive path has no file name")?
             .to_string();
 
-        self.delete_existing_asset(release_id, &file_name).await?;
+        if let Some(asset_id) = self.find_existing_asset_id(release_id, &file_name).await? {
+            match mode {
+                AssetUploadMode::SkipIfExisting => return Ok(false),
+                AssetUploadMode::Clobber => {
+                    let delete_url = format!("{}/releases/assets/{asset_id}", self.api_base());
+                    self.auth_headers(self.client.delete(&delete_url))
+                        .send()
+                        .await
+                        .context("failed to delete existing asset")?;
+                }
+            }
+        }
 
         let bytes = tokio::fs::read(file_path)
             .await
@@ -533,7 +572,7 @@ impl GitHubReleaseClient {
 
         let response = self
             .auth_headers(self.client.post(&upload_url))
-            .header("Content-Type", "application/zip")
+            .header("Content-Type", content_type)
             .body(bytes)
             .send()
             .await
@@ -544,10 +583,18 @@ impl GitHubReleaseClient {
             let text = response.text().await.unwrap_or_default();
             anyhow::bail!("failed to upload asset {file_name}: {status}: {text}");
         }
-        Ok(())
+        Ok(true)
     }
 
-    async fn delete_existing_asset(&self, release_id: u64, file_name: &str) -> Result<()> {
+    /// Looks up an existing asset named `file_name` on `release_id`,
+    /// returning its id — best-effort: a failure to even list assets is
+    /// treated as "none found" rather than erroring, since the upload
+    /// itself will surface a clearer error if that turns out to matter.
+    async fn find_existing_asset_id(
+        &self,
+        release_id: u64,
+        file_name: &str,
+    ) -> Result<Option<u64>> {
         let list_url = format!("{}/releases/{release_id}/assets", self.api_base());
         let response = self
             .auth_headers(self.client.get(&list_url))
@@ -555,26 +602,119 @@ impl GitHubReleaseClient {
             .await
             .context("failed to list release assets")?;
         if !response.status().is_success() {
-            return Ok(()); // best-effort; the upload itself will surface a clearer error if this matters
+            return Ok(None);
         }
         let assets: Vec<serde_json::Value> = response.json().await.unwrap_or_default();
-        let Some(existing) = assets
+        Ok(assets
             .iter()
             .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(file_name))
-        else {
-            return Ok(());
-        };
-        let Some(asset_id) = existing.get("id").and_then(|v| v.as_u64()) else {
-            return Ok(());
-        };
+            .and_then(|a| a.get("id"))
+            .and_then(|v| v.as_u64()))
+    }
 
-        let delete_url = format!("{}/releases/assets/{asset_id}", self.api_base());
-        self.auth_headers(self.client.delete(&delete_url))
+    /// Fetches `path` at `git_ref` via the Contents API — decoded file
+    /// bytes plus the blob `sha` a follow-up [`put_content`](Self::put_content)
+    /// needs to update it in place. `None` on a 404 (no such file at that
+    /// ref yet — e.g. a chart repo's first-ever publish, before
+    /// `index.yaml` exists on the pages branch at all).
+    pub async fn get_content(&self, path: &str, git_ref: &str) -> Result<Option<ContentFile>> {
+        use base64::Engine;
+
+        let url = format!("{}/contents/{path}?ref={git_ref}", self.api_base());
+        let response = self
+            .auth_headers(self.client.get(&url))
             .send()
             .await
-            .context("failed to delete existing asset")?;
+            .context("failed to fetch file content")?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "unexpected status fetching {path}@{git_ref}: {}",
+                response.status()
+            );
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("failed to parse file content response")?;
+        let sha = body
+            .get("sha")
+            .and_then(|v| v.as_str())
+            .context("file content response missing sha")?
+            .to_string();
+        // The Contents API's `content` field is base64 with embedded
+        // newlines (wrapped for readability) - strip them before decoding.
+        let encoded: String = body
+            .get("content")
+            .and_then(|v| v.as_str())
+            .context("file content response missing content")?
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let content = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .context("failed to decode file content")?;
+        Ok(Some(ContentFile { content, sha }))
+    }
+
+    /// Creates or updates `path` on `branch` via the Contents API. Pass the
+    /// `sha` from a prior [`get_content`](Self::get_content) call to update
+    /// an existing file in place; omit it (`None`) only when the file is
+    /// known not to exist yet — GitHub rejects a create-with-sha or an
+    /// update-without-sha with a 409/422, so getting this wrong surfaces
+    /// immediately rather than silently corrupting anything.
+    pub async fn put_content(
+        &self,
+        path: &str,
+        branch: &str,
+        content: &[u8],
+        message: &str,
+        sha: Option<&str>,
+    ) -> Result<()> {
+        use base64::Engine;
+
+        let url = format!("{}/contents/{path}", self.api_base());
+        let mut body = serde_json::json!({
+            "message": message,
+            "content": base64::engine::general_purpose::STANDARD.encode(content),
+            "branch": branch,
+        });
+        if let Some(sha) = sha {
+            body["sha"] = serde_json::Value::String(sha.to_string());
+        }
+
+        let response = self
+            .auth_headers(self.client.put(&url))
+            .json(&body)
+            .send()
+            .await
+            .context("failed to publish file content")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("failed to publish {path} to {branch}: {status}: {text}");
+        }
         Ok(())
     }
+}
+
+/// A file fetched via [`GitHubReleaseClient::get_content`].
+pub struct ContentFile {
+    pub content: Vec<u8>,
+    pub sha: String,
+}
+
+/// Whether [`GitHubReleaseClient::upload_asset_with`] replaces a same-named
+/// existing asset or leaves it alone — see that method's doc comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetUploadMode {
+    Clobber,
+    SkipIfExisting,
 }
 
 #[cfg(test)]

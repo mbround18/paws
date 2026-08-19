@@ -10,4 +10,5 @@ tokio.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+base64.workspace = true
 paws-dagger = { path = "../paws-dagger" }
