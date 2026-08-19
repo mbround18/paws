@@ -60,15 +60,24 @@ trap 'rm -rf "$tmp_dir"' EXIT
 version="${PAWS_VERSION:-}"
 if [ -z "$version" ]; then
   # `/releases/latest` skips prereleases, and paws is pre-1.0 (every
-  # release so far is one) - list and take the newest instead, same as
-  # `actions/paws-up`'s `gh release list --limit 1` does in CI. Fetched to
-  # a temp file first, not piped straight into `grep -m1` - grep exiting
-  # after its first match closes the pipe while curl is still writing the
-  # rest of the (much larger) response body, which curl reports as a
+  # release so far is one) - and `/releases` itself (list every release)
+  # turned out, verified directly and repeatably, to 504 specifically for
+  # this repo (not GitHub API generally: same call against a different
+  # repo, and paws's own `/tags`/`/git/refs/tags` endpoints, all worked
+  # fine) - some backend issue with this repo's release-listing response
+  # specifically, not this script or a network problem. `/tags` (confirmed
+  # newest-first, same order `gh release list --limit 1` relies on) gets
+  # the same answer via a working endpoint instead. `--retry` covers
+  # ordinary transient network flakiness any install script should expect.
+  # Fetched to a temp file first, not piped straight into `grep -m1` -
+  # grep exiting after its first match closes the pipe while curl is
+  # still writing the rest of the response body, which curl reports as a
   # spurious "Failure writing output to destination" even though the
   # version was already resolved correctly by then.
-  curl -fsSL https://api.github.com/repos/mbround18/paws/releases -o "$tmp_dir/releases.json"
-  version="$(grep -m1 '"tag_name"' "$tmp_dir/releases.json" | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+  curl -fsSL --retry 3 --retry-delay 2 \
+    "https://api.github.com/repos/mbround18/paws/tags?per_page=1" \
+    -o "$tmp_dir/tags.json"
+  version="$(grep -m1 '"name"' "$tmp_dir/tags.json" | sed -E 's/.*"name": *"([^"]+)".*/\1/')"
   if [ -z "$version" ]; then
     echo "Could not resolve the latest paws release" >&2
     exit 1
