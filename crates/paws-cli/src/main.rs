@@ -24,6 +24,31 @@ fn detect_needed_ecosystems() -> Vec<Ecosystem> {
     ecosystems
 }
 
+/// Reads a pipeline report's pass/fail signal. Most `gh-reusable` Dagger
+/// functions return a top-level `success: bool`, but `dockerRelease`
+/// (read directly from `packages/dagger-module/src/index.ts`) doesn't have
+/// that field at all — it reports `decision: "publish"|"skip"|"failed"` and
+/// `outcome: "success"|"failure"` instead. Trusting only `success` meant a
+/// real publish failure (verified for real: a `dockerRelease` call that hit
+/// an error building/publishing a leg) parsed as `unwrap_or(true)` and
+/// exited 0 anyway — the calling GitHub Actions step, and the job around
+/// it, reported green while the image never actually published. `decision`
+/// is checked first since it's `dockerRelease`'s specific "did the publish
+/// itself fail" field; `outcome`/`success` are the general-purpose fallbacks
+/// every other function already uses.
+fn pipeline_report_succeeded(parsed: &serde_json::Value) -> bool {
+    if let Some(decision) = parsed.get("decision").and_then(|v| v.as_str()) {
+        return decision != "failed";
+    }
+    if let Some(outcome) = parsed.get("outcome").and_then(|v| v.as_str()) {
+        return outcome != "failure";
+    }
+    parsed
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+}
+
 /// Calls a `gh-reusable` Dagger pipeline function, prints its human-readable
 /// `markdown` report field (falling back to the raw output if the response
 /// isn't the expected `{success, markdown, ...}` shape), and returns whether
@@ -45,10 +70,7 @@ async fn call_pipeline_report(function: &str, args: Vec<String>) -> anyhow::Resu
         println!("{output}");
     }
 
-    Ok(parsed
-        .get("success")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true))
+    Ok(pipeline_report_succeeded(&parsed))
 }
 
 /// Runs a `dagger core <args>` pipeline, streaming its live progress to the
@@ -815,11 +837,42 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use clap::CommandFactory;
 
-    use super::{Cli, docker_credential_args};
+    use super::{Cli, docker_credential_args, pipeline_report_succeeded};
 
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn pipeline_report_succeeded_reads_dockerrelease_decision_first() {
+        assert!(!pipeline_report_succeeded(
+            &serde_json::json!({"decision": "failed", "outcome": "failure"})
+        ));
+        assert!(pipeline_report_succeeded(
+            &serde_json::json!({"decision": "publish", "outcome": "success"})
+        ));
+        assert!(pipeline_report_succeeded(
+            &serde_json::json!({"decision": "skip", "outcome": "success"})
+        ));
+    }
+
+    #[test]
+    fn pipeline_report_succeeded_falls_back_to_outcome_then_success() {
+        assert!(!pipeline_report_succeeded(
+            &serde_json::json!({"outcome": "failure"})
+        ));
+        assert!(pipeline_report_succeeded(
+            &serde_json::json!({"outcome": "success"})
+        ));
+        assert!(!pipeline_report_succeeded(
+            &serde_json::json!({"success": false})
+        ));
+        // No recognized shape at all (e.g. `audit`'s `{markdown, report, ...}`) -
+        // stays permissive, matching every caller's prior behavior.
+        assert!(pipeline_report_succeeded(
+            &serde_json::json!({"markdown": "ok"})
+        ));
     }
 
     #[test]
