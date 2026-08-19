@@ -29,6 +29,7 @@ beyond the status/note column.
 | Repo | Status | Notes |
 |---|---|---|
 | [ark-manager-web](https://github.com/mbround18/ark-manager-web) | 🟡 | `rust.yml`/`docker.yml`/`enforce-labels.yml` on `paws` (merged). `release.yml` still runs `cargo-make`/`auto shipit` directly — `paws release --local-build` wiring not started ([`docs/DEVELOPMENT.md`](./DEVELOPMENT.md) tracks this). |
+| [redirect](https://github.com/mbround18/redirect) | 🚧 | `release.yml` → `paws semver`/`paws docker`/`paws semver --push`, matching the `steamcmd-bases` shape. Also newly publishes to ghcr.io (PR [#132](https://github.com/mbround18/redirect/pull/132), open). |
 | [helm-charts](https://github.com/mbround18/helm-charts) | ✅ | `paws helm`/`paws helm --package`/`paws helm --publish` cover lint, package, and the real `gh-pages` `index.yaml` publish (PR [#170](https://github.com/mbround18/helm-charts/pull/170), merged). Python test suite and the HTML catalog page are explicitly out of scope. |
 | [oled-wallpaper](https://github.com/mbround18/oled-wallpaper) | ✅ | Flatpak app CI via `paws` (`paws-flatpak`). |
 | [steamcmd-bases](https://github.com/mbround18/steamcmd-bases) | ✅ | `deployer.yaml`/`tagger.yaml` → `paws docker`/`paws semver` (PR [#15](https://github.com/mbround18/steamcmd-bases/pull/15)). Two real post-merge bugs caught and fixed live: missing `GITHUB_TOKEN` in the `tagger` step (PR [#16](https://github.com/mbround18/steamcmd-bases/pull/16)), and `paws docker` never getting an explicit `--version` so it silently short-sha-tagged real releases (PR [#17](https://github.com/mbround18/steamcmd-bases/pull/17)). Verified end to end: a real `main` push published `mbround18/steamcmd:base-v0.0.5` to docker.io/ghcr.io and tagged `0.0.5`. `test-compatibility.yml` (not `gh-reusable`-based) deliberately left untouched. |
@@ -49,7 +50,6 @@ needed for any of these except `game-server-management`.
 | [backup-docker](https://github.com/mbround18/backup-docker) | `docker-release.yaml`. |
 | [foundryvtt-docker](https://github.com/mbround18/foundryvtt-docker) | `release.yml`. |
 | [hytale](https://github.com/mbround18/hytale) | `docker-release.yml`. |
-| [redirect](https://github.com/mbround18/redirect) | `release.yml`. |
 | [game-server-management](https://github.com/mbround18/game-server-management) | `docker-release.yaml` + `doc-quality.yml`/`docs.yml`/`pr-pipelines.yaml`. Also needs a `paws publish` (crates.io/npm) that doesn't exist yet — see [`docs/ROADMAP.md`](./ROADMAP.md). |
 
 ## Custom/other CI — never on `gh-reusable`, no current plan
