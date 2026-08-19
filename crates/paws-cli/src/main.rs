@@ -234,6 +234,17 @@ enum Commands {
         /// Whether this is a PR build (produces a `-pr.<sha>` prerelease).
         #[arg(long)]
         pr: bool,
+        /// Create and push the computed version as an annotated git tag
+        /// (GitHub's git/tags + git/refs APIs — no local git identity or
+        /// worktree needed). Replaces a hand-rolled `git tag`/`git push`
+        /// step in the calling workflow.
+        #[arg(long)]
+        push: bool,
+        /// Tagger identity attributed to the pushed tag.
+        #[arg(long, default_value = "paws-bot")]
+        tagger_name: String,
+        #[arg(long, default_value = "paws-bot@users.noreply.github.com")]
+        tagger_email: String,
     },
     /// Install the `dagger` CLI (most other subcommands need it on PATH).
     Init,
@@ -708,7 +719,12 @@ async fn main() -> anyhow::Result<()> {
             labels,
             branch,
             pr,
+            push,
+            tagger_name,
+            tagger_email,
         } => {
+            let ctx = paws_environment::CiContext::detect()
+                .context("paws semver needs a supported CI provider's env vars")?;
             let request = SemverRequest {
                 base,
                 prefix,
@@ -718,20 +734,33 @@ async fn main() -> anyhow::Result<()> {
                 patch_label,
                 labels,
                 branch_name: branch,
-                sha: std::env::var("GITHUB_SHA").unwrap_or_default(),
+                sha: ctx.sha.clone(),
                 is_pr: pr,
-                github_ref: std::env::var("GITHUB_REF").ok(),
+                github_ref: ctx.git_ref.clone(),
             };
-            let owner = std::env::var("GITHUB_REPOSITORY_OWNER").unwrap_or_default();
-            let repo = std::env::var("GITHUB_REPOSITORY")
-                .ok()
-                .and_then(|r| r.split('/').next_back().map(str::to_string))
-                .unwrap_or_default();
-            let token = std::env::var("GITHUB_TOKEN").unwrap_or_default();
-            let tag_source = GitHubGraphQlTagSource { owner, repo, token };
+            let tag_source = GitHubGraphQlTagSource {
+                owner: ctx.owner.clone(),
+                repo: ctx.repo.clone(),
+                token: ctx.token.clone(),
+            };
 
             let version = compute_new_version(&tag_source, &request).await?;
             println!("{version}");
+
+            if push {
+                anyhow::ensure!(
+                    !ctx.sha.is_empty(),
+                    "paws semver --push needs a commit sha (GITHUB_SHA was empty)"
+                );
+                let author = paws_environment::TagAuthor {
+                    name: &tagger_name,
+                    email: &tagger_email,
+                };
+                paws_environment::push_tag(&ctx, &version, &author)
+                    .await
+                    .with_context(|| format!("failed to push tag {version}"))?;
+                eprintln!("pushed tag {version}");
+            }
         }
         Commands::Init => {
             let install_dir = paws_dagger::install_cli()

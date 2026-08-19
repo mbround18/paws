@@ -22,6 +22,7 @@ paws-helm = { path = "../paws-helm" }
 paws-provision = { path = "../paws-provision" }
 paws-release = { path = "../paws-release" }
 paws-semver = { path = "../paws-semver" }
+paws-environment = { path = "../paws-environment" }
 paws-tauri = { path = "../paws-tauri" }
 clap.workspace = true
 anyhow.workspace = true

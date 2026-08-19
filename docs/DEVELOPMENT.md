@@ -39,6 +39,16 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   captured-then-printed-once behavior for callers that want quiet logs.
 - `crates/paws-semver` — native Rust port of `actions/semver` (no `dagger` CLI needed).
   The pilot crate for eventually evaluating `dagger-sdk`.
+- `crates/paws-environment` (new, 2026-08-19) — normalizes CI-provider context (owner/repo,
+  commit sha, ref, token) behind one `CiContext` type instead of subcommands hand-reading
+  `GITHUB_*` env vars at each call site. GitHub Actions is the only implemented provider
+  (`CiContext::detect`); it's shaped so a GitLab CI provider can be added later as another
+  branch without touching callers. Also hosts `push_tag` — creates an annotated git tag (via
+  GitHub's `git/tags` + `git/refs` APIs, no local git identity/worktree needed) and pushes it,
+  attributed to a `paws-bot` identity by default. First (only) consumer: `paws semver --push`,
+  which replaces a hand-rolled `git tag`/`git push` CI step. Verified for real against the
+  `git/tags`/`git/refs` REST endpoints on a throwaway repo — same request/response shape the
+  Rust code sends/expects, tag created and cleaned up.
 - `crates/paws-audit` — native Rust port of the audit/compliance aggregation logic
   (language detection, scanner selection, finding normalization/aggregation). Running the
   actual `semgrep`/`gitleaks` containers is native too now (2026-08-19,

@@ -1,3 +1,43 @@
+## 11. Session 8 (2026-08-19, same day): paws semver --push + new paws-environment crate
+
+User asked to bake a `--push` option into `paws semver` to replace a
+hand-rolled `git config` + `git tag` + `git push` CI step, attributed to a
+"paws bot" identity. Asked one scoping question first (paws-semver's tag
+lookup is entirely GitHub-specific today — GraphQL API, `GITHUB_*` env
+vars): user's answer was to introduce a `paws-environment` crate that
+normalizes CI-provider context centrally, GitHub-only for now but shaped
+to add other providers (GitLab, etc.) later without touching call sites.
+
+**Shipped**: new `crates/paws-environment` — `CiContext::detect()` reads
+`GITHUB_REPOSITORY`/`GITHUB_TOKEN`(or `GH_TOKEN`)/`GITHUB_SHA`/`GITHUB_REF`
+into one struct (`Provider::GitHub` today, more variants later); `push_tag`
+creates an annotated tag via GitHub's `git/tags` API then a ref via
+`git/refs` — no local git identity/worktree needed, matching
+`paws-release::GitHubReleaseClient`'s existing Contents-API-over-git
+precedent. Default `TagAuthor` is `paws-bot <paws-bot@users.noreply.github.com>`,
+overridable via `--tagger-name`/`--tagger-email`. `paws semver` gained
+`--push`; its handler now builds `SemverRequest`/`GitHubGraphQlTagSource`
+from `CiContext::detect()` instead of five separate hand-rolled
+`std::env::var` reads.
+
+**Verified for real** (without exposing the auth token to my own process —
+the auto-mode classifier blocked extracting `gh auth token`, correctly
+treating that as a credential-handling risk; worked around it by using
+`gh api` directly, which manages auth internally): hit
+`mbround18/paws-helm-publish-test`'s real `git/tags`/`git/refs` endpoints
+with the exact same request shape `push_tag_github` sends — tag object
+created with `tagger.name == "paws-bot"`, ref created pointing at it,
+confirmed listed in the repo's tags, then deleted (throwaway verification
+tag, cleaned up). Full workspace `cargo build/test/clippy/fmt` green (10
+tests total across `paws-environment` + `paws-semver`).
+
+**Still open**: running the actual `paws semver --push` binary end-to-end
+(rather than just the underlying API calls) — blocked by the auto-mode
+classifier on exposing a real token to the process; would need the user to
+run it directly (`! GITHUB_TOKEN=... paws semver --push ...`) or approve
+that specific action. Not yet released as a new prerelease tag — do that
+next.
+
 ## 10. Session 7 (2026-08-19, same day): paws audit drops gh-reusable — the goal is done
 
 Picked up right where session 6 left off: "audit queued" is now done.

@@ -29,7 +29,7 @@ provider-specific scripting.
 | --- | --- |
 | `paws init` | Install the `dagger` CLI, which most other subcommands need on `PATH` |
 | `paws ci` | Build, lint, and test a Node, Rust, Python, Tauri, or Flatpak project |
-| `paws semver` | Compute the next version from PR labels, branch name, or an explicit bump |
+| `paws semver` | Compute the next version from PR labels, branch name, or an explicit bump; `--push` tags and pushes it |
 | `paws docker` | Build/tag/publish a container image to docker.io, ghcr.io, and (natively) any other registry |
 | `paws audit` | Run a security/compliance scanner suite and summarize the findings |
 | `paws provision` | Install multiple toolchains (Rust, Node, Python, ...) concurrently, not one at a time |
@@ -114,6 +114,12 @@ for you unless `install-dagger: false` is set.
 # Compute the next version — works fully offline, no dagger needed
 paws semver --base v1.0.0 --prefix v --branch main
 # -> v1.0.1
+
+# Compute it AND push it as an annotated tag (attributed to "paws-bot" by
+# default), replacing a hand-rolled `git tag && git push` CI step. Needs
+# $GITHUB_TOKEN/$GH_TOKEN + $GITHUB_REPOSITORY/$GITHUB_SHA (already set in
+# GitHub Actions) — no local git identity or worktree required.
+paws semver --branch main --push
 
 # Build and test a project
 paws ci --toolchain rust

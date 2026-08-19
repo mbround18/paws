@@ -4,6 +4,7 @@ members = [
     "crates/paws-cli",
     "crates/paws-core",
     "crates/paws-dagger",
+    "crates/paws-environment",
     "crates/paws-provision",
     "crates/paws-semver",
     "crates/paws-audit",
