@@ -1,0 +1,28 @@
+[package]
+name = "paws-mcp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+paws-cli-core = { path = "../paws-cli-core" }
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+gag.workspace = true
+
+[dev-dependencies]
+# Adds the client-side pieces (`ClientHandler`, `list_tools`/`call_tool`) on
+# top of the workspace `rmcp` dependency's `server`/`transport-io`/`macros`
+# features, purely for driving the server over an in-process transport in
+# tests — production code never needs an MCP client.
+rmcp = { version = "3.1", features = ["client"] }
+# tokio::sync::Mutex (not in the workspace `tokio` dependency's feature
+# list) to serialize the two `capture_output` tests that redirect the
+# process-wide stdout/stderr fds — an async-aware mutex is safe to hold
+# across an `.await`, unlike `std::sync::Mutex` (which clippy's
+# `await_holding_lock` correctly rejects here).
+tokio = { version = "1", features = ["sync"] }

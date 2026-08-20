@@ -12,7 +12,7 @@ use std::pin::Pin;
 use anyhow::{Context, Result};
 
 /// A semver increment step. Mirrors `increment.js`'s three valid increment strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub enum Increment {
     Major,
     Minor,

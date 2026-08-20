@@ -1,0 +1,36 @@
+[package]
+name = "paws-cli-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "paws_cli_core"
+path = "src/lib.rs"
+
+[dependencies]
+paws-audit = { path = "../paws-audit" }
+paws-core = { path = "../paws-core" }
+paws-docker = { path = "../paws-docker" }
+paws-docs = { path = "../paws-docs" }
+paws-dagger = { path = "../paws-dagger" }
+paws-node = { path = "../paws-node" }
+paws-python = { path = "../paws-python" }
+paws-rust = { path = "../paws-rust" }
+paws-flatpak = { path = "../paws-flatpak" }
+paws-helm = { path = "../paws-helm" }
+paws-provision = { path = "../paws-provision" }
+paws-release = { path = "../paws-release" }
+paws-semver = { path = "../paws-semver" }
+paws-environment = { path = "../paws-environment" }
+paws-tauri = { path = "../paws-tauri" }
+clap.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+# Not in [workspace.dependencies] — matches how paws-helm/paws-docker each
+# declare it directly rather than centralizing a dependency only three
+# crates need.
+serde_yaml = "0.9"

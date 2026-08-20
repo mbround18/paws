@@ -84,3 +84,35 @@ jobs:
       - name: paws ci --toolchain python (examples/python-fixture)
         working-directory: examples/python-fixture
         run: ../../target/debug/paws ci --toolchain python
+
+  # Regenerates llms.txt (docs/ROADMAP.md's `paws llms generate`) and
+  # commits it back to main via the Contents API — the same
+  # get_content/put_content pattern `paws helm --publish` already uses for
+  # index.yaml, so no local git identity/worktree is needed here either.
+  # Gated to pushes to main (a PR merge is itself a push event, so this
+  # covers "every push / PR merge" with one trigger); `paws llms generate
+  # --publish` skips the commit itself when the content is unchanged, so
+  # this can't retrigger itself indefinitely.
+  llms:
+    name: regenerate llms.txt
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry/build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build paws
+        run: cargo build -p paws-cli
+
+      - name: paws llms generate --publish
+        run: ./target/debug/paws llms generate --publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

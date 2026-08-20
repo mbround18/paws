@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 semver.workspace = true
 reqwest.workspace = true
+schemars.workspace = true

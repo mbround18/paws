@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/paws-cli",
+    "crates/paws-cli-core",
     "crates/paws-core",
     "crates/paws-dagger",
     "crates/paws-environment",
@@ -17,6 +18,7 @@ members = [
     "crates/paws-rust",
     "crates/paws-flatpak",
     "crates/paws-helm",
+    "crates/paws-mcp",
 ]
 
 [workspace.package]
@@ -33,3 +35,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "ti
 semver = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 base64 = "0.22"
+schemars = "1"
+rmcp = { version = "3.1", features = ["server", "transport-io", "macros"] }
+gag = "1"

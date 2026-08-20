@@ -14,8 +14,18 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
 
 ## Layout
 
-- `crates/paws-cli` — the `paws` binary. `clap`-based subcommands (`ci`, `docker`, `semver`,
-  `audit`, `docs`, ...) are the narrative/user-facing layer.
+- `crates/paws-cli` — thin binary crate: parses `Cli` and dispatches to `paws-cli-core`, except
+  `mcp serve` which it dispatches to `paws-mcp` directly (kept out of `paws-cli-core` to avoid a
+  build-graph cycle, since `paws-mcp` itself depends on `paws-cli-core`).
+- `crates/paws-cli-core` — the actual `clap`-based subcommand definitions (`ci`, `docker`, `semver`,
+  `audit`, `docs`, `mcp`, `llms`, `workflow`, ...) and their `run_*` implementations; the
+  narrative/user-facing layer, split out of the binary so `paws-mcp` can call the same functions
+  directly instead of shelling out to the `paws` binary. Also owns `action_metadata.rs` (GitHub
+  Actions manifests embedded at compile time via `include_str!`, so they're readable even when
+  `paws` runs inside a consumer repo, not paws's own checkout).
+- `crates/paws-mcp` — MCP server (stdio transport) exposing every `paws-cli-core` subcommand
+  (including `actions`, the GitHub Actions metadata lookup) as an MCP tool. See `docs/ROADMAP.md`'s
+  "MCP + llms.txt" and "CI/CD onboarding for consumer repos" sections.
 - `crates/paws-core` — shared contract types (defaults, pipeline config shapes).
 - `crates/paws-dagger` — wraps the `dagger` CLI. Deliberately **not** built on the
   `dagger-sdk` Rust crate yet — Dagger's own README marks that SDK experimental and

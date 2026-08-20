@@ -9,22 +9,8 @@ name = "paws"
 path = "src/main.rs"
 
 [dependencies]
-paws-audit = { path = "../paws-audit" }
-paws-core = { path = "../paws-core" }
-paws-docker = { path = "../paws-docker" }
-paws-docs = { path = "../paws-docs" }
-paws-dagger = { path = "../paws-dagger" }
-paws-node = { path = "../paws-node" }
-paws-python = { path = "../paws-python" }
-paws-rust = { path = "../paws-rust" }
-paws-flatpak = { path = "../paws-flatpak" }
-paws-helm = { path = "../paws-helm" }
-paws-provision = { path = "../paws-provision" }
-paws-release = { path = "../paws-release" }
-paws-semver = { path = "../paws-semver" }
-paws-environment = { path = "../paws-environment" }
-paws-tauri = { path = "../paws-tauri" }
+paws-cli-core = { path = "../paws-cli-core" }
+paws-mcp = { path = "../paws-mcp" }
 clap.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
-serde_json.workspace = true

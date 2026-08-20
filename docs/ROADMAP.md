@@ -233,7 +233,7 @@ Roughly, in order:
    (`crates/paws-provision/src/lib.rs`), following the existing `install_rust`/`install_node`/
    `install_python` pattern (shell to the real toolchain installer, don't reimplement it).
 3. **CI execution** — wire a new `--toolchain <x>` value in `paws ci`
-   (`crates/paws-cli/src/main.rs`), either against a `gh-reusable` function that already exists
+   (`crates/paws-cli-core/src/lib.rs`), either against a `gh-reusable` function that already exists
    for it (check `packages/dagger-module/src/index.ts` first — several of the ecosystems above
    already have a `setupX`/`xBuildAndTest` precedent there) or a new native crate, following
    `paws-semver`'s/`paws-audit`'s/`paws-docker`'s precedent of porting real logic rather than
@@ -244,3 +244,51 @@ Roughly, in order:
 None of this needs a new builder image under `./builders/*` unless the stack also needs
 cross-compilation support for _`paws` itself_ to target — that's a separate concern from `paws`
 being able to build _other projects_ written in that language.
+
+## MCP + llms.txt
+
+`paws mcp setup` writes/merges an MCP client config (`.mcp.json` for Claude Code by default, or
+`claude_desktop_config.json` via `--client claude-desktop`) pointing at `paws mcp serve`.
+`paws mcp serve` runs an MCP server (stdio transport, `crates/paws-mcp`) exposing every `paws`
+subcommand as an MCP tool — each tool calls the same `run_*` function `paws`'s own CLI dispatch
+calls (`crates/paws-cli-core`), not a subprocess of `paws` itself, so an MCP client gets identical
+behavior to the CLI with zero proxy overhead. `paws llms generate` renders `llms.txt` (the
+<https://llmstxt.org> convention) directly from the CLI's own `clap::Command` metadata, so it can't
+drift from real `--help` output; `--publish` commits it to GitHub via the Contents API
+(`GitHubReleaseClient::get_content`/`put_content`, the same mechanism `paws helm --publish` uses
+for `index.yaml`). CI regenerates and publishes it automatically on every push to `main`
+(`.github/workflows/ci.yaml`'s `llms` job) — a PR merge is itself a push event, so this covers both
+without a separate trigger.
+
+`llms.txt` also documents paws's GitHub Actions (today just `actions/paws-up`) in a `## GitHub
+Actions` section, and the `actions` MCP tool returns the same metadata as JSON — so an agent
+working inside a *consumer* repo (not paws's own checkout) can discover `paws-up`'s inputs/outputs
+without leaving the MCP session. This works from any working directory because the action's YAML is
+embedded into the `paws` binary at compile time (`crates/paws-cli-core/src/action_metadata.rs`,
+`include_str!`) rather than read from disk at runtime — a runtime path relative to cwd would find
+nothing once `paws` is running inside someone else's repo.
+
+## CI/CD onboarding for consumer repos (`paws workflow generate`)
+
+`paws workflow generate` scaffolds a starter GitHub Actions workflow (default
+`.github/workflows/paws.yml`) for a repo that wants to adopt `paws`, run from *inside that repo* —
+distinct from `paws`'s own `.github/workflows/ci.yaml`. It reuses `collect_repository_signals()`
+(the same detection `paws audit` runs) to decide which `paws ci --toolchain <x>` steps to emit
+(rust/node/python), plus a `paws docker` step if a Dockerfile/compose file is present and a `paws
+helm` step if `paws_helm::detect_project` finds a chart. The emitted workflow always starts with
+`actions/checkout@v7` + `mbround18/paws/actions/paws-up@main`. The Docker step is deliberately
+build-only — it never guesses at `--push`/registry credentials, since the generator has no way to
+know what registry secrets (if any) the target repo has configured; the generated file leaves a
+comment telling the user how to turn on publishing themselves. If nothing is detected at all
+(no recognizable Rust/Node/Python/Docker/Helm markers), it prints a message and writes nothing
+rather than emitting an empty/useless workflow.
+
+**Multi-origin readiness**: the command takes `--provider` (default `"github"`), matched explicitly
+in `run_workflow_generate` — anything else fails loudly naming `paws_environment::Provider` (the
+existing GitHub-only-today CI-context enum, see `crates/paws-environment/src/lib.rs`) as the
+extension point. Deliberately *not* a new trait/abstraction: `Provider` already exists for exactly
+this generalization, and until a second origin (e.g. GitLab) has a real implementation to pattern
+the shape after, inventing one now would just be speculative structure. Adding a second origin
+later means: a `Provider::GitLab` (or similar) variant in `paws-environment`, and a second
+`"gitlab" => { ... }` match arm here rendering `.gitlab-ci.yml` instead of a GitHub Actions
+workflow — the `DetectedWorkflowInputs`/detection logic stays provider-agnostic and is reused as-is.
