@@ -30,6 +30,7 @@ beyond the status/note column.
 |---|---|---|
 | [ark-manager-web](https://github.com/mbround18/ark-manager-web) | 🟡 | `rust.yml`/`docker.yml`/`enforce-labels.yml` on `paws` (merged). `release.yml` still runs `cargo-make`/`auto shipit` directly — `paws release --local-build` wiring not started ([`docs/DEVELOPMENT.md`](./DEVELOPMENT.md) tracks this). |
 | [redirect](https://github.com/mbround18/redirect) | 🚧 | `release.yml` → `paws semver`/`paws docker`/`paws semver --push`, matching the `steamcmd-bases` shape. Also newly publishes to ghcr.io (PR [#132](https://github.com/mbround18/redirect/pull/132), open). |
+| [showcase-yourself](https://github.com/mbround18/showcase-yourself) | 🚧 | New `docker-release.yml` (this repo had no Docker publishing CI at all before) → `paws semver`/`paws docker`/`paws semver --push`, matrix-built across `frontend`/`backend`/`ingress` images, Docker Hub only (PR [#815](https://github.com/mbround18/showcase-yourself/pull/815), open). |
 | [helm-charts](https://github.com/mbround18/helm-charts) | ✅ | `paws helm`/`paws helm --package`/`paws helm --publish` cover lint, package, and the real `gh-pages` `index.yaml` publish (PR [#170](https://github.com/mbround18/helm-charts/pull/170), merged). Python test suite and the HTML catalog page are explicitly out of scope. |
 | [oled-wallpaper](https://github.com/mbround18/oled-wallpaper) | ✅ | Flatpak app CI via `paws` (`paws-flatpak`). |
 | [steamcmd-bases](https://github.com/mbround18/steamcmd-bases) | ✅ | `deployer.yaml`/`tagger.yaml` → `paws docker`/`paws semver` (PR [#15](https://github.com/mbround18/steamcmd-bases/pull/15)). Two real post-merge bugs caught and fixed live: missing `GITHUB_TOKEN` in the `tagger` step (PR [#16](https://github.com/mbround18/steamcmd-bases/pull/16)), and `paws docker` never getting an explicit `--version` so it silently short-sha-tagged real releases (PR [#17](https://github.com/mbround18/steamcmd-bases/pull/17)). Verified end to end: a real `main` push published `mbround18/steamcmd:base-v0.0.5` to docker.io/ghcr.io and tagged `0.0.5`. `test-compatibility.yml` (not `gh-reusable`-based) deliberately left untouched. |
@@ -60,7 +61,7 @@ Listed for completeness; revisit only if one of them wants a `paws`-native
 workflow for its own sake.
 
 `hytale-modding-template`, `enshrouded-docker`, `setup-osxcross`,
-`docker-cargo-make`, `showcase-yourself`, `palworld-docker`, `vtt-maps`,
+`docker-cargo-make`, `palworld-docker`, `vtt-maps`,
 `repo-to-gpt`, `wikijs-module-meilisearch`, `hytale-demo-ui`, `karl-bot`,
 `auto`, `trunk-rs`, `kube-utils`, `hytale-vex-lich-dungeon`,
 `restaurats-mod-manager`, `hytale-ui-vscode-extension`, `ignite`,
