@@ -1099,9 +1099,10 @@ pub async fn run_audit(_args: AuditArgs) -> anyhow::Result<()> {
         let started = std::time::Instant::now();
         let raw_json =
             paws_dagger::core(&paws_audit::scanner_json_pipeline_args(&source, scanner)).await;
-        let exit_code_output =
-            paws_dagger::core(&paws_audit::scanner_exit_code_pipeline_args(&source, scanner))
-                .await;
+        let exit_code_output = paws_dagger::core(&paws_audit::scanner_exit_code_pipeline_args(
+            &source, scanner,
+        ))
+        .await;
         let duration_ms = started.elapsed().as_millis() as u64;
 
         let result = match (raw_json, exit_code_output) {
@@ -1200,7 +1201,9 @@ pub async fn run_helm(args: HelmArgs) -> anyhow::Result<()> {
     if publish {
         let repository = repository
             .or_else(|| std::env::var("GITHUB_REPOSITORY").ok())
-            .ok_or_else(|| anyhow::anyhow!("--repository is required (or set $GITHUB_REPOSITORY)"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("--repository is required (or set $GITHUB_REPOSITORY)")
+            })?;
         let (owner, repo) = repository.split_once('/').ok_or_else(|| {
             anyhow::anyhow!("--repository must be \"owner/repo\", got {repository}")
         })?;
@@ -1255,7 +1258,9 @@ pub async fn run_helm(args: HelmArgs) -> anyhow::Result<()> {
 
         for chart in &project.charts {
             let tag = chart.tag();
-            let archive_path = packages_dir.join(&chart.name).join(chart.archive_file_name());
+            let archive_path = packages_dir
+                .join(&chart.name)
+                .join(chart.archive_file_name());
             let release_id = client.get_or_create_release(&tag, false).await?;
             let uploaded = client
                 .upload_asset_with(
@@ -1430,7 +1435,8 @@ pub async fn run_release(args: ReleaseArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let tag = tag.ok_or_else(|| anyhow::anyhow!("--tag is required to upload (or set $GITHUB_REF_NAME)"))?;
+    let tag = tag
+        .ok_or_else(|| anyhow::anyhow!("--tag is required to upload (or set $GITHUB_REF_NAME)"))?;
     let repository = repository
         .or_else(|| std::env::var("GITHUB_REPOSITORY").ok())
         .ok_or_else(|| anyhow::anyhow!("--repository is required (or set $GITHUB_REPOSITORY)"))?;
@@ -1439,7 +1445,9 @@ pub async fn run_release(args: ReleaseArgs) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("--repository must be \"owner/repo\", got {repository}"))?;
     let token = std::env::var("GITHUB_TOKEN")
         .or_else(|_| std::env::var("GH_TOKEN"))
-        .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN (or GH_TOKEN) must be set to upload a release asset"))?;
+        .map_err(|_| {
+            anyhow::anyhow!("GITHUB_TOKEN (or GH_TOKEN) must be set to upload a release asset")
+        })?;
 
     let client = GitHubReleaseClient::new(owner.to_string(), repo.to_string(), token);
     let release_id = client.get_or_create_release(&tag, prerelease).await?;
@@ -1585,10 +1593,7 @@ pub fn render_llms_txt() -> String {
     let mut out = String::new();
 
     out.push_str("# paws\n\n");
-    let about = root
-        .get_about()
-        .map(|s| s.to_string())
-        .unwrap_or_default();
+    let about = root.get_about().map(|s| s.to_string()).unwrap_or_default();
     if !about.is_empty() {
         out.push_str(&format!("> {about}\n\n"));
     }
@@ -1612,10 +1617,7 @@ pub fn render_llms_txt() -> String {
         if !flags.is_empty() {
             for flag in flags {
                 let long = flag.get_long().unwrap_or_default();
-                let help = flag
-                    .get_help()
-                    .map(|h| h.to_string())
-                    .unwrap_or_default();
+                let help = flag.get_help().map(|h| h.to_string()).unwrap_or_default();
                 let default = flag
                     .get_default_values()
                     .first()
@@ -1670,7 +1672,11 @@ pub fn render_llms_txt() -> String {
             if !action.inputs.is_empty() {
                 out.push_str("**Inputs**\n\n");
                 for input in &action.inputs {
-                    let requiredness = if input.required { "required" } else { "optional" };
+                    let requiredness = if input.required {
+                        "required"
+                    } else {
+                        "optional"
+                    };
                     let default = input
                         .default
                         .as_ref()
@@ -1727,9 +1733,9 @@ pub async fn run_llms_generate(args: GenerateArgs) -> anyhow::Result<()> {
     }
 
     let (owner, repo, token) = if let Some(repository) = repository {
-        let (owner, repo) = repository
-            .split_once('/')
-            .ok_or_else(|| anyhow::anyhow!("--repository must be \"owner/repo\", got {repository}"))?;
+        let (owner, repo) = repository.split_once('/').ok_or_else(|| {
+            anyhow::anyhow!("--repository must be \"owner/repo\", got {repository}")
+        })?;
         let token = std::env::var("GITHUB_TOKEN")
             .or_else(|_| std::env::var("GH_TOKEN"))
             .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN (or GH_TOKEN) must be set to publish"))?;
@@ -1746,7 +1752,10 @@ pub async fn run_llms_generate(args: GenerateArgs) -> anyhow::Result<()> {
     // Loop guard: committing on every push to `main` (including the commit
     // this very publish creates) would retrigger the workflow forever if we
     // always wrote, even with unchanged content.
-    if !should_publish(existing.as_ref().map(|e| e.content.as_slice()), rendered.as_bytes()) {
+    if !should_publish(
+        existing.as_ref().map(|e| e.content.as_slice()),
+        rendered.as_bytes(),
+    ) {
         println!("llms: {output}@{branch} already up to date, skipping publish");
         return Ok(());
     }
@@ -1780,8 +1789,19 @@ mod tests {
     fn llms_txt_covers_every_subcommand() {
         let rendered = super::render_llms_txt();
         for name in [
-            "ci", "docker", "semver", "init", "audit", "docs", "provision", "helm", "release",
-            "mcp setup", "mcp serve", "llms generate", "workflow generate",
+            "ci",
+            "docker",
+            "semver",
+            "init",
+            "audit",
+            "docs",
+            "provision",
+            "helm",
+            "release",
+            "mcp setup",
+            "mcp serve",
+            "llms generate",
+            "workflow generate",
         ] {
             assert!(
                 rendered.contains(&format!("## paws {name}")),
@@ -1817,7 +1837,10 @@ mod tests {
 
     #[test]
     fn workflow_render_is_none_when_nothing_is_detected() {
-        assert_eq!(render_github_workflow(&DetectedWorkflowInputs::default()), None);
+        assert_eq!(
+            render_github_workflow(&DetectedWorkflowInputs::default()),
+            None
+        );
     }
 
     #[test]

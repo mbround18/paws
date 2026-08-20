@@ -35,8 +35,17 @@ async fn tools_list_exposes_every_paws_subcommand() {
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
 
     for expected in [
-        "ci", "docker", "semver", "init", "audit", "docs", "provision", "helm", "release",
-        "workflow", "actions",
+        "ci",
+        "docker",
+        "semver",
+        "init",
+        "audit",
+        "docs",
+        "provision",
+        "helm",
+        "release",
+        "workflow",
+        "actions",
     ] {
         assert!(
             names.contains(&expected),
@@ -63,7 +72,10 @@ async fn calling_actions_returns_paws_up_metadata() {
         .map(|t| t.text.as_str())
         .unwrap_or_default();
     assert!(text.contains("\"paws-up\""), "expected paws-up in: {text}");
-    assert!(text.contains("\"version\""), "expected its version input/output in: {text}");
+    assert!(
+        text.contains("\"version\""),
+        "expected its version input/output in: {text}"
+    );
 
     let _ = client.cancel().await;
 }
@@ -104,7 +116,10 @@ async fn calling_an_unknown_tool_fails_cleanly() {
         .call_tool(CallToolRequestParams::new("not-a-real-tool"))
         .await
         .expect_err("an unknown tool name should be rejected");
-    assert!(format!("{err}").to_lowercase().contains("not found") || format!("{err}").to_lowercase().contains("unknown"));
+    assert!(
+        format!("{err}").to_lowercase().contains("not found")
+            || format!("{err}").to_lowercase().contains("unknown")
+    );
 
     let _ = client.cancel().await;
 }

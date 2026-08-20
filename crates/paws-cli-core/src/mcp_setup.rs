@@ -29,14 +29,20 @@ fn merge_mcp_config(path: &std::path::Path) -> anyhow::Result<()> {
     };
 
     if !config.is_object() {
-        anyhow::bail!("{} does not contain a JSON object at its root", path.display());
+        anyhow::bail!(
+            "{} does not contain a JSON object at its root",
+            path.display()
+        );
     }
     let root = config.as_object_mut().expect("checked above");
     let servers = root
         .entry("mcpServers")
         .or_insert_with(|| serde_json::json!({}));
     if !servers.is_object() {
-        anyhow::bail!("{}'s \"mcpServers\" key is not a JSON object", path.display());
+        anyhow::bail!(
+            "{}'s \"mcpServers\" key is not a JSON object",
+            path.display()
+        );
     }
     servers
         .as_object_mut()
@@ -107,10 +113,8 @@ mod tests {
     /// under a shared temp root, so parallel `cargo test` runs can't collide
     /// on the same `.mcp.json` path.
     fn scratch_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "paws-mcp-setup-test-{}-{name}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("paws-mcp-setup-test-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -195,7 +199,10 @@ mod tests {
         std::fs::write(&path, r#"{"mcpServers": "oops"}"#).unwrap();
 
         let err = merge_mcp_config(&path).unwrap_err();
-        assert!(err.to_string().contains("\"mcpServers\" key is not a JSON object"));
+        assert!(
+            err.to_string()
+                .contains("\"mcpServers\" key is not a JSON object")
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

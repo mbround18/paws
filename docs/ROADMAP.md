@@ -262,7 +262,7 @@ without a separate trigger.
 
 `llms.txt` also documents paws's GitHub Actions (today just `actions/paws-up`) in a `## GitHub
 Actions` section, and the `actions` MCP tool returns the same metadata as JSON — so an agent
-working inside a *consumer* repo (not paws's own checkout) can discover `paws-up`'s inputs/outputs
+working inside a _consumer_ repo (not paws's own checkout) can discover `paws-up`'s inputs/outputs
 without leaving the MCP session. This works from any working directory because the action's YAML is
 embedded into the `paws` binary at compile time (`crates/paws-cli-core/src/action_metadata.rs`,
 `include_str!`) rather than read from disk at runtime — a runtime path relative to cwd would find
@@ -271,7 +271,7 @@ nothing once `paws` is running inside someone else's repo.
 ## CI/CD onboarding for consumer repos (`paws workflow generate`)
 
 `paws workflow generate` scaffolds a starter GitHub Actions workflow (default
-`.github/workflows/paws.yml`) for a repo that wants to adopt `paws`, run from *inside that repo* —
+`.github/workflows/paws.yml`) for a repo that wants to adopt `paws`, run from _inside that repo_ —
 distinct from `paws`'s own `.github/workflows/ci.yaml`. It reuses `collect_repository_signals()`
 (the same detection `paws audit` runs) to decide which `paws ci --toolchain <x>` steps to emit
 (rust/node/python), plus a `paws docker` step if a Dockerfile/compose file is present and a `paws
@@ -286,7 +286,7 @@ rather than emitting an empty/useless workflow.
 **Multi-origin readiness**: the command takes `--provider` (default `"github"`), matched explicitly
 in `run_workflow_generate` — anything else fails loudly naming `paws_environment::Provider` (the
 existing GitHub-only-today CI-context enum, see `crates/paws-environment/src/lib.rs`) as the
-extension point. Deliberately *not* a new trait/abstraction: `Provider` already exists for exactly
+extension point. Deliberately _not_ a new trait/abstraction: `Provider` already exists for exactly
 this generalization, and until a second origin (e.g. GitLab) has a real implementation to pattern
 the shape after, inventing one now would just be speculative structure. Adding a second origin
 later means: a `Provider::GitLab` (or similar) variant in `paws-environment`, and a second

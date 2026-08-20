@@ -86,7 +86,9 @@ impl Default for PawsMcpServer {
 
 #[tool_router]
 impl PawsMcpServer {
-    #[tool(description = "Build and test a language target (node, rust, python, tauri, tauri-android, flatpak).")]
+    #[tool(
+        description = "Build and test a language target (node, rust, python, tauri, tauri-android, flatpak)."
+    )]
     async fn ci(&self, Parameters(args): Parameters<CiArgs>) -> Result<String, McpError> {
         let (outcome, captured) = capture_output(|| paws_cli_core::run_ci(args)).await;
         tool_result(outcome, captured)
@@ -98,7 +100,9 @@ impl PawsMcpServer {
         tool_result(outcome, captured)
     }
 
-    #[tool(description = "Compute the next semantic version from PR labels or an explicit increment.")]
+    #[tool(
+        description = "Compute the next semantic version from PR labels or an explicit increment."
+    )]
     async fn semver(&self, Parameters(args): Parameters<SemverArgs>) -> Result<String, McpError> {
         let (outcome, captured) = capture_output(|| paws_cli_core::run_semver(args)).await;
         tool_result(outcome, captured)
@@ -137,27 +141,31 @@ impl PawsMcpServer {
         tool_result(outcome, captured)
     }
 
-    #[tool(description = "Cross-target build, package, and publish a release binary to GitHub Releases.")]
-    async fn release(
-        &self,
-        Parameters(args): Parameters<ReleaseArgs>,
-    ) -> Result<String, McpError> {
+    #[tool(
+        description = "Cross-target build, package, and publish a release binary to GitHub Releases."
+    )]
+    async fn release(&self, Parameters(args): Parameters<ReleaseArgs>) -> Result<String, McpError> {
         let (outcome, captured) = capture_output(|| paws_cli_core::run_release(args)).await;
         tool_result(outcome, captured)
     }
 
-    #[tool(description = "Detect this repo's ecosystem(s) and generate a starter GitHub Actions workflow wiring in paws-up plus the matching paws subcommands.")]
+    #[tool(
+        description = "Detect this repo's ecosystem(s) and generate a starter GitHub Actions workflow wiring in paws-up plus the matching paws subcommands."
+    )]
     async fn workflow(
         &self,
         Parameters(args): Parameters<WorkflowGenerateArgs>,
     ) -> Result<String, McpError> {
-        let (outcome, captured) = capture_output(|| paws_cli_core::run_workflow_generate(args)).await;
+        let (outcome, captured) =
+            capture_output(|| paws_cli_core::run_workflow_generate(args)).await;
         tool_result(outcome, captured)
     }
 
     /// Pure metadata lookup (no subprocess/dagger output to capture), so
     /// this skips the `capture_output` wrapper every other tool here uses.
-    #[tool(description = "List GitHub Actions this project ships (e.g. paws-up) with their inputs/outputs, for wiring into a consumer repo's CI.")]
+    #[tool(
+        description = "List GitHub Actions this project ships (e.g. paws-up) with their inputs/outputs, for wiring into a consumer repo's CI."
+    )]
     async fn actions(&self) -> Result<String, McpError> {
         let actions = paws_cli_core::action_metadata::discover_actions()
             .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;

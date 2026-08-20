@@ -151,13 +151,12 @@ mod tests {
         assert!(!paws_up.description.is_empty());
 
         let input_names: Vec<&str> = paws_up.inputs.iter().map(|i| i.name.as_str()).collect();
-        assert_eq!(input_names, vec!["github-token", "install-dagger", "version"]);
+        assert_eq!(
+            input_names,
+            vec!["github-token", "install-dagger", "version"]
+        );
 
-        let version = paws_up
-            .inputs
-            .iter()
-            .find(|i| i.name == "version")
-            .unwrap();
+        let version = paws_up.inputs.iter().find(|i| i.name == "version").unwrap();
         assert!(!version.required);
         assert_eq!(version.default.as_deref(), Some("latest"));
 
