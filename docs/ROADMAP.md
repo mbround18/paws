@@ -38,7 +38,7 @@ Confirmed directly against the code, not from memory:
   `fuse3` + a bare device flag aren't enough on their own), and is build-only, not a full bundle
   export: the base image switch from Debian fixed a real `flatpak-builder`-version-specific
   missing-binary failure, but a full bundle still hits a separate, unresolved `appstreamcli
-  compose` runtime difference under this pipeline's root context that a real GitHub-hosted
+compose` runtime difference under this pipeline's root context that a real GitHub-hosted
   runner (same versions, non-root) doesn't hit. Verified for real, end to end, against
   `mbround18/oled-wallpaper`'s actual manifest — a real, heavy wgpu/winit GUI app, not a
   synthetic fixture; a full bundle/release flow should keep using its own existing pipeline for
@@ -74,7 +74,7 @@ Confirmed directly against the code, not from memory:
   `gh-reusable` at all — build+tag+push for docker.io/ghcr.io go through `paws-docker`'s own
   native `Container.withRegistryAuth`/`Container.publish` calls, the same primitives that also
   make arbitrary registries work (`--registries myco.jfrog.io --registry-username
-  myco.jfrog.io=you`, token read from a derived `$MYCO_JFROG_IO_TOKEN`-style env var) —
+myco.jfrog.io=you`, token read from a derived `$MYCO_JFROG_IO_TOKEN`-style env var) —
   Artifactory, a private registry, anything `dockerRelease` (the `gh-reusable` function this
   replaced) had no way to authenticate to. With `paws audit`'s native scanner port landing the
   same day (see above), `paws` now has zero runtime dependency on `gh-reusable` for any
@@ -88,16 +88,16 @@ Confirmed directly against the code, not from memory:
   audit (2026-08-18): after Rust/JS/TS, Java is the next-most-common language across
   `mbround18`'s own non-fork repos (3, all Gradle-based Hytale mods) with no `paws-provision`/
   `paws-audit` precedent yet to build on — unlike Python, which had both before `paws ci
-  --toolchain python` was wired.
+--toolchain python` was wired.
 - **`paws publish` doesn't exist** — a real gap surfaced by a second repo audit (2026-08-19)
   that checked which of `mbround18`'s active repos still call `gh-reusable` directly (candidates
   for a `paws docker`/`paws ci`-style conversion, same shape as the `ark-manager-web` work
   above). Seven of eight (`valheim-docker`, `meilisearch-operator`,
   `cloudflare-discord-oidc-worker`, `vein-docker`, `helm-hub`, `backup-docker`,
   `foundryvtt-docker`) only call `rust-build-n-test`/`docker-release`/`tagger` — functions `paws
-  ci`/`paws docker`/`paws semver` already cover, pure conversion work. The eighth,
+ci`/`paws docker`/`paws semver` already cover, pure conversion work. The eighth,
   `game-server-management`, also depends on `gh-reusable`'s `publish.yaml` (`target: node |
-  rust-crate | helm-chart` — crates.io/npm/OCI Helm-chart publishing), which nothing in `paws`
+rust-crate | helm-chart` — crates.io/npm/OCI Helm-chart publishing), which nothing in `paws`
   replaces yet.
 - **`paws helm`** (2026-08-19): closes the lint/package half of the Helm-chart gap above, found
   converting `mbround18/helm-charts` itself. New `paws-helm` crate + `builders/helm/Dockerfile`
@@ -115,7 +115,7 @@ Confirmed directly against the code, not from memory:
   `gh-pages` publishing (a GitHub-App-token based mechanism, unrelated to registry auth, and
   fundamentally different from the OCI `publish.yaml` `helm-chart` target in the gap above), and
   this repo's Python jobs (which don't fit `paws-python`'s fixed `uv sync && uv build && uv run
-  pytest` pipeline shape — no package meant for `uv build`, several separately-scoped `pytest`
+pytest` pipeline shape — no package meant for `uv build`, several separately-scoped `pytest`
   invocations with per-suite JUnit summaries, not one blanket call) are still untouched.
 
 ## Status legend
@@ -127,21 +127,21 @@ Confirmed directly against the code, not from memory:
 
 ## Web / desktop (JS, Rust, Tauri) stacks
 
-| Stack Permutation | Primary Languages | Package Manager(s) | Core Toolchain / Frameworks | Output Type | Status |
-| --- | --- | --- | --- | --- | --- |
-| React | JavaScript, TypeScript | npm, yarn, pnpm, bun | Node.js (build env), React, Vite/Webpack | Static Web Assets (HTML/CSS/JS) | ✅ |
-| Node | JavaScript, TypeScript | npm, yarn, pnpm, bun | Node.js | NPM Package / Backend Server | 🚧 |
-| Rust | Rust | cargo | rustc, Cargo | Native Executable (.exe, ELF, Mach-O) | ✅ |
-| Node + React | JavaScript, TypeScript | npm, yarn, pnpm, bun | Node.js, React, Next.js / Express | SSR Web App / Full-stack | ✅ |
-| Rust + React | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Rust (Actix/Axum), React | Backend API + Static UI | 🚧 |
-| Node + Rust | JS/TS, Rust | npm/yarn/pnpm/bun & cargo | Node.js, Rust, napi-rs or neon | Native Node bindings (.node) | 📋 |
-| React + Rust | JS/TS, Rust | npm/yarn/pnpm/bun & cargo | React, Rust, wasm-pack | WebAssembly (.wasm) + React UI | 📋 |
-| Tauri + Rust | Rust, HTML/CSS/JS | cargo | Tauri, Rust, OS Webview (WebKit/WebView2) | Desktop App Installer | ✅ |
-| Tauri + Node + Rust | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Tauri, Node.js (Sidecar), Rust | Desktop App + Node Backend Process | 📋 |
-| Tauri + React + Rust | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Tauri, React, Rust, Vite/Next.js | Desktop App (React UI) | 🚧 |
-| Tauri + React + Node + Rust | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Tauri, React, Node.js, Rust | Desktop App + Embedded Node APIs | 📋 |
-| Tauri + Android | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Tauri, JDK, Android SDK/NDK | .apk / .aab | 🚧 |
-| Tauri + iOS | Rust, JS/TS | cargo & (npm/yarn/pnpm/bun) | Tauri, Xcode, `xcodebuild` | .ipa | 📋 (blocked) |
+| Stack Permutation           | Primary Languages      | Package Manager(s)          | Core Toolchain / Frameworks               | Output Type                           | Status       |
+| --------------------------- | ---------------------- | --------------------------- | ----------------------------------------- | ------------------------------------- | ------------ |
+| React                       | JavaScript, TypeScript | npm, yarn, pnpm, bun        | Node.js (build env), React, Vite/Webpack  | Static Web Assets (HTML/CSS/JS)       | ✅           |
+| Node                        | JavaScript, TypeScript | npm, yarn, pnpm, bun        | Node.js                                   | NPM Package / Backend Server          | 🚧           |
+| Rust                        | Rust                   | cargo                       | rustc, Cargo                              | Native Executable (.exe, ELF, Mach-O) | ✅           |
+| Node + React                | JavaScript, TypeScript | npm, yarn, pnpm, bun        | Node.js, React, Next.js / Express         | SSR Web App / Full-stack              | ✅           |
+| Rust + React                | Rust, JS/TS            | cargo & (npm/yarn/pnpm/bun) | Rust (Actix/Axum), React                  | Backend API + Static UI               | 🚧           |
+| Node + Rust                 | JS/TS, Rust            | npm/yarn/pnpm/bun & cargo   | Node.js, Rust, napi-rs or neon            | Native Node bindings (.node)          | 📋           |
+| React + Rust                | JS/TS, Rust            | npm/yarn/pnpm/bun & cargo   | React, Rust, wasm-pack                    | WebAssembly (.wasm) + React UI        | 📋           |
+| Tauri + Rust                | Rust, HTML/CSS/JS      | cargo                       | Tauri, Rust, OS Webview (WebKit/WebView2) | Desktop App Installer                 | ✅           |
+| Tauri + Node + Rust         | Rust, JS/TS            | cargo & (npm/yarn/pnpm/bun) | Tauri, Node.js (Sidecar), Rust            | Desktop App + Node Backend Process    | 📋           |
+| Tauri + React + Rust        | Rust, JS/TS            | cargo & (npm/yarn/pnpm/bun) | Tauri, React, Rust, Vite/Next.js          | Desktop App (React UI)                | 🚧           |
+| Tauri + React + Node + Rust | Rust, JS/TS            | cargo & (npm/yarn/pnpm/bun) | Tauri, React, Node.js, Rust               | Desktop App + Embedded Node APIs      | 📋           |
+| Tauri + Android             | Rust, JS/TS            | cargo & (npm/yarn/pnpm/bun) | Tauri, JDK, Android SDK/NDK               | .apk / .aab                           | 🚧           |
+| Tauri + iOS                 | Rust, JS/TS            | cargo & (npm/yarn/pnpm/bun) | Tauri, Xcode, `xcodebuild`                | .ipa                                  | 📋 (blocked) |
 
 `paws ci --toolchain tauri` (`crates/paws-tauri`) detects a Tauri project (`src-tauri/tauri.conf.json`)
 and runs `<package manager> run tauri build` against a dedicated `builders/tauri-linux` Dockerfile
@@ -170,7 +170,7 @@ cross-compile against the Darwin ABI using Apple's redistributed SDK headers —
 Xcode (`xcodebuild`) to generate and build the Xcode project and produce the `.ipa`, and Apple's
 license terms require Xcode to run on genuine Apple hardware/macOS. That's a legal and technical
 constraint a container image can't route around. iOS support would need a real macOS build host
-(a GitHub-hosted `macos-*` runner or a self-hosted Mac) wired in as a *different kind* of backend
+(a GitHub-hosted `macos-*` runner or a self-hosted Mac) wired in as a _different kind_ of backend
 than the Docker-image-through-Dagger approach every other target here uses — not attempted yet.
 
 `Node + Rust`/`React + Rust` need real new capability, not just wiring: native addon builds
@@ -180,18 +180,18 @@ drive today, on top of whatever multi-ecosystem provisioning already gets you pa
 
 ## JVM / Go stacks
 
-| Stack Permutation | Primary Languages | Package Manager(s) | Core Toolchain / Frameworks | Output Type | Status |
-| --- | --- | --- | --- | --- | --- |
-| Java | Java | Maven (mvn), Gradle | JDK, Spring Boot, Quarkus | .jar, .war, Docker Image | 📋 |
-| Kotlin (JVM) | Kotlin | Gradle, Maven | JDK, kotlinc, Ktor, Spring Boot | .jar, Docker Image | 📋 |
-| Java + Kotlin | Java, Kotlin | Gradle | JDK, Mixed Kotlin/Java Compilation | .jar, Maven/Gradle Package | 📋 |
-| Go | Go | Go Modules (go mod) | Go Toolchain (go build), standard lib | Native Executables (ELF, .exe, Mach-O) | 📋 |
-| Kotlin (Android) | Kotlin | Gradle | Android SDK, Jetpack Compose | .apk, .aab (Android App Bundle) | 📋 |
-| Kotlin Multiplatform | Kotlin | Gradle | Kotlin/JVM, Kotlin/Native, Kotlin/Wasm | .jar (JVM), .framework (iOS), .js / .wasm (Web) | 📋 |
-| Go + WebAssembly | Go | Go Modules | Go Compiler (GOOS=js GOARCH=wasm) | WebAssembly (.wasm) + JS wrapper | 📋 |
-| Go + C/C++ (cgo) | Go, C/C++ | Go Modules, make/cmake | Go Toolchain (cgo), GCC/Clang | Native Executables (dynamically linked) | 📋 |
-| Java + React/Node | Java, JS/TS | Maven/Gradle & npm/yarn | JDK, Node.js, Spring Boot, React | Backend .jar + Static Web Assets | 📋 |
-| Go + React/Node | Go, JS/TS | Go Modules & npm/yarn | Go Toolchain, Node.js, React | Go Binary + Static Web Assets | 📋 |
+| Stack Permutation    | Primary Languages | Package Manager(s)      | Core Toolchain / Frameworks            | Output Type                                     | Status |
+| -------------------- | ----------------- | ----------------------- | -------------------------------------- | ----------------------------------------------- | ------ |
+| Java                 | Java              | Maven (mvn), Gradle     | JDK, Spring Boot, Quarkus              | .jar, .war, Docker Image                        | 📋     |
+| Kotlin (JVM)         | Kotlin            | Gradle, Maven           | JDK, kotlinc, Ktor, Spring Boot        | .jar, Docker Image                              | 📋     |
+| Java + Kotlin        | Java, Kotlin      | Gradle                  | JDK, Mixed Kotlin/Java Compilation     | .jar, Maven/Gradle Package                      | 📋     |
+| Go                   | Go                | Go Modules (go mod)     | Go Toolchain (go build), standard lib  | Native Executables (ELF, .exe, Mach-O)          | 📋     |
+| Kotlin (Android)     | Kotlin            | Gradle                  | Android SDK, Jetpack Compose           | .apk, .aab (Android App Bundle)                 | 📋     |
+| Kotlin Multiplatform | Kotlin            | Gradle                  | Kotlin/JVM, Kotlin/Native, Kotlin/Wasm | .jar (JVM), .framework (iOS), .js / .wasm (Web) | 📋     |
+| Go + WebAssembly     | Go                | Go Modules              | Go Compiler (GOOS=js GOARCH=wasm)      | WebAssembly (.wasm) + JS wrapper                | 📋     |
+| Go + C/C++ (cgo)     | Go, C/C++         | Go Modules, make/cmake  | Go Toolchain (cgo), GCC/Clang          | Native Executables (dynamically linked)         | 📋     |
+| Java + React/Node    | Java, JS/TS       | Maven/Gradle & npm/yarn | JDK, Node.js, Spring Boot, React       | Backend .jar + Static Web Assets                | 📋     |
+| Go + React/Node      | Go, JS/TS         | Go Modules & npm/yarn   | Go Toolchain, Node.js, React           | Go Binary + Static Web Assets                   | 📋     |
 
 `Go`'s `paws-provision` support is the most natural first pickup here — `gh-reusable` already has
 a `setupGo` function to port from, and Go's toolchain is a single static binary (`go`), no JVM
@@ -199,21 +199,21 @@ version-matrix complexity to design around the way `Java`/`Kotlin` would need.
 
 ## Other language ecosystems
 
-| Stack Permutation | Primary Languages | Package Manager(s) | Core Toolchain / Frameworks | Output Type | Status |
-| --- | --- | --- | --- | --- | --- |
-| Python | Python | uv | CPython, FastAPI, Django | Python Package (.whl), Docker Image | ✅ |
-| C# / .NET | C#, F# | NuGet | .NET SDK, ASP.NET Core, EF Core | Binaries (.exe, .dll), NuGet Package | 📋 |
-| C / C++ | C, C++ | conan, vcpkg, system pkg mgrs | GCC, Clang, MSVC, CMake, Make | Native Binaries, Libs (.so, .dll, .a) | 📋 |
-| Ruby | Ruby | gem, bundler | Ruby (MRI), Ruby on Rails, Sinatra | Gem Package, Docker Image | 📋 |
-| PHP | PHP | composer | PHP-FPM, Laravel, Symfony | Source code deploy, Docker Image | 📋 |
-| Swift (iOS/macOS) | Swift | Swift Package Manager, CocoaPods | Xcode Command Line Tools, iOS SDK | iOS App (.ipa), macOS App (.app) | 📋 |
-| Flutter | Dart | pub | Flutter SDK, Android/iOS SDKs | Mobile (.apk, .aab, .ipa), Web Assets | 📋 |
-| Electron + React/Node | JS/TS | npm, yarn, pnpm | Node.js, Electron, React | Desktop App Installers | 📋 |
-| .NET Blazor | C#, HTML/CSS | NuGet | .NET SDK, WebAssembly | Wasm Binary + Static Web Assets | 📋 |
-| .NET MAUI | C#, XAML | NuGet | .NET SDK, Android/iOS/Mac/Win SDKs | Mobile/Desktop Apps (.apk, .ipa, .msix) | 📋 |
-| Python + C/C++ | Python, C/C++ | pip, cmake | CPython, pybind11, Cython | Native Python Extensions (.so, .pyd) | 📋 |
-| React Native | JS/TS, Java/Swift | npm, gradle, CocoaPods | Node.js, React Native, Mobile SDKs | Mobile Apps (.apk, .aab, .ipa) | 📋 |
-| Zig | Zig | zon (Zig Object Notation) | Zig Compiler | Native Executable (.exe, ELF, Mach-O) | 📋 |
+| Stack Permutation     | Primary Languages | Package Manager(s)               | Core Toolchain / Frameworks        | Output Type                             | Status |
+| --------------------- | ----------------- | -------------------------------- | ---------------------------------- | --------------------------------------- | ------ |
+| Python                | Python            | uv                               | CPython, FastAPI, Django           | Python Package (.whl), Docker Image     | ✅     |
+| C# / .NET             | C#, F#            | NuGet                            | .NET SDK, ASP.NET Core, EF Core    | Binaries (.exe, .dll), NuGet Package    | 📋     |
+| C / C++               | C, C++            | conan, vcpkg, system pkg mgrs    | GCC, Clang, MSVC, CMake, Make      | Native Binaries, Libs (.so, .dll, .a)   | 📋     |
+| Ruby                  | Ruby              | gem, bundler                     | Ruby (MRI), Ruby on Rails, Sinatra | Gem Package, Docker Image               | 📋     |
+| PHP                   | PHP               | composer                         | PHP-FPM, Laravel, Symfony          | Source code deploy, Docker Image        | 📋     |
+| Swift (iOS/macOS)     | Swift             | Swift Package Manager, CocoaPods | Xcode Command Line Tools, iOS SDK  | iOS App (.ipa), macOS App (.app)        | 📋     |
+| Flutter               | Dart              | pub                              | Flutter SDK, Android/iOS SDKs      | Mobile (.apk, .aab, .ipa), Web Assets   | 📋     |
+| Electron + React/Node | JS/TS             | npm, yarn, pnpm                  | Node.js, Electron, React           | Desktop App Installers                  | 📋     |
+| .NET Blazor           | C#, HTML/CSS      | NuGet                            | .NET SDK, WebAssembly              | Wasm Binary + Static Web Assets         | 📋     |
+| .NET MAUI             | C#, XAML          | NuGet                            | .NET SDK, Android/iOS/Mac/Win SDKs | Mobile/Desktop Apps (.apk, .ipa, .msix) | 📋     |
+| Python + C/C++        | Python, C/C++     | pip, cmake                       | CPython, pybind11, Cython          | Native Python Extensions (.so, .pyd)    | 📋     |
+| React Native          | JS/TS, Java/Swift | npm, gradle, CocoaPods           | Node.js, React Native, Mobile SDKs | Mobile Apps (.apk, .aab, .ipa)          | 📋     |
+| Zig                   | Zig               | zon (Zig Object Notation)        | Zig Compiler                       | Native Executable (.exe, ELF, Mach-O)   | 📋     |
 
 `Python`'s ✅ is `uv`-only, matching what `gh-reusable`'s real `pythonBuildAndTest` function
 actually supports — pip/poetry/conda projects (no `pyproject.toml` + `uv.lock`) aren't detected
@@ -242,5 +242,5 @@ Roughly, in order:
    new support is tested against something real, not just unit tests of the Rust logic.
 
 None of this needs a new builder image under `./builders/*` unless the stack also needs
-cross-compilation support for *`paws` itself* to target — that's a separate concern from `paws`
-being able to build *other projects* written in that language.
+cross-compilation support for _`paws` itself_ to target — that's a separate concern from `paws`
+being able to build _other projects_ written in that language.

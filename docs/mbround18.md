@@ -10,30 +10,32 @@ and are omitted below, along with 4 archived repos
 `gamer-drop-zone`).
 
 Regenerate by re-running the same `gh api repos/mbround18/<repo>/contents/.github/workflows`
-+ per-file content grep this file was built from — nothing here is hand-maintained
-beyond the status/note column.
+
+- per-file content grep this file was built from — nothing here is hand-maintained
+  beyond the status/note column.
 
 ## Legend
 
-| | |
-|---|---|
-| ✅ | Fully converted — every workflow that used `gh-reusable` now runs through `paws` |
-| 🟡 | Partially converted — some workflows on `paws`, at least one still isn't |
-| 🚧 | Conversion PR open, not yet merged |
-| 📋 | Queued — still on `gh-reusable`, no conversion started |
-| ⚪ | Custom/other CI — never used `gh-reusable`, no current paws plan |
-| 🔧 | Infra for `paws`/`gh-reusable` themselves, not a coverage candidate |
+|     |                                                                                  |
+| --- | -------------------------------------------------------------------------------- |
+| ✅  | Fully converted — every workflow that used `gh-reusable` now runs through `paws` |
+| 🟡  | Partially converted — some workflows on `paws`, at least one still isn't         |
+| 🚧  | Conversion PR open, not yet merged                                               |
+| 📋  | Queued — still on `gh-reusable`, no conversion started                           |
+| ⚪  | Custom/other CI — never used `gh-reusable`, no current paws plan                 |
+| 🔧  | Infra for `paws`/`gh-reusable` themselves, not a coverage candidate              |
 
 ## Converted / in progress
 
-| Repo | Status | Notes |
-|---|---|---|
-| [ark-manager-web](https://github.com/mbround18/ark-manager-web) | 🟡 | `rust.yml`/`docker.yml`/`enforce-labels.yml` on `paws` (merged). `release.yml` still runs `cargo-make`/`auto shipit` directly — `paws release --local-build` wiring not started ([`docs/DEVELOPMENT.md`](./DEVELOPMENT.md) tracks this). |
-| [redirect](https://github.com/mbround18/redirect) | 🚧 | `release.yml` → `paws semver`/`paws docker`/`paws semver --push`, matching the `steamcmd-bases` shape. Also newly publishes to ghcr.io (PR [#132](https://github.com/mbround18/redirect/pull/132), open). |
-| [showcase-yourself](https://github.com/mbround18/showcase-yourself) | 🚧 | New `docker-release.yml` (this repo had no Docker publishing CI at all before) → `paws semver`/`paws docker`/`paws semver --push`, matrix-built across `frontend`/`backend`/`ingress` images, Docker Hub only (PR [#815](https://github.com/mbround18/showcase-yourself/pull/815), open). |
-| [helm-charts](https://github.com/mbround18/helm-charts) | ✅ | `paws helm`/`paws helm --package`/`paws helm --publish` cover lint, package, and the real `gh-pages` `index.yaml` publish (PR [#170](https://github.com/mbround18/helm-charts/pull/170), merged). Python test suite and the HTML catalog page are explicitly out of scope. |
-| [oled-wallpaper](https://github.com/mbround18/oled-wallpaper) | ✅ | Flatpak app CI via `paws` (`paws-flatpak`). |
-| [steamcmd-bases](https://github.com/mbround18/steamcmd-bases) | ✅ | `deployer.yaml`/`tagger.yaml` → `paws docker`/`paws semver` (PR [#15](https://github.com/mbround18/steamcmd-bases/pull/15)). Two real post-merge bugs caught and fixed live: missing `GITHUB_TOKEN` in the `tagger` step (PR [#16](https://github.com/mbround18/steamcmd-bases/pull/16)), and `paws docker` never getting an explicit `--version` so it silently short-sha-tagged real releases (PR [#17](https://github.com/mbround18/steamcmd-bases/pull/17)). Verified end to end: a real `main` push published `mbround18/steamcmd:base-v0.0.5` to docker.io/ghcr.io and tagged `0.0.5`. `test-compatibility.yml` (not `gh-reusable`-based) deliberately left untouched. |
+| Repo                                                                | Status | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [ark-manager-web](https://github.com/mbround18/ark-manager-web)     | 🟡     | `rust.yml`/`docker.yml`/`enforce-labels.yml` on `paws` (merged). `release.yml` still runs `cargo-make`/`auto shipit` directly — `paws release --local-build` wiring not started ([`docs/DEVELOPMENT.md`](./DEVELOPMENT.md) tracks this).                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| [redirect](https://github.com/mbround18/redirect)                   | ✅     | `release.yml` → `paws semver`/`paws docker`/`paws semver --push`, matching the `steamcmd-bases` shape. Also newly publishes to ghcr.io (PR [#132](https://github.com/mbround18/redirect/pull/132), merged).                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| [showcase-yourself](https://github.com/mbround18/showcase-yourself) | ✅     | New `docker-release.yml` (this repo had no Docker publishing CI at all before) → `paws semver`/`paws docker`/`paws semver --push`, matrix-built across `frontend`/`backend`/`ingress` images, Docker Hub only (PR [#815](https://github.com/mbround18/showcase-yourself/pull/815), merged).                                                                                                                                                                                                                                                                                                                                                                                  |
+| [helm-charts](https://github.com/mbround18/helm-charts)             | ✅     | `paws helm`/`paws helm --package`/`paws helm --publish` cover lint, package, and the real `gh-pages` `index.yaml` publish (PR [#170](https://github.com/mbround18/helm-charts/pull/170), merged). Python test suite and the HTML catalog page are explicitly out of scope.                                                                                                                                                                                                                                                                                                                                                                                                   |
+| [oled-wallpaper](https://github.com/mbround18/oled-wallpaper)       | ✅     | Flatpak app CI via `paws` (`paws-flatpak`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| [steamcmd-bases](https://github.com/mbround18/steamcmd-bases)       | ✅     | `deployer.yaml`/`tagger.yaml` → `paws docker`/`paws semver` (PR [#15](https://github.com/mbround18/steamcmd-bases/pull/15)). Two real post-merge bugs caught and fixed live: missing `GITHUB_TOKEN` in the `tagger` step (PR [#16](https://github.com/mbround18/steamcmd-bases/pull/16)), and `paws docker` never getting an explicit `--version` so it silently short-sha-tagged real releases (PR [#17](https://github.com/mbround18/steamcmd-bases/pull/17)). Verified end to end: a real `main` push published `mbround18/steamcmd:base-v0.0.5` to docker.io/ghcr.io and tagged `0.0.5`. `test-compatibility.yml` (not `gh-reusable`-based) deliberately left untouched. |
+| [palworld-docker](https://github.com/mbround18/palworld-docker)     | 🚧     | Not `gh-reusable`-based — was a hand-rolled QEMU/Buildx/`docker buildx bake` pipeline, manual-tag-only (no auto-versioning, Docker Hub only). Converted `release.yaml` → `paws docker`/`paws semver`, matrix-built across the `palworld`/`installer` Dockerfile targets (two distinct image names, not `--prepend-target`), adding auto-semver + a `tagger` job and `ghcr.io` publishing (PR [#31](https://github.com/mbround18/palworld-docker/pull/31), open).                                                                                                                                                                                                             |
 
 ## Queued — still on `gh-reusable`, conversion not started
 
@@ -41,17 +43,17 @@ Same shape of work as the repos above (build/test/release matrix →
 `paws ci`/`paws docker`/`paws semver`/`paws helm`), no new `paws` capability
 needed for any of these except `game-server-management`.
 
-| Repo | Notes |
-|---|---|
-| [valheim-docker](https://github.com/mbround18/valheim-docker) | `docker-build.yml`/`docker-release.yml`/`enforce-labels.yml`/`release.yml`. |
-| [meilisearch-operator](https://github.com/mbround18/meilisearch-operator) | `release.yml`. |
-| [cloudflare-discord-oidc-worker](https://github.com/mbround18/cloudflare-discord-oidc-worker) | `rust.yml`. |
-| [vein-docker](https://github.com/mbround18/vein-docker) | `docker-release.yml` + a separate `python-tests.yml` (not `gh-reusable`-based). |
-| [helm-hub](https://github.com/mbround18/helm-hub) | `docker-deploy.yml` — already calls `dagger` directly (pre-`paws`), plus `gh-reusable`. |
-| [backup-docker](https://github.com/mbround18/backup-docker) | `docker-release.yaml`. |
-| [foundryvtt-docker](https://github.com/mbround18/foundryvtt-docker) | `release.yml`. |
-| [hytale](https://github.com/mbround18/hytale) | `docker-release.yml`. |
-| [game-server-management](https://github.com/mbround18/game-server-management) | `docker-release.yaml` + `doc-quality.yml`/`docs.yml`/`pr-pipelines.yaml`. Also needs a `paws publish` (crates.io/npm) that doesn't exist yet — see [`docs/ROADMAP.md`](./ROADMAP.md). |
+| Repo                                                                                          | Notes                                                                                                                                                                                 |
+| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [valheim-docker](https://github.com/mbround18/valheim-docker)                                 | `docker-build.yml`/`docker-release.yml`/`enforce-labels.yml`/`release.yml`.                                                                                                           |
+| [meilisearch-operator](https://github.com/mbround18/meilisearch-operator)                     | `release.yml`.                                                                                                                                                                        |
+| [cloudflare-discord-oidc-worker](https://github.com/mbround18/cloudflare-discord-oidc-worker) | `rust.yml`.                                                                                                                                                                           |
+| [vein-docker](https://github.com/mbround18/vein-docker)                                       | `docker-release.yml` + a separate `python-tests.yml` (not `gh-reusable`-based).                                                                                                       |
+| [helm-hub](https://github.com/mbround18/helm-hub)                                             | `docker-deploy.yml` — already calls `dagger` directly (pre-`paws`), plus `gh-reusable`.                                                                                               |
+| [backup-docker](https://github.com/mbround18/backup-docker)                                   | `docker-release.yaml`.                                                                                                                                                                |
+| [foundryvtt-docker](https://github.com/mbround18/foundryvtt-docker)                           | `release.yml`.                                                                                                                                                                        |
+| [hytale](https://github.com/mbround18/hytale)                                                 | `docker-release.yml`.                                                                                                                                                                 |
+| [game-server-management](https://github.com/mbround18/game-server-management)                 | `docker-release.yaml` + `doc-quality.yml`/`docs.yml`/`pr-pipelines.yaml`. Also needs a `paws publish` (crates.io/npm) that doesn't exist yet — see [`docs/ROADMAP.md`](./ROADMAP.md). |
 
 ## Custom/other CI — never on `gh-reusable`, no current plan
 
@@ -61,7 +63,7 @@ Listed for completeness; revisit only if one of them wants a `paws`-native
 workflow for its own sake.
 
 `hytale-modding-template`, `enshrouded-docker`, `setup-osxcross`,
-`docker-cargo-make`, `palworld-docker`, `vtt-maps`,
+`docker-cargo-make`, `vtt-maps`,
 `repo-to-gpt`, `wikijs-module-meilisearch`, `hytale-demo-ui`, `karl-bot`,
 `auto`, `trunk-rs`, `kube-utils`, `hytale-vex-lich-dungeon`,
 `restaurats-mod-manager`, `hytale-ui-vscode-extension`, `ignite`,

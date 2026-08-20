@@ -3,7 +3,7 @@
 Dedicated builder images, one directory per target family, each a plain `Dockerfile`. Most of
 these are `paws release`'s own cross-compilation targets for building `paws` itself (see
 `crates/paws-release/src/lib.rs`); `tauri-linux/`/`tauri-android/` are different — they're what
-`paws ci --toolchain tauri`/`tauri-android` build *user* projects against (see
+`paws ci --toolchain tauri`/`tauri-android` build _user_ projects against (see
 `crates/paws-tauri`), embedded into the `paws` binary rather than read from this directory at
 runtime.
 
@@ -15,7 +15,7 @@ populated via `--build-args` at build time — see `../compose.yml`.
 `../compose.yml` builds all of these and tags them `ghcr.io/mbround18/paws-builders:<name>-
 <version>` — a flat repo + tag, not one repo per builder, since Docker Hub doesn't support nested
 repository paths the way GHCR does. `.github/workflows/release.yaml`'s `build-builders` job pushes
-them to both GHCR and Docker Hub (same flat scheme on both) *before* the per-target build matrix
+them to both GHCR and Docker Hub (same flat scheme on both) _before_ the per-target build matrix
 starts (`needs: [ci, bootstrap, build-builders]`). That matrix's `paws release` (via
 `paws_dagger::remote_image_exists`/`prebuilt_image_candidate` in `crates/paws-release`) pulls the
 matching tag rather than building any Dockerfile itself — deliberately pull-only, no local
@@ -34,11 +34,11 @@ GTK/WebKit). Each matrix leg runs `docker buildx bake -f compose.yml --push <bui
 bake` directly, not `docker compose build --push`. Two real, reproduced bugs led here:
 
 1. **Both registries under `image:` + `build.tags` split, not both under `build.tags`.** Looked
-   right at first (`docker compose build --push` pushed *a* manifest), but `docker buildx bake
-   --print` against the generated bake definition showed Compose's compose→bake translation
+   right at first (`docker compose build --push` pushed _a_ manifest), but `docker buildx bake
+--print` against the generated bake definition showed Compose's compose→bake translation
    silently drops the top-level `image:` field whenever `build.tags` is also set — only the Docker
    Hub ref (`build.tags`) ever actually got pushed; GHCR (`image:`) only ever received the
-   registry *cache*, never the image. Fixed by putting both refs under `build.tags` and dropping
+   registry _cache_, never the image. Fixed by putting both refs under `build.tags` and dropping
    `image:` entirely — verified directly: the bug reproduced with the split, and a single push
    landed both refs once both were under `build.tags`.
 2. **`docker buildx bake` directly, not `docker compose build --push`.** On the runner's Docker
@@ -58,7 +58,7 @@ something every consuming repo needs to build itself.
 
 Each service in `compose.yml` also sets `cache_from`/`cache_to` (BuildKit's registry cache
 exporter, `type=registry,mode=max`, one `cache-<name>` tag per builder on GHCR) — this is what
-actually lets build cache survive *between* separate `release.yaml` runs on GitHub's ephemeral
+actually lets build cache survive _between_ separate `release.yaml` runs on GitHub's ephemeral
 runners, not just within one. The `builders/*/Dockerfile` ARG/LABEL reorder above only protects
 Docker's local layer cache, which never persists across runners anyway; the registry cache is what
 makes that matter. Verified for real against a local test registry: a completely fresh `buildx`
@@ -84,10 +84,10 @@ against it silently exports nothing) — which is why `release.yaml`'s `build-bu
   `macos/README.md`.
 - `tauri-linux/` — Rust + Node (via NodeSource) + the GTK/WebKit libraries Tauri's Linux backend
   links against, per https://tauri.app/start/prerequisites/#linux. Used by `paws ci --toolchain
-  tauri`, not `paws release`; see `crates/paws-tauri`.
+tauri`, not `paws release`; see `crates/paws-tauri`.
 - `tauri-android/` — JDK 17 + Android SDK (platform-tools, a platform, build-tools) + NDK + Rust's
   Android cross targets + Node, per https://tauri.app/start/prerequisites/#android. Used by `paws
-  ci --toolchain tauri-android`; see `crates/paws-tauri`. There's no `tauri-ios/` and none is
+ci --toolchain tauri-android`; see `crates/paws-tauri`. There's no `tauri-ios/` and none is
   planned — iOS builds need real Xcode/`xcodebuild`, which Apple's license restricts to genuine
   macOS; no container image can provide that the way this one provides the Android SDK/NDK.
 - `flatpak/` — `flatpak` + `flatpak-builder` + `xvfb` + the Flathub `org.freedesktop.Platform`/
@@ -102,7 +102,7 @@ against it silently exports nothing) — which is why `release.yaml`'s `build-bu
   binary during the metadata "finish" phase that no longer exists in modern `appstream` packaging
   (superseded by `appstreamcli compose`); Ubuntu ships `flatpak-builder >= 1.4`, which calls
   `appstreamcli compose` directly — confirmed by installing both versions side by side and
-  diffing their behavior, not guessed. That fixes the *missing-binary* failure specifically.
+  diffing their behavior, not guessed. That fixes the _missing-binary_ failure specifically.
 
   `flatpak-builder`'s sandboxed build also needs `--insecure-root-capabilities` on the
   `with-exec` (verified: `fuse3` + a bare `--device /dev/fuse` aren't enough on their own — the

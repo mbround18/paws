@@ -41,13 +41,13 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   The pilot crate for eventually evaluating `dagger-sdk`. `paws semver` auto-detects PR labels
   (2026-08-19) when `--labels` isn't given: `fetch_pr_labels_for_commit` calls GitHub's "list
   pull requests associated with a commit" endpoint (`GET
-  /repos/{owner}/{repo}/commits/{sha}/pulls`) to find the merged PR for the current commit and
+/repos/{owner}/{repo}/commits/{sha}/pulls`) to find the merged PR for the current commit and
   reads its labels — closes the same gap `gh-reusable`'s original `tagger.yaml` had, where
   `--pr-labels-csv` was always empty because `github.event.pull_request` doesn't exist on the
   `push` event a merge-to-main actually fires. Best-effort: any lookup failure (no associated
   PR, network error) falls through to branch-name/patch inference rather than failing the
   command. Verified for real against `mbround18/steamcmd-bases`'s live commit history (`GET
-  .../commits/928835d/pulls` correctly resolved PR #17).
+.../commits/928835d/pulls` correctly resolved PR #17).
 - `crates/paws-environment` (new, 2026-08-19) — normalizes CI-provider context (owner/repo,
   commit sha, ref, token) behind one `CiContext` type instead of subcommands hand-reading
   `GITHUB_*` env vars at each call site. GitHub Actions is the only implemented provider
@@ -89,7 +89,7 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   `gh-reusable` Dagger Function call. This is what makes arbitrary registries (Artifactory,
   a private registry — anything beyond docker.io/ghcr.io, which `dockerRelease` had no way
   to authenticate to at all) work: `paws docker --registries myco.jfrog.io
-  --registry-username myco.jfrog.io=you` reads the token from a derived env var
+--registry-username myco.jfrog.io=you` reads the token from a derived env var
   (`registry_token_env_var` — e.g. `$MYCO_JFROG_IO_TOKEN`), same shape as the existing
   `DOCKER_TOKEN`/`GHCR_TOKEN` convention, and publishes it the same way docker.io/ghcr.io
   do. docker.io/ghcr.io still gracefully skip (not error) on missing credentials, matching
@@ -121,7 +121,7 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   `playwright.config.{ts,js,mjs,cjs}` file present — a fresh `create-playwright` scaffold has
   empty `scripts`, so config/dependency presence is the only reliable signal) and builds a
   dedicated pipeline (`playwright_dagger_pipeline_args`) that runs `npx playwright install
-  --with-deps` then `npx playwright test`, instead of the plain build+test pipeline. No `xvfb`
+--with-deps` then `npx playwright test`, instead of the plain build+test pipeline. No `xvfb`
   involved and none needed — verified directly, end to end, against a real `create-playwright`
   scaffold (`examples/playwright-fixture`): `--with-deps` handles every system dependency
   (fonts, X11/GTK libs) itself via its own internal `apt-get` calls. `xvfb` only matters for
@@ -132,24 +132,24 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   `beforeBuildCommand`. Builds against `builders/tauri-linux/Dockerfile` (Rust + Node + the
   GTK/WebKit libs Tauri's Linux backend needs), embedded into the binary via `include_str!` and
   materialized to a temp dir at runtime (`write_builder_dockerfile`) — a plain repo-relative path
-  would resolve against the *target* repo `paws ci` is running in, not `paws`'s own source tree,
+  would resolve against the _target_ repo `paws ci` is running in, not `paws`'s own source tree,
   since `paws` (unlike `paws-release`, which only ever builds itself) is meant to run from
   anywhere. Desktop (`--toolchain tauri`) is Linux-only for now. Mobile (`--toolchain
-  tauri-android`) builds against `builders/tauri-android/Dockerfile` (JDK 17 + Android SDK/NDK +
+tauri-android`) builds against `builders/tauri-android/Dockerfile` (JDK 17 + Android SDK/NDK +
   Rust's Android cross targets), assuming the target repo already ran `tauri android init`
   (`src-tauri/gen/android` committed) — `paws` doesn't scaffold mobile projects itself. iOS has no
   builder image and isn't planned as one: `cargo tauri ios build` needs real Xcode/`xcodebuild`,
   which only runs under Apple's license on genuine macOS — see `docs/ROADMAP.md`.
 - `crates/paws-python` — native port of `gh-reusable`'s real `pythonBuildAndTest` Dagger function
   (`packages/dagger-module/src/index.ts`): `uv sync --all-groups [--frozen] && uv build && uv run
-  pytest` against `astral/uv:python<version>-trixie-slim`, a plain `container from` pipeline (no
+pytest` against `astral/uv:python<version>-trixie-slim`, a plain `container from` pipeline (no
   dedicated `builders/*` Dockerfile needed, unlike Tauri). `uv`-based projects only
   (`pyproject.toml`) — that's what `gh-reusable` actually supports, no poetry/pipenv/pip path
   exists there to port. `--frozen` is only passed when `uv.lock` is committed, the same
   lockfile-optional-install fix `paws-node` needed for `npm ci`.
 - `crates/paws-rust` — native port of `gh-reusable`'s real `rustBuildAndTest` Dagger function
   (read directly for parity, not reimplemented from memory): `cargo fmt -- --check`, `cargo
-  clippy`, `cargo build --verbose`, `cargo test --verbose`, in that order, fail-fast. Runs
+clippy`, `cargo build --verbose`, `cargo test --verbose`, in that order, fail-fast. Runs
   against the plain `rust:1-bookworm` image (the same one every other `paws`-authored Dockerfile
   in this repo already uses) rather than `gh-reusable`'s toolchain-pin dance — verified directly
   that image doesn't ship `rustfmt`/`clippy` by default, so a `rustup component add` step comes
@@ -178,7 +178,7 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   separate command for a stack Dagger containerizes end to end rather than provisions a local
   toolchain for). Detects `charts/*/Chart.yaml` (a monorepo of charts, `mbround18/helm-charts`'s
   own layout) or a root `Chart.yaml` (a single-chart repo), and runs `helm lint` — plus `helm
-  package` with `--package` — against every chart it finds, via `builders/helm/Dockerfile`
+package` with `--package` — against every chart it finds, via `builders/helm/Dockerfile`
   (Alpine + Helm's own official install script; embedded + materialized at runtime, same pattern
   as `paws-tauri`/`paws-flatpak`, for the same reason). Charts with local `file://` dependencies
   get `helm dependency build --skip-refresh` first, in a topologically-sorted order — plain
@@ -197,6 +197,7 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
 ## CI
 
 `.github/workflows/ci.yaml` has two jobs:
+
 - **`test`** — `cargo build`/`cargo test --workspace`/`cargo clippy`/the SC-004 container-
   engine-call-site lint (`scripts/check-dagger-callsites.sh`, which also enforces
   [ADR-0001](adr/0001-route-container-execution-through-dagger.md)'s `docker`/`cross` rule).
@@ -232,7 +233,7 @@ actually landed (`docker buildx imagetools inspect`) as a belt-and-suspenders ch
 quietly both of those failed — instead of surfacing later as a confusing "image not found" in
 `paws release`. Only once both jobs succeed
 (`needs: [ci, bootstrap, build-builders]`) does the per-target matrix start: each leg downloads
-the bootstrapped binary and runs `paws release`, which *pulls* the matching prebuilt image
+the bootstrapped binary and runs `paws release`, which _pulls_ the matching prebuilt image
 (`prebuilt_image_candidate`/`remote_image_exists` in `crates/paws-release`/`crates/paws-dagger`)
 rather than building any Dockerfile itself — deliberately pull-only, no local-build fallback, so a
 `build-builders` failure fails loudly instead of silently getting papered over by every leg
