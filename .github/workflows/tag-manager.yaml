@@ -1,0 +1,70 @@
+name: Tag Manager
+
+# Manually cuts the next `v0.0.1-prerelease.N` tag and hands it straight to
+# `release.yaml` — the same pipeline a `git tag -a vX -m vX && git push
+# origin vX` has been doing by hand. `release.yaml`'s own `push: tags: v*`
+# trigger can't be used here: a tag pushed with the default GITHUB_TOKEN
+# never fires downstream workflow events (GitHub's anti-recursion rule), so
+# this dispatches `release.yaml` directly instead via its existing `tag`
+# workflow_dispatch input, which already exists for exactly this case.
+# release.yaml's own `paws release`/GitHub Release step already generates
+# release notes (`generate_release_notes: true`) from every PR merged since
+# the previous tag — nothing extra needed here for that.
+#
+# Prerelease-only for now. Once paws graduates past 0.0.1-prerelease.N
+# versioning, add a `bump` choice input here (major/minor/patch/prerelease)
+# and switch the tag computation over to `paws semver` for the
+# major/minor/patch cases — deliberately not built yet, see docs/DEVELOPMENT.md.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: tag-manager
+  cancel-in-progress: false
+
+jobs:
+  cut-prerelease:
+    name: cut next prerelease tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Compute next prerelease tag
+        id: next
+        run: |
+          latest_n=$(git tag --list 'v0.0.1-prerelease.*' \
+            | sed -E 's/^v0\.0\.1-prerelease\.([0-9]+)$/\1/' \
+            | sort -n | tail -1)
+          next_n=$(( ${latest_n:-0} + 1 ))
+          tag="v0.0.1-prerelease.${next_n}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Next tag: ${tag}"
+
+      - name: Create and push tag
+        run: |
+          tag="${{ steps.next.outputs.tag }}"
+          git -c user.name="paws-bot" -c user.email="paws-bot@users.noreply.github.com" \
+            tag -a "$tag" -m "$tag"
+          git push origin "$tag"
+
+      - name: Dispatch release.yaml for the new tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run release.yaml \
+            --repo "${{ github.repository }}" \
+            -f tag="${{ steps.next.outputs.tag }}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Cut \`${{ steps.next.outputs.tag }}\`"
+            echo ""
+            echo "Dispatched [\`release.yaml\`](../../actions/workflows/release.yaml) for this tag — check its run list for progress and the published release notes."
+          } >> "$GITHUB_STEP_SUMMARY"
