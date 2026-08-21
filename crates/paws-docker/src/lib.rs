@@ -268,6 +268,15 @@ fn strip_registry(image: &str) -> String {
     }
 }
 
+/// Whether `version` looks like a git commit sha (short or full, hex-only)
+/// rather than a semver/tag string — used to pick `sha-`over `v` as the tag
+/// prefix. `--version`'s fallback is `$GITHUB_SHA` (see `run_docker`), so an
+/// untagged build (a push to a branch, no `--version` override) lands here
+/// with a bare hex sha instead of a real version.
+fn is_git_sha(version: &str) -> bool {
+    (7..=40).contains(&version.len()) && version.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Ported from `generateTags`.
 pub fn generate_tags(
     image: &str,
@@ -287,6 +296,8 @@ pub fn generate_tags(
 
     let version_tag = if version.starts_with('v') {
         format!("{target_prefix}{version}")
+    } else if is_git_sha(version) {
+        format!("{target_prefix}sha-{version}")
     } else {
         format!("{target_prefix}v{version}")
     };
@@ -692,6 +703,26 @@ mod tests {
                 "ghcr.io/example/app:latest".to_string(),
                 "docker.io/mirror/example/app:latest".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn git_sha_versions_use_a_sha_prefix_not_v() {
+        let tags = generate_tags("app", "e4a17f4", &[], true, "refs/heads/main", "", false);
+        assert_eq!(tags, vec!["app:sha-e4a17f4".to_string()]);
+
+        let tags = generate_tags(
+            "app",
+            "e4a17f4d4e0f1b10182564dd7beb9515017184bf",
+            &[],
+            true,
+            "refs/heads/main",
+            "",
+            false,
+        );
+        assert_eq!(
+            tags,
+            vec!["app:sha-e4a17f4d4e0f1b10182564dd7beb9515017184bf".to_string()]
         );
     }
 
