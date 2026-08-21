@@ -10,8 +10,8 @@ use rmcp::{
 };
 
 use paws_cli_core::{
-    AuditArgs, CiArgs, DockerArgs, DocsArgs, HelmArgs, InitArgs, ProvisionArgs, ReleaseArgs,
-    SemverArgs, WorkflowGenerateArgs,
+    AuditArgs, CiArgs, DockerArgs, DocsArgs, GithubAppLoginArgs, HelmArgs, InitArgs, ProvisionArgs,
+    ReleaseArgs, SemverArgs, WorkflowGenerateArgs,
 };
 
 /// Runs `f`, capturing anything it prints to stdout/stderr instead of
@@ -158,6 +158,17 @@ impl PawsMcpServer {
     ) -> Result<String, McpError> {
         let (outcome, captured) =
             capture_output(|| paws_cli_core::run_workflow_generate(args)).await;
+        tool_result(outcome, captured)
+    }
+
+    #[tool(
+        description = "Mint a GitHub App installation access token (needs client_id/private_key or the GH_APP_CLIENT_ID/GH_APP_PRIVATE_KEY env vars) — the same auth every other paws --publish/--push path already uses automatically when those env vars are set; this tool is for getting the raw token directly."
+    )]
+    async fn auth_github_app(
+        &self,
+        Parameters(args): Parameters<GithubAppLoginArgs>,
+    ) -> Result<String, McpError> {
+        let (outcome, captured) = capture_output(|| paws_cli_core::run_auth_github_app(args)).await;
         tool_result(outcome, captured)
     }
 

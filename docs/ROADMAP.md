@@ -9,7 +9,7 @@ see [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) for how a new stack actually gets ad
 Confirmed directly against the code, not from memory:
 
 - **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node`, `python`, `tauri`,
-  `tauri-android`, `flatpak` (`crates/paws-cli/src/main.rs`). Node execution is now natively multi-package-manager
+  `tauri-android`, `flatpak` (`crates/paws-cli-core/src/lib.rs`). Node execution is now natively multi-package-manager
   (`crates/paws-node` — npm/yarn/pnpm/bun, detected from lockfiles or `package.json`'s
   `packageManager` field, no longer the old `pnpmBuildAndTest`-only interim path) and
   framework-aware (Vite, Next.js, or plain, informational for now). Verified for real against
@@ -267,6 +267,31 @@ without leaving the MCP session. This works from any working directory because t
 embedded into the `paws` binary at compile time (`crates/paws-cli-core/src/action_metadata.rs`,
 `include_str!`) rather than read from disk at runtime — a runtime path relative to cwd would find
 nothing once `paws` is running inside someone else's repo.
+
+## Native GitHub App auth (`paws auth github-app`)
+
+Every `paws` subcommand that needs a GitHub token (`semver --push`, `helm --publish`, `release`,
+`llms generate --publish`) resolves it through `paws_environment::resolve_github_token`
+(`crates/paws-environment/src/lib.rs`): if `$GH_APP_CLIENT_ID` and a private key
+(`$GH_APP_PRIVATE_KEY` or `$GH_APP_PRIVATE_KEY_FILE`) are both set, it signs a JWT and mints a
+fresh GitHub App installation token (`mint_github_app_installation_token`) itself — the exact
+mechanism `actions/create-github-app-token` provides as a separate Action, done natively so no
+extra CI step is needed. Otherwise it falls back to the plain `$GITHUB_TOKEN`/`$GH_TOKEN` env vars
+every call site used to read directly before this existed. `CiContext::detect()` picks this up for
+free (it's the shared token path both `semver --push` and `llms generate --publish`'s
+`$GITHUB_REPOSITORY` branch already went through); `paws helm --publish` and `paws release`'s
+upload step call `resolve_github_token` directly instead of reading env vars themselves. This
+matters beyond convenience: this repo's `main` branch ruleset only bypasses its required-status-
+check rule for direct (non-PR) commits when they're authored by this specific GitHub App, not the
+default `GITHUB_TOKEN` — see `.github/workflows/ci.yaml`'s `llms` job for that in practice, now just
+two env vars (`GH_APP_CLIENT_ID`, `GH_APP_PRIVATE_KEY`) on the `paws llms generate --publish` step
+rather than a `create-github-app-token` step feeding a `GITHUB_TOKEN` override.
+
+`paws auth github-app` (`--client-id`/`--private-key`/`--private-key-file`/`--repository`, same env
+var fallbacks) exists for the case that wants the raw token directly rather than paws using it
+internally — it prints _only_ the token to stdout (diagnostics go to stderr), so
+`TOKEN=$(paws auth github-app)` works as a plain shell capture, e.g. for handing the token to
+another tool.
 
 ## CI/CD onboarding for consumer repos (`paws workflow generate`)
 

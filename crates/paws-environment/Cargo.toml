@@ -9,3 +9,12 @@ anyhow.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+jsonwebtoken = "11"
+
+[dev-dependencies]
+# tokio::sync::Mutex (not in the workspace `tokio` dependency's feature
+# list) to serialize the env-var-mutating tests below — an async-aware
+# mutex is safe to hold across an `.await`, unlike `std::sync::Mutex`
+# (which clippy's `await_holding_lock` correctly rejects here).
+tokio = { version = "1", features = ["sync"] }

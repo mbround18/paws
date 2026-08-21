@@ -100,8 +100,12 @@ jobs:
   # rule for commits that go through a pull request, so a direct commit with
   # it gets rejected (409). The repo's own GitHub App (bypass_mode
   # "always" on the ruleset) doesn't have that restriction, so this job
-  # mints a short-lived installation token for that App instead and commits
-  # as it.
+  # authenticates as it instead — natively, via `paws_environment::
+  # resolve_github_token` (crates/paws-environment/src/lib.rs), which mints
+  # a short-lived installation token itself whenever $GH_APP_CLIENT_ID plus
+  # a private key are present, no `actions/create-github-app-token` step
+  # needed (that Action's job is now just what `paws` does for every
+  # `--publish`/`--push` path automatically).
   llms:
     name: regenerate llms.txt
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -121,14 +125,8 @@ jobs:
       - name: Build paws
         run: cargo build -p paws-cli
 
-      - name: Mint a GitHub App installation token (bypasses the ruleset's PR-only restriction)
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ vars.GH_APP_CLIENT_ID }}
-          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-
       - name: paws llms generate --publish
         run: ./target/debug/paws llms generate --publish
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_APP_CLIENT_ID: ${{ vars.GH_APP_CLIENT_ID }}
+          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}

@@ -46,6 +46,7 @@ async fn tools_list_exposes_every_paws_subcommand() {
         "release",
         "workflow",
         "actions",
+        "auth_github_app",
     ] {
         assert!(
             names.contains(&expected),

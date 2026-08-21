@@ -237,6 +237,49 @@ pub enum Commands {
     /// matching `paws` subcommands.
     #[command(subcommand)]
     Workflow(WorkflowCommand),
+    /// Credential helpers — mint tokens `paws` (or other tools) can use.
+    #[command(subcommand)]
+    Auth(AuthCommand),
+}
+
+#[derive(Subcommand)]
+pub enum AuthCommand {
+    /// Mint a GitHub App installation access token and print it to stdout
+    /// (nothing else goes to stdout, so `TOKEN=$(paws auth github-app)`
+    /// works as a shell capture) — the same mechanism
+    /// `actions/create-github-app-token` provides as a separate Action,
+    /// done natively so no extra CI step is needed. Every other `paws`
+    /// subcommand that needs a GitHub token (`semver --push`, `helm
+    /// --publish`, `release`, `llms generate --publish`) already picks up
+    /// App auth automatically via the same `$GH_APP_CLIENT_ID`/
+    /// `$GH_APP_PRIVATE_KEY` env vars — this subcommand exists for cases
+    /// that want the raw token directly (e.g. handing it to another tool).
+    GithubApp(GithubAppLoginArgs),
+}
+
+#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct GithubAppLoginArgs {
+    /// The GitHub App's Client ID (the `Iv23...`-style string). Falls back
+    /// to $GH_APP_CLIENT_ID.
+    #[arg(long)]
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// The GitHub App's private key, PEM-encoded, given directly. Falls
+    /// back to $GH_APP_PRIVATE_KEY. Mutually exclusive with
+    /// --private-key-file in practice — if both are given, the file wins.
+    #[arg(long)]
+    #[serde(default)]
+    pub private_key: Option<String>,
+    /// Path to a file containing the GitHub App's private key. Falls back
+    /// to $GH_APP_PRIVATE_KEY_FILE.
+    #[arg(long)]
+    #[serde(default)]
+    pub private_key_file: Option<String>,
+    /// "owner/repo" the App is installed on. Falls back to
+    /// $GITHUB_REPOSITORY.
+    #[arg(long)]
+    #[serde(default)]
+    pub repository: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -586,6 +629,7 @@ pub async fn execute(command: Commands) -> anyhow::Result<()> {
         Commands::Release(args) => run_release(args).await,
         Commands::Llms(LlmsCommand::Generate(args)) => run_llms_generate(args).await,
         Commands::Workflow(WorkflowCommand::Generate(args)) => run_workflow_generate(args).await,
+        Commands::Auth(AuthCommand::GithubApp(args)) => run_auth_github_app(args).await,
         Commands::Mcp(McpCommand::Setup(args)) => mcp_setup::run_mcp_setup(args).await,
         Commands::Mcp(McpCommand::Serve(_)) => anyhow::bail!(
             "`paws mcp serve` must be invoked through the `paws` binary directly, not through \
@@ -976,6 +1020,7 @@ pub async fn run_semver(args: SemverArgs) -> anyhow::Result<()> {
     } = args;
 
     let ctx = paws_environment::CiContext::detect()
+        .await
         .context("paws semver needs a supported CI provider's env vars")?;
     let labels = if labels.is_empty() {
         match paws_semver::fetch_pr_labels_for_commit(&ctx.owner, &ctx.repo, &ctx.sha, &ctx.token)
@@ -1207,9 +1252,7 @@ pub async fn run_helm(args: HelmArgs) -> anyhow::Result<()> {
         let (owner, repo) = repository.split_once('/').ok_or_else(|| {
             anyhow::anyhow!("--repository must be \"owner/repo\", got {repository}")
         })?;
-        let token = std::env::var("GITHUB_TOKEN")
-            .or_else(|_| std::env::var("GH_TOKEN"))
-            .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN (or GH_TOKEN) must be set to publish"))?;
+        let token = paws_environment::resolve_github_token(owner, repo).await?;
         let client = GitHubReleaseClient::new(owner.to_string(), repo.to_string(), token);
 
         let existing = client.get_content(&index_path, &pages_branch).await?;
@@ -1443,11 +1486,7 @@ pub async fn run_release(args: ReleaseArgs) -> anyhow::Result<()> {
     let (owner, repo) = repository
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("--repository must be \"owner/repo\", got {repository}"))?;
-    let token = std::env::var("GITHUB_TOKEN")
-        .or_else(|_| std::env::var("GH_TOKEN"))
-        .map_err(|_| {
-            anyhow::anyhow!("GITHUB_TOKEN (or GH_TOKEN) must be set to upload a release asset")
-        })?;
+    let token = paws_environment::resolve_github_token(owner, repo).await?;
 
     let client = GitHubReleaseClient::new(owner.to_string(), repo.to_string(), token);
     let release_id = client.get_or_create_release(&tag, prerelease).await?;
@@ -1736,12 +1775,11 @@ pub async fn run_llms_generate(args: GenerateArgs) -> anyhow::Result<()> {
         let (owner, repo) = repository.split_once('/').ok_or_else(|| {
             anyhow::anyhow!("--repository must be \"owner/repo\", got {repository}")
         })?;
-        let token = std::env::var("GITHUB_TOKEN")
-            .or_else(|_| std::env::var("GH_TOKEN"))
-            .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN (or GH_TOKEN) must be set to publish"))?;
+        let token = paws_environment::resolve_github_token(owner, repo).await?;
         (owner.to_string(), repo.to_string(), token)
     } else {
         let ctx = paws_environment::CiContext::detect()
+            .await
             .context("paws llms generate --publish needs $GITHUB_REPOSITORY (or --repository)")?;
         (ctx.owner, ctx.repo, ctx.token)
     };
@@ -1780,6 +1818,59 @@ pub async fn run_llms_generate(args: GenerateArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Mints a GitHub App installation token and prints *only* the token to
+/// stdout — see [`AuthCommand::GithubApp`]'s doc comment for why (shell
+/// capture via `$(paws auth github-app)`). Diagnostics go to stderr, the
+/// same stdout/stderr split `run_semver` already uses for its version
+/// output.
+pub async fn run_auth_github_app(args: GithubAppLoginArgs) -> anyhow::Result<()> {
+    let GithubAppLoginArgs {
+        client_id,
+        private_key,
+        private_key_file,
+        repository,
+    } = args;
+
+    let client_id = client_id
+        .or_else(|| std::env::var("GH_APP_CLIENT_ID").ok())
+        .ok_or_else(|| anyhow::anyhow!("--client-id is required (or set $GH_APP_CLIENT_ID)"))?;
+
+    let private_key_pem = if let Some(path) =
+        private_key_file.or_else(|| std::env::var("GH_APP_PRIVATE_KEY_FILE").ok())
+    {
+        tokio::fs::read_to_string(&path)
+            .await
+            .with_context(|| format!("failed to read --private-key-file ({path})"))?
+    } else {
+        private_key
+            .or_else(|| std::env::var("GH_APP_PRIVATE_KEY").ok())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--private-key (or --private-key-file) is required (or set \
+                     $GH_APP_PRIVATE_KEY/$GH_APP_PRIVATE_KEY_FILE)"
+                )
+            })?
+    };
+
+    let repository = repository
+        .or_else(|| std::env::var("GITHUB_REPOSITORY").ok())
+        .ok_or_else(|| anyhow::anyhow!("--repository is required (or set $GITHUB_REPOSITORY)"))?;
+    let (owner, repo) = repository
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("--repository must be \"owner/repo\", got {repository}"))?;
+
+    let creds = paws_environment::GitHubAppCredentials {
+        client_id,
+        private_key_pem,
+    };
+    let token = paws_environment::mint_github_app_installation_token(&creds, owner, repo).await?;
+
+    eprintln!("auth: minted a GitHub App installation token for {owner}/{repo}");
+    println!("{token}");
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
@@ -1808,6 +1899,7 @@ mod tests {
             "mcp serve",
             "llms generate",
             "workflow generate",
+            "auth github-app",
         ] {
             assert!(
                 rendered.contains(&format!("## paws {name}")),
@@ -1891,6 +1983,7 @@ mod tests {
             serde_json::from_str("{}").expect("WorkflowGenerateArgs");
         assert_eq!(workflow.provider, "github");
         assert_eq!(workflow.output, ".github/workflows/paws.yml");
+        serde_json::from_str::<GithubAppLoginArgs>("{}").expect("GithubAppLoginArgs");
         let release: ReleaseArgs =
             serde_json::from_str(r#"{"target": "x86_64-unknown-linux-gnu"}"#)
                 .expect("ReleaseArgs with only the required field set");
