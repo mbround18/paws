@@ -4,6 +4,28 @@
 
 paws is a run-anywhere CI/CD CLI backed by Dagger. Every subcommand below is also exposed as an MCP tool via `paws mcp serve` (see `paws mcp setup` to wire up an MCP client), calling this same code directly.
 
+## Quickstart for an AI agent
+
+If you're an AI coding assistant reading this file (pasted in directly, or fetched from <https://raw.githubusercontent.com/mbround18/paws/main/llms.txt>) and asked to wire `paws` into the current repo, run these in order:
+
+```sh
+# 1. Install the paws binary (detects OS/arch, puts it on PATH)
+curl -fsSL https://raw.githubusercontent.com/mbround18/paws/main/scripts/install.sh | sh
+
+# 2. Install dagger, which most paws subcommands need on PATH
+paws init
+
+# 3. Register paws as an MCP server for this client (writes/merges .mcp.json;
+#    pass --client claude-desktop instead for Claude Desktop's global config)
+paws mcp setup
+
+# 4. Scaffold a starter GitHub Actions workflow for this repo, if it doesn't have
+#    one yet (detects the repo's ecosystem(s) automatically)
+paws workflow generate
+```
+
+After step 3, restart/reload the MCP client (or start a new session) so it picks up `.mcp.json` — every subcommand documented below then becomes available as an MCP tool (`paws mcp serve`), calling the same code the CLI does, not a subprocess. In CI, prefer `mbround18/paws/actions/paws-up@main` over the install script (see the "GitHub Actions" section below) — it's the same install, packaged as a composite Action.
+
 ## paws ci
 
 Build and test a language target (node, rust, python, tauri, tauri-android, ...)
