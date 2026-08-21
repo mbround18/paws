@@ -2,8 +2,51 @@
 //! here rather than shelling out directly, so the day the Rust SDK is ready
 //! to trust with real work, only this crate has to change.
 
+use std::process::Stdio;
+
 use anyhow::{Context, Result};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+
+/// Attempt count and backoff (3s/6s/12s between attempts, ~21s worst case)
+/// shared by every retry loop in this crate — matches
+/// [`remote_image_exists_with_retry`]'s already-tuned values.
+const RETRY_ATTEMPTS: u32 = 4;
+
+async fn retry_backoff(attempt: u32) {
+    let backoff_secs = 3u64 * 2u64.pow(attempt - 1);
+    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+}
+
+/// Whether `stderr` looks like a transient registry/network blip — the
+/// same class of intermittent CloudFront/registry hiccup already handled
+/// for [`remote_image_exists_with_retry`] — rather than a real build/test/
+/// lint failure. Matching on these substrings keeps retrying narrow: a
+/// genuine `cargo test` failure, `clippy` warning, or a truly missing
+/// image never contains any of them, so a real failure still fails fast
+/// instead of burning ~21s retrying something that was never going to
+/// succeed.
+fn is_transient_registry_error(stderr: &str) -> bool {
+    const TRANSIENT_SIGNATURES: &[&str] = &[
+        "failed to copy",
+        "httpReadSeeker",
+        "connection reset by peer",
+        "i/o timeout",
+        "tls handshake timeout",
+        "unexpected eof",
+        "context deadline exceeded",
+        "dial tcp",
+        "no such host",
+        "too many requests",
+        "toomanyrequests",
+        "500 internal server error",
+        "502 bad gateway",
+        "503 service unavailable",
+        "504 gateway timeout",
+    ];
+    let lower = stderr.to_lowercase();
+    TRANSIENT_SIGNATURES.iter().any(|sig| lower.contains(sig))
+}
 
 pub struct DaggerCall {
     pub module: String,
@@ -98,7 +141,12 @@ pub async fn install_cli() -> Result<std::path::PathBuf> {
 /// `dagger` CLI, not assumed) is just the cheapest real scalar that forces
 /// Dagger to actually resolve the image.
 pub async fn remote_image_exists(image: &str) -> bool {
-    core(&[
+    // Single-shot, not `core` (which already retries transient errors
+    // itself): `remote_image_exists_with_retry` below is the retrying
+    // entry point for this check, with its own backoff tuned for
+    // existence-checking specifically — going through `core`'s retry too
+    // would nest two 4-attempt loops for the same transient failure.
+    core_once(&[
         "container".into(),
         "from".into(),
         format!("--address={image}"),
@@ -116,14 +164,12 @@ pub async fn remote_image_exists(image: &str) -> bool {
 /// between them (~21s worst case) is enough headroom for that without
 /// masking a genuinely absent image for long.
 pub async fn remote_image_exists_with_retry(image: &str) -> bool {
-    const ATTEMPTS: u32 = 4;
-    for attempt in 1..=ATTEMPTS {
+    for attempt in 1..=RETRY_ATTEMPTS {
         if remote_image_exists(image).await {
             return true;
         }
-        if attempt < ATTEMPTS {
-            let backoff_secs = 3u64 * 2u64.pow(attempt - 1);
-            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+        if attempt < RETRY_ATTEMPTS {
+            retry_backoff(attempt).await;
         }
     }
     false
@@ -152,13 +198,7 @@ pub async fn call(invocation: DaggerCall) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 
-/// Runs a moduleless `dagger core <args...>` pipeline — chained core
-/// functions (`host directory`, `docker-build`, `with-exec`, `export`, ...)
-/// without needing a custom Dagger module. This is how `paws-release` builds
-/// against `./builders/*` Dockerfiles and smoke-tests cross-platform/cross-
-/// arch binaries (via `container --platform=...`), keeping this crate the
-/// single seam that spawns `dagger` (SC-004) even for ad-hoc pipelines.
-pub async fn core(args: &[String]) -> Result<String> {
+async fn core_once(args: &[String]) -> Result<String> {
     let output = Command::new("dagger")
         .arg("core")
         .args(args)
@@ -175,6 +215,40 @@ pub async fn core(args: &[String]) -> Result<String> {
     }
 
     Ok(String::from_utf8(output.stdout)?)
+}
+
+/// Runs a moduleless `dagger core <args...>` pipeline — chained core
+/// functions (`host directory`, `docker-build`, `with-exec`, `export`, ...)
+/// without needing a custom Dagger module. This is how `paws-release` builds
+/// against `./builders/*` Dockerfiles and smoke-tests cross-platform/cross-
+/// arch binaries (via `container --platform=...`), keeping this crate the
+/// single seam that spawns `dagger` (SC-004) even for ad-hoc pipelines.
+///
+/// Every pipeline built here starts with `container from --address=...`
+/// (or pulls further images mid-chain, e.g. a multi-stage `docker-build`),
+/// so a transient registry/CloudFront blip anywhere in the chain fails the
+/// whole pipeline — a real, observed failure
+/// (mbround18/paws#5's CI run: `rust:1-bookworm` pull reset mid-transfer)
+/// that had nothing to do with the code under test. Retried the same way
+/// as [`remote_image_exists_with_retry`] ([`is_transient_registry_error`]
+/// gates it to actual network/registry signatures, so a real build/test/
+/// lint failure still fails on the first attempt instead of burning ~21s).
+pub async fn core(args: &[String]) -> Result<String> {
+    for attempt in 1..=RETRY_ATTEMPTS {
+        match core_once(args).await {
+            Ok(stdout) => return Ok(stdout),
+            Err(err)
+                if attempt < RETRY_ATTEMPTS && is_transient_registry_error(&err.to_string()) =>
+            {
+                eprintln!(
+                    "dagger core: transient registry error (attempt {attempt}/{RETRY_ATTEMPTS}), retrying: {err}"
+                );
+                retry_backoff(attempt).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    unreachable!("loop always returns by the final attempt")
 }
 
 /// Same pipeline as [`core`], but streams `dagger`'s own live progress
@@ -199,25 +273,94 @@ pub async fn core(args: &[String]) -> Result<String> {
 /// This is what `paws ci` uses by default now; [`core`] (captured, silent
 /// until done) remains for `--silent` and for callers that need the
 /// output text itself, not just pass/fail.
-pub async fn core_streaming(args: &[String]) -> Result<()> {
-    let status = Command::new("dagger")
+///
+/// stderr is piped (not inherited) so a transient registry blip can be
+/// detected and retried the same way [`core`] does, but every chunk read
+/// is written straight back out to this process's real stderr as it
+/// arrives — the same live, incremental behavior as full inheritance,
+/// just tapped for a copy. stdout stays directly inherited: `dagger`'s own
+/// `--progress=plain` output and error text land on stderr, and nothing
+/// here needs to inspect stdout.
+async fn core_streaming_once(args: &[String]) -> Result<(bool, String)> {
+    let mut child = Command::new("dagger")
         .arg("core")
         .arg("--progress=plain")
         .args(args)
-        .status()
-        .await
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("failed to spawn `dagger` CLI - is it installed and on PATH?")?;
 
-    if !status.success() {
-        anyhow::bail!("dagger core {}: failed (see output above)", args.join(" "));
+    let mut child_stderr = child
+        .stderr
+        .take()
+        .expect("stderr was configured as piped above");
+    let mut captured = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = child_stderr.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        use std::io::Write;
+        std::io::stderr().write_all(&chunk[..n])?;
+        captured.extend_from_slice(&chunk[..n]);
     }
 
-    Ok(())
+    let status = child.wait().await?;
+    Ok((
+        status.success(),
+        String::from_utf8_lossy(&captured).into_owned(),
+    ))
+}
+
+pub async fn core_streaming(args: &[String]) -> Result<()> {
+    for attempt in 1..=RETRY_ATTEMPTS {
+        let (success, captured_stderr) = core_streaming_once(args).await?;
+        if success {
+            return Ok(());
+        }
+        if attempt < RETRY_ATTEMPTS && is_transient_registry_error(&captured_stderr) {
+            eprintln!(
+                "dagger core: transient registry error (attempt {attempt}/{RETRY_ATTEMPTS}), retrying..."
+            );
+            retry_backoff(attempt).await;
+            continue;
+        }
+        anyhow::bail!("dagger core {}: failed (see output above)", args.join(" "));
+    }
+    unreachable!("loop always returns or bails by the final attempt")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_real_observed_registry_errors_as_transient() {
+        // The exact wording seen on a real CI run (mbround18/paws#5,
+        // pulling rust:1-bookworm mid-transfer).
+        assert!(is_transient_registry_error(
+            r#"pull image "docker.io/library/rust:1-bookworm@sha256:...": failed to copy: httpReadSeeker: failed open: failed to do request: Get "https://production.cloudfront.docker.com/...": read tcp 172.17.0.2:44604->3.170.185.54:443: read: connection reset by peer"#
+        ));
+        assert!(is_transient_registry_error("dial tcp: i/o timeout"));
+        assert!(is_transient_registry_error("429 Too Many Requests"));
+        assert!(is_transient_registry_error("received 502 Bad Gateway"));
+        assert!(is_transient_registry_error("TLS handshake timeout"));
+    }
+
+    #[test]
+    fn does_not_classify_a_real_build_failure_as_transient() {
+        assert!(!is_transient_registry_error(
+            "error[E0425]: cannot find function `foo` in this scope"
+        ));
+        assert!(!is_transient_registry_error(
+            "test result: FAILED. 1 passed; 1 failed"
+        ));
+        assert!(!is_transient_registry_error(
+            r#"pull image "docker.io/library/definitely-not-a-real-image:latest": not found"#
+        ));
+    }
 
     #[tokio::test]
     async fn ensure_available_reports_missing_binary_actionably() {
