@@ -80,38 +80,72 @@ runs:
         esac
         echo "Resolved target: $target"
 
-        version="$INPUT_VERSION"
-        if [ "$version" = "latest" ]; then
-          # Retried like the archive download below - a transient GitHub API
-          # blip here shouldn't fail an install that would otherwise succeed
-          # on the next attempt.
-          for i in 1 2 3 4; do
-            version="$(gh release list --repo mbround18/paws --limit 1 --json tagName -q '.[0].tagName' || true)"
-            [ -n "$version" ] && break
-            echo "Retrying release lookup ($i/4)..."
-            sleep $((i * 3))
-          done
-          if [ -z "$version" ]; then
-            echo "::error::No releases found for mbround18/paws"
-            exit 1
-          fi
-        fi
-        echo "Resolved version: $version"
-
-        version_no_v="${version#v}"
-        archive="paws-${version_no_v}-${target}.zip"
-        url="https://github.com/mbround18/paws/releases/download/${version}/${archive}"
-        echo "Downloading: $url"
-
         install_dir="$HOME/.local/bin"
         mkdir -p "$install_dir"
 
         tmp_dir="$(mktemp -d)"
         trap 'rm -rf "$tmp_dir"' EXIT
 
-        # --retry: transient network/CDN blips downloading a release asset
-        # shouldn't fail an install that would succeed on a second attempt.
-        curl -fsSL --retry 4 --retry-all-errors --retry-delay 3 -o "$tmp_dir/$archive" "$url"
+        # Downloads one version's target archive into $tmp_dir. --retry (no
+        # --retry-all-errors) retries transient network/5xx/CDN blips on
+        # this exact URL, but fails fast on a real 404 - that 404 is the
+        # signal callers use to fall back to a different release instead of
+        # hammering a URL that will never succeed.
+        try_download() {
+          local ver="$1" ver_no_v archive url
+          ver_no_v="${ver#v}"
+          archive="paws-${ver_no_v}-${target}.zip"
+          url="https://github.com/mbround18/paws/releases/download/${ver}/${archive}"
+          echo "Trying ${ver}: ${url}"
+          curl -fsSL --retry 4 --retry-delay 3 -o "$tmp_dir/$archive" "$url"
+        }
+
+        version="$INPUT_VERSION"
+        if [ "$version" = "latest" ]; then
+          # Retried like the archive download - a transient GitHub API blip
+          # here shouldn't fail an install that would otherwise succeed on
+          # the next attempt.
+          candidates=""
+          for i in 1 2 3 4; do
+            candidates="$(gh release list --repo mbround18/paws --limit 5 --json tagName -q '.[].tagName' || true)"
+            [ -n "$candidates" ] && break
+            echo "Retrying release lookup ($i/4)..."
+            sleep $((i * 3))
+          done
+          if [ -z "$candidates" ]; then
+            echo "::error::No releases found for mbround18/paws"
+            exit 1
+          fi
+
+          # Not every release has every target's asset (e.g. one matrix leg
+          # failed to build/publish for it) - walk back through the last 5
+          # releases, newest first, until one actually has $target, rather
+          # than failing an install just because the very latest release is
+          # missing this one platform's archive.
+          resolved=""
+          while IFS= read -r candidate; do
+            [ -z "$candidate" ] && continue
+            if try_download "$candidate"; then
+              resolved="$candidate"
+              break
+            fi
+            echo "No $target asset for $candidate, falling back to an older release..."
+          done <<< "$candidates"
+
+          if [ -z "$resolved" ]; then
+            echo "::error::No $target asset found in the last 5 releases of mbround18/paws"
+            exit 1
+          fi
+          version="$resolved"
+        else
+          if ! try_download "$version"; then
+            echo "::error::No $target asset found for pinned version $version"
+            exit 1
+          fi
+        fi
+        echo "Resolved version: $version"
+
+        archive="paws-${version#v}-${target}.zip"
         unzip -o -j "$tmp_dir/$archive" -d "$install_dir"
         chmod +x "$install_dir/$exe_name"
 
