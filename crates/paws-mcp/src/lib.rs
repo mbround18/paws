@@ -209,13 +209,6 @@ pub async fn serve() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    // Serialized: capture_output redirects process-wide fd 1/2, so two
-    // copies racing in parallel test threads would corrupt each other's
-    // buffers (the same limitation documented on capture_output itself).
-    // An async-aware mutex, since the guard needs to stay held across the
-    // `.await` inside capture_output.
-    static CAPTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
     /// Writes straight to the real fd 1, bypassing Rust's `io::stdout()`
     /// (which `cargo test`'s own output capture intercepts *before* it
     /// reaches the OS file descriptor — a plain `println!` here would never
@@ -233,9 +226,22 @@ mod tests {
             .expect("write to fd succeeds");
     }
 
+    /// Covers both the success and mid-failure capture scenarios in one
+    /// test function, deliberately — not two separate `#[tokio::test]`s.
+    /// `gag::BufferRedirect` refuses to redirect the same fd twice at once
+    /// (`Gag::stdout()` returns `Err(AlreadyExists)` if one is already
+    /// active — see the `gag` crate's own docs), and `capture_output` swallows
+    /// that error via `.ok()`, silently capturing nothing instead of
+    /// failing loudly. Two separate test functions raced over exactly that
+    /// process-wide state on GitHub's runners (flaky ~1 in 10 CI runs)
+    /// despite an async mutex meant to serialize them — cross-thread/
+    /// cross-runtime serialization of a hand-rolled lock around a crate
+    /// with global state is exactly the kind of thing that's easy to get
+    /// subtly wrong. Keeping both scenarios in one test function removes
+    /// the possibility of overlap entirely: only one thread in this binary
+    /// ever calls into `gag`.
     #[tokio::test]
-    async fn capture_output_collects_stdout_and_stderr_on_success() {
-        let _guard = CAPTURE_LOCK.lock().await;
+    async fn capture_output_collects_output_on_success_and_before_a_failure() {
         let (outcome, captured) = capture_output(|| async {
             write_directly_to_fd("/dev/fd/1", "building thing\n");
             write_directly_to_fd("/dev/fd/2", "warning: thing is old\n");
@@ -246,11 +252,7 @@ mod tests {
         assert!(outcome.is_ok());
         assert!(captured.contains("building thing"));
         assert!(captured.contains("warning: thing is old"));
-    }
 
-    #[tokio::test]
-    async fn capture_output_still_captures_prints_before_a_failure() {
-        let _guard = CAPTURE_LOCK.lock().await;
         let (outcome, captured) = capture_output(|| async {
             write_directly_to_fd("/dev/fd/1", "partial progress\n");
             anyhow::bail!("boom")
