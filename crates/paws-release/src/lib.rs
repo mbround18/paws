@@ -216,7 +216,7 @@ pub async fn build_binary(request: &BuildRequest<'_>) -> Result<PathBuf> {
     let out_path = out_dir.join(&file_name);
 
     let prebuilt = prebuilt_image_candidate(request.builder_dir, request.builder_version);
-    if !paws_dagger::remote_image_exists(&prebuilt).await {
+    if !paws_dagger::remote_image_exists_with_retry(&prebuilt).await {
         anyhow::bail!(
             "prebuilt builder image {prebuilt} not found - push it first (docker compose build \
              && docker compose push against ./compose.yml, or let release.yaml's build-builders \

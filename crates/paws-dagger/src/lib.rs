@@ -108,6 +108,27 @@ pub async fn remote_image_exists(image: &str) -> bool {
     .is_ok()
 }
 
+/// [`remote_image_exists`], retried with backoff before giving up — a
+/// separate build-builders job pushed `image` moments earlier in the same
+/// workflow run, and both registry read-after-write propagation and
+/// transient pull errors have been observed to make a real, freshly-pushed
+/// image briefly report as missing here. 4 attempts, 3s/6s/12s backoff
+/// between them (~21s worst case) is enough headroom for that without
+/// masking a genuinely absent image for long.
+pub async fn remote_image_exists_with_retry(image: &str) -> bool {
+    const ATTEMPTS: u32 = 4;
+    for attempt in 1..=ATTEMPTS {
+        if remote_image_exists(image).await {
+            return true;
+        }
+        if attempt < ATTEMPTS {
+            let backoff_secs = 3u64 * 2u64.pow(attempt - 1);
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+        }
+    }
+    false
+}
+
 pub async fn call(invocation: DaggerCall) -> Result<String> {
     let output = Command::new("dagger")
         .arg("call")

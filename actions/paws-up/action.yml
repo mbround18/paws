@@ -82,7 +82,15 @@ runs:
 
         version="$INPUT_VERSION"
         if [ "$version" = "latest" ]; then
-          version="$(gh release list --repo mbround18/paws --limit 1 --json tagName -q '.[0].tagName')"
+          # Retried like the archive download below - a transient GitHub API
+          # blip here shouldn't fail an install that would otherwise succeed
+          # on the next attempt.
+          for i in 1 2 3 4; do
+            version="$(gh release list --repo mbround18/paws --limit 1 --json tagName -q '.[0].tagName' || true)"
+            [ -n "$version" ] && break
+            echo "Retrying release lookup ($i/4)..."
+            sleep $((i * 3))
+          done
           if [ -z "$version" ]; then
             echo "::error::No releases found for mbround18/paws"
             exit 1
@@ -101,7 +109,9 @@ runs:
         tmp_dir="$(mktemp -d)"
         trap 'rm -rf "$tmp_dir"' EXIT
 
-        curl -fsSL -o "$tmp_dir/$archive" "$url"
+        # --retry: transient network/CDN blips downloading a release asset
+        # shouldn't fail an install that would succeed on a second attempt.
+        curl -fsSL --retry 4 --retry-all-errors --retry-delay 3 -o "$tmp_dir/$archive" "$url"
         unzip -o -j "$tmp_dir/$archive" -d "$install_dir"
         chmod +x "$install_dir/$exe_name"
 
