@@ -278,8 +278,20 @@ pub fn detect_project(dir: &Path) -> Result<NodeProject> {
 
 /// Builds the `dagger core <chain>` argument list (see `paws_dagger::core`)
 /// that installs, builds, tests, and (if present) lints `project` inside a
-/// container based on its package manager's `base_image`. Pure string
-/// construction — testable without a real `dagger`/container engine.
+/// container based on its package manager's `base_image` — then, if
+/// `project.has_playwright`, also runs `npx playwright install --with-deps`
+/// and `npx playwright test`. Playwright is additive, not exclusive: a real
+/// app commonly has its own unit `test`/`lint`/`build` scripts *and* a
+/// Playwright e2e suite in the same `package.json`, and both need to run —
+/// a pure `npm create playwright@latest` scaffold (no `build`/`test`
+/// scripts at all) still works, since those steps are only added when the
+/// scripts actually exist. No `xvfb` involved and none needed for the
+/// Playwright step — verified directly, end to end, against a real
+/// scaffold: `playwright install --with-deps` already handles every system
+/// dependency modern headless Chromium needs on its own. `xvfb` only
+/// matters for `headed`/non-default display configurations, which this
+/// doesn't attempt to support. Pure string construction — testable without
+/// a real `dagger`/container engine.
 pub fn dagger_pipeline_args(project: &NodeProject, source_dir: &str) -> Vec<String> {
     let pm = project.package_manager;
     let mut args: Vec<String> = vec![
@@ -307,60 +319,24 @@ pub fn dagger_pipeline_args(project: &NodeProject, source_dir: &str) -> Vec<Stri
             .map(|s| s.to_string())
             .collect(),
     );
-    push_exec(pm.run_script_args("build"));
-    push_exec(pm.run_script_args("test"));
+    if project.has_build_script {
+        push_exec(pm.run_script_args("build"));
+    }
+    if project.has_test_script {
+        push_exec(pm.run_script_args("test"));
+    }
     if project.has_lint_script {
         push_exec(pm.run_script_args("lint"));
     }
-
-    args.push("stdout".into());
-    args
-}
-
-/// Builds the `dagger core <chain>` argument list for a Playwright e2e
-/// project: install deps, `npx playwright install --with-deps` (no browser
-/// list restriction — installs whatever `playwright.config.*`'s own
-/// `projects` actually need), then `npx playwright test`. No `xvfb`
-/// involved and none needed — verified directly, end to end, against a
-/// real `npm create playwright@latest` scaffold: `playwright install
-/// --with-deps` already handles every system dependency modern headless
-/// Chromium needs on its own, the same way it would in any other CI
-/// system. `xvfb` only matters for `headed`/non-default display
-/// configurations, which this doesn't attempt to support.
-pub fn playwright_dagger_pipeline_args(project: &NodeProject, source_dir: &str) -> Vec<String> {
-    let pm = project.package_manager;
-    let mut args: Vec<String> = vec![
-        "container".into(),
-        "from".into(),
-        format!("--address={}", pm.base_image()),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={source_dir}"),
-        "with-workdir".into(),
-        "--path=/src".into(),
-    ];
-
-    let mut push_exec = |command_args: Vec<String>| {
-        args.push("with-exec".into());
-        args.push(format!("--args={}", command_args.join(",")));
-    };
-
-    if let Some(setup) = pm.setup_args() {
-        push_exec(setup.iter().map(|s| s.to_string()).collect());
+    if project.has_playwright {
+        push_exec(vec![
+            "npx".into(),
+            "playwright".into(),
+            "install".into(),
+            "--with-deps".into(),
+        ]);
+        push_exec(vec!["npx".into(), "playwright".into(), "test".into()]);
     }
-    push_exec(
-        pm.install_args(project.has_lockfile)
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    );
-    push_exec(vec![
-        "npx".into(),
-        "playwright".into(),
-        "install".into(),
-        "--with-deps".into(),
-    ]);
-    push_exec(vec!["npx".into(), "playwright".into(), "test".into()]);
 
     args.push("stdout".into());
     args
@@ -584,15 +560,47 @@ mod tests {
     }
 
     #[test]
-    fn playwright_pipeline_installs_deps_and_runs_playwright_test() {
+    fn playwright_only_pipeline_installs_deps_and_runs_playwright_test() {
+        // A fresh `npm create playwright@latest` scaffold: no build/test
+        // scripts, just the e2e suite.
         let mut project = project_for(PackageManager::Npm);
+        project.has_build_script = false;
+        project.has_test_script = false;
         project.has_playwright = true;
-        let args = playwright_dagger_pipeline_args(&project, "/host/src");
+        let args = dagger_pipeline_args(&project, "/host/src");
         assert_eq!(args[0], "container");
         assert_eq!(args[2], "--address=node:24-trixie");
         assert!(args.contains(&"--args=npm,ci".to_string()));
+        assert!(!args.contains(&"--args=npm,run,build".to_string()));
+        assert!(!args.contains(&"--args=npm,run,test".to_string()));
         assert!(args.contains(&"--args=npx,playwright,install,--with-deps".to_string()));
         assert!(args.contains(&"--args=npx,playwright,test".to_string()));
         assert_eq!(args.last(), Some(&"stdout".to_string()));
+    }
+
+    #[test]
+    fn playwright_is_additive_to_a_real_apps_own_build_test_lint_scripts() {
+        // A real app with its own unit test/lint/build scripts *and* a
+        // Playwright e2e suite in the same package.json — both must run,
+        // not one instead of the other.
+        let mut project = project_for(PackageManager::Npm);
+        project.has_lint_script = true;
+        project.has_playwright = true;
+        let args = dagger_pipeline_args(&project, "/host/src");
+        assert!(args.contains(&"--args=npm,run,build".to_string()));
+        assert!(args.contains(&"--args=npm,run,test".to_string()));
+        assert!(args.contains(&"--args=npm,run,lint".to_string()));
+        assert!(args.contains(&"--args=npx,playwright,install,--with-deps".to_string()));
+        assert!(args.contains(&"--args=npx,playwright,test".to_string()));
+        // build/test/lint must run before the playwright steps.
+        let build_idx = args
+            .iter()
+            .position(|a| a == "--args=npm,run,build")
+            .unwrap();
+        let playwright_idx = args
+            .iter()
+            .position(|a| a == "--args=npx,playwright,install,--with-deps")
+            .unwrap();
+        assert!(build_idx < playwright_idx);
     }
 }

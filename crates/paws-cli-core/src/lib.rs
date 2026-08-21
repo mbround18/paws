@@ -692,22 +692,17 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
                 );
                 run_dagger_core(&args, silent).await?;
                 println!("ci: tauri build succeeded");
-            } else if project.has_playwright {
-                println!(
-                    "ci: playwright project using {} ({})",
-                    project.package_manager.as_str(),
-                    dir.display()
-                );
-                let args =
-                    paws_node::playwright_dagger_pipeline_args(&project, &dir.to_string_lossy());
-                run_dagger_core(&args, silent).await?;
-                println!("ci: playwright tests succeeded");
             } else {
                 println!(
-                    "ci: {} project using {} ({})",
+                    "ci: {} project using {} ({}){}",
                     project.framework.as_str(),
                     project.package_manager.as_str(),
-                    dir.display()
+                    dir.display(),
+                    if project.has_playwright {
+                        " + playwright"
+                    } else {
+                        ""
+                    }
                 );
                 let args = paws_node::dagger_pipeline_args(&project, &dir.to_string_lossy());
                 run_dagger_core(&args, silent).await?;
