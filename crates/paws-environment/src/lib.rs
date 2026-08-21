@@ -35,11 +35,15 @@ struct AppJwtClaims {
 /// with this token registers as authored by the App, which matters when a
 /// branch ruleset's required-status-check rule only bypasses for specific
 /// actors (like this App) rather than the default `GITHUB_TOKEN`.
-pub async fn mint_github_app_installation_token(
-    creds: &GitHubAppCredentials,
-    owner: &str,
-    repo: &str,
-) -> Result<String> {
+/// Signs the short-lived App-level JWT `mint_github_app_installation_token`
+/// authenticates its two GitHub API calls with — split out so it's testable
+/// without a network call. This is also the exact code path that hit a real
+/// production panic once (`jsonwebtoken`'s default crypto backend needs a
+/// process-wide rustls `CryptoProvider` installed before first use, which
+/// nothing in this binary did) — see `Cargo.toml`'s `rust_crypto` feature
+/// pin, and `jwt_signing_does_not_panic_with_the_configured_crypto_backend`
+/// below, which exists specifically to catch a regression of that failure.
+fn sign_app_jwt(creds: &GitHubAppCredentials) -> Result<String> {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 
     let now = std::time::SystemTime::now()
@@ -57,8 +61,16 @@ pub async fn mint_github_app_installation_token(
     };
     let key = EncodingKey::from_rsa_pem(creds.private_key_pem.as_bytes())
         .context("GitHub App private key is not valid PEM")?;
-    let jwt = encode(&Header::new(Algorithm::RS256), &claims, &key)
-        .context("failed to sign the GitHub App JWT")?;
+    encode(&Header::new(Algorithm::RS256), &claims, &key)
+        .context("failed to sign the GitHub App JWT")
+}
+
+pub async fn mint_github_app_installation_token(
+    creds: &GitHubAppCredentials,
+    owner: &str,
+    repo: &str,
+) -> Result<String> {
+    let jwt = sign_app_jwt(creds)?;
 
     let client = reqwest::Client::new();
     let auth_headers = |builder: reqwest::RequestBuilder| {
@@ -312,6 +324,81 @@ mod tests {
         let author = TagAuthor::default();
         assert_eq!(author.name, "paws-bot");
         assert_eq!(author.email, "paws-bot@users.noreply.github.com");
+    }
+
+    // A throwaway 2048-bit RSA key generated locally for this test only
+    // (`openssl genrsa -traditional 2048`) — never used for anything real,
+    // safe to commit. PKCS#1 ("BEGIN RSA PRIVATE KEY"), matching the format
+    // GitHub Apps' own downloaded private keys use.
+    const TEST_RSA_PRIVATE_KEY_PEM: &str = "-----BEGIN RSA PRIVATE KEY-----
+MIIEogIBAAKCAQEAqV3omqp0j9pjIgY9NBnQOh7dGFJ/v9P+D7O4cGdRXtLi7tHW
+g97qQcrjuCt29nC4oeKjwxVYP71/Q+ZDwGGe/1HSMY1koP18jtHCnZaGnrfgTk8T
+T6U1Jn6RyYygL5z7/EWbLthwhEkDH6pRr38LWBjavahDMldOWnsZRqxPKgsHCIi5
+R+nxU4dK130yl+QBwumuD1HggB5jeL3wj1MNGixyoYiiX5N5PZRuzTXEIcq4MtGO
+AzEmIFN9dap/TmDiuyCxbPbekHHE2CpLO1sbxL/d87Zwx8k4YExlHGGxmsWEdwlz
+oVhnkjQYH4DRZAYTUW/+eR8S8hxeeDBp6xG5QwIDAQABAoIBAC/16l0GAP0NhD4J
+00ISPz9+JvDwx8FMKGlM5OFbuJSoFmA3ps3wDZk0+ZhZIpZ15Crfka04OaXPJR9W
+sP/lBQ/bHTEwD3txXNjauIhErHl8q3Wxec/3gh4VAHa5LlFdXJQbJ+8zlmU3gb1x
+TzFpwg4f9612XRT/2S3RJx62w7ItN8s1kxVmr2YcGv76qVIvvr6kHOztgO4B0Swi
+8ZDMmowT8QRP0F++BGDNXKj8PfHSB8SQd0IRF365n2lvbTseAnyoNfdisDKtNszl
+4yB/qbwEyjzTMelY8OK8OFjQHhM169NdEHVPJM6l01vMQlJ/pTZx43ILxdRbtnk3
+VEiGt5kCgYEA5Nghh76yPS429qWFgPnsVNvOz+hKCGliZTSGzcDfoD+PA+C5fvq1
+3Noo8G+kaQmZNINH5Kgk0tNcchhiDivw8K++RlhckxEYMy44ofD5qTaItpQBA0VG
+2m0idJFW82WCS2AAx8iJ0gokBa9clAxT51xI75N0ik1IcwpWuNDUB3sCgYEAvXb2
+XBIg3sCE9ZKUgJn1l+qaj1h00EDoIdsvQbWD93LpAoUt1wO/vOPY/+GrYvFLR+Eq
+hng5mN/S02aDdxC/8ZD3BY2/kNQ9n0p+B+nfT0KxF1YkshEE9CHJbV+avg1CaJ0w
+6VYcu9A2K+vRo1/1i/GF9sPaf3uRl6vtU/A3htkCgYBJwEHmHpYQ05ERIj0JWQJK
+QuC+7mzVkykL1sbPDqbDXVh49naxrpjnyUNCYaiJ1XcTjm+gCHR9oXJ8rtEDIjQv
+TWQ0BYwoNW0oKXBE+IVtfE7JEJ/W7v+rq1pcWO692GwKYLE/saiBEZWUY3Shnet4
+d6xl0Y7Qd6GuuZlDTMHYewKBgEiga3uLr3Hz1oPUNny9h7k+QxUj0VNrLhCcVpcX
+n4ihUdSXfKTpWPxtUudzeCErYbIiDA0T1PBXDBfhOg/QKePNsAM+/OnlkeGXyov6
+CJH3fK73ZIWlpIJ42R/GAClOJ+C2MOOhEM6l174qXWgFBrkoUjPvi7hGg97iFs2Q
+TZixAoGAS26IcwYSQH7oYFuxyFLVVG5K4mKVW7s6/NSspl8rv/pJKpk/6HmynPpt
+nyLOmeNH7f0X0tWR6B87/0i02mQpvK4v1N7MsvUIpQDM8g6zqqq8bRe9uCdTdw17
+/wsEW98hxzIdPtvh1CutI+LMVJPQSvz8iDWem64ekQRmZ/3yMOQ=
+-----END RSA PRIVATE KEY-----";
+
+    /// Regression test for a real production failure: `jsonwebtoken`'s
+    /// default crypto backend needs a process-wide rustls `CryptoProvider`
+    /// installed before first use (nothing in this binary did that, and
+    /// `reqwest`'s own rustls-tls linkage doesn't auto-install one), so
+    /// `sign_app_jwt` panicked at runtime on a real CI run despite building
+    /// and unit-testing clean beforehand — the failure mode was entirely
+    /// runtime, not caught by `cargo build`/`cargo check`. Fixed by pinning
+    /// `jsonwebtoken`'s `rust_crypto` feature (see `Cargo.toml`), which
+    /// avoids the global-provider dependency entirely. This test signs a
+    /// real JWT with a real (throwaway) RSA key, so it would have caught
+    /// that regression directly.
+    #[test]
+    fn jwt_signing_does_not_panic_with_the_configured_crypto_backend() {
+        let creds = GitHubAppCredentials {
+            client_id: "Iv23liTestClientId".to_string(),
+            private_key_pem: TEST_RSA_PRIVATE_KEY_PEM.to_string(),
+        };
+
+        let jwt = sign_app_jwt(&creds).expect("signing should succeed, not panic or error");
+
+        // Decode the claims (no signature verification needed here — this
+        // test is about the signing path not panicking/erroring, and about
+        // the claims shape being right, not about verifying our own
+        // signature) by base64-decoding the JWT's middle segment.
+        use base64::Engine;
+        let payload_b64 = jwt.split('.').nth(1).expect("JWT has a payload segment");
+        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload_b64)
+            .expect("payload segment is valid base64url");
+        let claims: serde_json::Value =
+            serde_json::from_slice(&payload_bytes).expect("payload is valid JSON");
+
+        assert_eq!(claims["iss"], "Iv23liTestClientId");
+        let iat = claims["iat"].as_i64().expect("iat is a number");
+        let exp = claims["exp"].as_i64().expect("exp is a number");
+        assert!(exp > iat, "exp ({exp}) should be after iat ({iat})");
+        assert!(
+            exp - iat <= 600,
+            "exp - iat ({}) should stay within GitHub's 10-minute cap",
+            exp - iat
+        );
     }
 
     // Serialized: every test below mutates process-wide env vars

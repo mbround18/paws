@@ -10,7 +10,16 @@ tokio.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 serde.workspace = true
-jsonwebtoken = "11"
+# `default-features = false` + `rust_crypto` avoids a real runtime panic hit
+# in CI: jsonwebtoken's default backend needs a process-wide rustls
+# `CryptoProvider` installed before first use, which nothing in this binary
+# does (reqwest's own rustls-tls linkage doesn't auto-install one) —
+# `rust_crypto` uses the pure-Rust `rsa`/`sha2` crates instead, with no
+# dependency on any such global state.
+jsonwebtoken = { version = "11", default-features = false, features = [
+  "use_pem",
+  "rust_crypto",
+] }
 
 [dev-dependencies]
 # tokio::sync::Mutex (not in the workspace `tokio` dependency's feature
@@ -18,3 +27,6 @@ jsonwebtoken = "11"
 # mutex is safe to hold across an `.await`, unlike `std::sync::Mutex`
 # (which clippy's `await_holding_lock` correctly rejects here).
 tokio = { version = "1", features = ["sync"] }
+# Decoding a signed JWT's payload segment in the crypto-backend regression
+# test below — not needed by any non-test code in this crate.
+base64.workspace = true
