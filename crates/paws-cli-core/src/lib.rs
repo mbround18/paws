@@ -1765,7 +1765,13 @@ pub async fn run_llms_generate(args: GenerateArgs) -> anyhow::Result<()> {
             &output,
             &branch,
             rendered.as_bytes(),
-            "chore: regenerate llms.txt",
+            // `[skip ci]` is GitHub Actions' own recognized marker (checked
+            // against the pushed commit's message, no workflow YAML changes
+            // needed) — without it, `should_publish`'s loop guard still
+            // stops this from looping forever, but this publish's own push
+            // event would otherwise retrigger one full redundant CI run
+            // before the guard kicks in on the next one.
+            "chore: regenerate llms.txt [skip ci]",
             existing.as_ref().map(|e| e.sha.as_str()),
         )
         .await?;

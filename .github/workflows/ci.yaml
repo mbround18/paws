@@ -93,6 +93,15 @@ jobs:
   # covers "every push / PR merge" with one trigger); `paws llms generate
   # --publish` skips the commit itself when the content is unchanged, so
   # this can't retrigger itself indefinitely.
+  #
+  # `main`'s ruleset requires the "build, test, lint" status check on every
+  # commit, including ones made via the Contents API — the default
+  # `GITHUB_TOKEN` (acting as the `github-actions` app) only bypasses that
+  # rule for commits that go through a pull request, so a direct commit with
+  # it gets rejected (409). The repo's own GitHub App (bypass_mode
+  # "always" on the ruleset) doesn't have that restriction, so this job
+  # mints a short-lived installation token for that App instead and commits
+  # as it.
   llms:
     name: regenerate llms.txt
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -112,7 +121,14 @@ jobs:
       - name: Build paws
         run: cargo build -p paws-cli
 
+      - name: Mint a GitHub App installation token (bypasses the ruleset's PR-only restriction)
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
       - name: paws llms generate --publish
         run: ./target/debug/paws llms generate --publish
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
