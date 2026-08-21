@@ -1642,6 +1642,37 @@ pub fn render_llms_txt() -> String {
          client), calling this same code directly.\n\n",
     );
 
+    // A copy-pasteable bootstrap block, deliberately placed before the
+    // per-command reference below — this is the part meant to be handed
+    // directly to an AI coding assistant (Claude Code, Copilot, Cursor,
+    // ...) that was pointed at this file (or its raw URL), so it can wire
+    // `paws` into a repo without a human walking it through each step by
+    // hand. Install commands mirror README.md's "Installation" section
+    // verbatim — keep the two in sync if either changes.
+    out.push_str(
+        "## Quickstart for an AI agent\n\n\
+         If you're an AI coding assistant reading this file (pasted in directly, or fetched from \
+         <https://raw.githubusercontent.com/mbround18/paws/main/llms.txt>) and asked to wire \
+         `paws` into the current repo, run these in order:\n\n\
+         ```sh\n\
+         # 1. Install the paws binary (detects OS/arch, puts it on PATH)\n\
+         curl -fsSL https://raw.githubusercontent.com/mbround18/paws/main/scripts/install.sh | sh\n\n\
+         # 2. Install dagger, which most paws subcommands need on PATH\n\
+         paws init\n\n\
+         # 3. Register paws as an MCP server for this client (writes/merges .mcp.json;\n\
+         #    pass --client claude-desktop instead for Claude Desktop's global config)\n\
+         paws mcp setup\n\n\
+         # 4. Scaffold a starter GitHub Actions workflow for this repo, if it doesn't have\n\
+         #    one yet (detects the repo's ecosystem(s) automatically)\n\
+         paws workflow generate\n\
+         ```\n\n\
+         After step 3, restart/reload the MCP client (or start a new session) so it picks up \
+         `.mcp.json` — every subcommand documented below then becomes available as an MCP tool \
+         (`paws mcp serve`), calling the same code the CLI does, not a subprocess. In CI, prefer \
+         `mbround18/paws/actions/paws-up@main` over the install script (see the \"GitHub \
+         Actions\" section below) — it's the same install, packaged as a composite Action.\n\n",
+    );
+
     fn render_command(cmd: &clap::Command, prefix: &str, out: &mut String) {
         let name = format!("{prefix}{}", cmd.get_name());
         out.push_str(&format!("## paws {name}\n\n"));
@@ -1915,6 +1946,40 @@ mod tests {
         assert!(rendered.contains("### paws-up"));
         assert!(rendered.contains("mbround18/paws/actions/paws-up@main"));
         assert!(rendered.contains("`version`"));
+    }
+
+    /// The whole point of this section: someone (or an agent) can paste
+    /// `llms.txt`'s contents into an AI coding assistant and get `paws`
+    /// wired into a repo without a human walking through each step —
+    /// pin the exact commands that promise covers, and that it appears
+    /// before the per-command reference (so a reader/agent sees "how do I
+    /// start" before "here's every flag").
+    #[test]
+    fn llms_txt_has_an_ai_agent_bootstrap_section_before_the_command_reference() {
+        let rendered = super::render_llms_txt();
+        let bootstrap_pos = rendered
+            .find("## Quickstart for an AI agent")
+            .expect("expected an AI-agent quickstart section");
+        let first_command_pos = rendered
+            .find("## paws ci")
+            .expect("expected the paws ci command section");
+        assert!(
+            bootstrap_pos < first_command_pos,
+            "the AI-agent quickstart should appear before the per-command reference"
+        );
+
+        for expected in [
+            "scripts/install.sh",
+            "paws init",
+            "paws mcp setup",
+            "paws workflow generate",
+            "mbround18/paws/actions/paws-up@main",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "expected the bootstrap section to mention {expected:?}"
+            );
+        }
     }
 
     #[test]
