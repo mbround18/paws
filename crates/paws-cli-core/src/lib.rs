@@ -440,6 +440,12 @@ pub struct DockerArgs {
     #[arg(long, value_delimiter = ',')]
     #[serde(default)]
     pub registry_username: Vec<String>,
+    /// Suppress dagger's live build/publish progress; only print output
+    /// once each pipeline finishes (or on failure). Default is streamed
+    /// live.
+    #[arg(long)]
+    #[serde(default)]
+    pub silent: bool,
 }
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
@@ -808,6 +814,7 @@ pub async fn run_docker(args: DockerArgs) -> anyhow::Result<()> {
         dockerhub_username,
         ghcr_username,
         registry_username,
+        silent,
     } = args;
 
     let image = image
@@ -970,7 +977,7 @@ pub async fn run_docker(args: DockerArgs) -> anyhow::Result<()> {
                         tag_address: tag,
                     },
                 );
-                paws_dagger::core(&publish_args)
+                run_dagger_core(&publish_args, silent)
                     .await
                     .with_context(|| format!("failed to publish {tag} to {registry}"))?;
                 println!("docker: published {tag}");
@@ -991,7 +998,7 @@ pub async fn run_docker(args: DockerArgs) -> anyhow::Result<()> {
             target: &facts.target,
             build_args: &facts.build_args,
         });
-        run_dagger_core(&build_only_args, false).await?;
+        run_dagger_core(&build_only_args, silent).await?;
         println!("docker: build succeeded");
     }
 
