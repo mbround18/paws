@@ -129,13 +129,15 @@ TypeScript-orchestrated system, the orchestrator itself is Rust.
   CLI dependency itself — it only produces the argument list `paws-dagger::core` executes. Also
   detects Playwright e2e projects (`@playwright/test` in `package.json`'s dependencies, or a
   `playwright.config.{ts,js,mjs,cjs}` file present — a fresh `create-playwright` scaffold has
-  empty `scripts`, so config/dependency presence is the only reliable signal) and builds a
-  dedicated pipeline (`playwright_dagger_pipeline_args`) that runs `npx playwright install
---with-deps` then `npx playwright test`, instead of the plain build+test pipeline. No `xvfb`
-  involved and none needed — verified directly, end to end, against a real `create-playwright`
-  scaffold (`examples/playwright-fixture`): `--with-deps` handles every system dependency
-  (fonts, X11/GTK libs) itself via its own internal `apt-get` calls. `xvfb` only matters for
-  `headed`/non-default display configurations, which this pipeline doesn't attempt to support.
+  empty `scripts`, so config/dependency presence is the only reliable signal) and appends
+  `npx playwright install --with-deps` then `npx playwright test` onto the same pipeline
+  `dagger_pipeline_args` builds — additive to, not a replacement for, whatever `build`/`test`/
+  `lint` scripts the project also has, since a real app commonly has its own unit tests *and* a
+  Playwright e2e suite in the same `package.json`. No `xvfb` involved and none needed — verified
+  directly, end to end, against a real `create-playwright` scaffold
+  (`examples/playwright-fixture`): `--with-deps` handles every system dependency (fonts, X11/GTK
+  libs) itself via its own internal `apt-get` calls. `xvfb` only matters for `headed`/non-default
+  display configurations, which this pipeline doesn't attempt to support.
 - `crates/paws-tauri` — Tauri desktop-app support, layered on `paws-node` (a Tauri project is a
   Node project with `src-tauri/tauri.conf.json`). Doesn't reimplement the frontend-then-Rust build
   ordering itself — Tauri's own CLI already sequences that via `tauri.conf.json`'s
