@@ -1,0 +1,175 @@
+# paws
+
+> paws: run-anywhere CI/CD pipelines, backed by Dagger
+
+paws is a run-anywhere CI/CD CLI backed by Dagger. Every subcommand below is also exposed as an MCP tool via `paws mcp serve` (see `paws mcp setup` to wire up an MCP client), calling this same code directly.
+
+## paws ci
+
+Build and test a language target (node, rust, python, tauri, tauri-android, ...)
+
+- `--toolchain` — 
+- `--verbose` — Print per-ecosystem provisioning start/elapsed timing to stderr
+- `--silent` — Suppress dagger's live build progress; only print output once the pipeline finishes (or on failure). Default is streamed live
+
+## paws docker
+
+Build and gate a container image the same way `docker-facts` + `docker-release` do
+
+- `--image` — Image name, e.g. "ghcr.io/example/app". Falls back to $GITHUB_REPOSITORY
+- `--version` — Version to tag with. Falls back to $GITHUB_SHA (short)
+- `--registries` — Additional registries to mirror tags into, comma-separated
+- `--dockerfile` — 
+- `--context` — 
+- `--canary-label` (default: `canary`) — 
+- `--push` — Force push regardless of branch/tag/label gating
+- `--with-latest` — 
+- `--target` — 
+- `--prepend-target` — 
+- `--labels` — PR labels to check against --canary-label, comma-separated
+- `--default-branch` (default: `main`) — 
+- `--dockerhub-username` — Docker Hub username to authenticate publishing with. Falls back to $DOCKERHUB_USERNAME. Required (here or via env) to actually push to docker.io — without it, `dockerRelease` builds but can't authenticate, so `push=true` still publishes nothing
+- `--ghcr-username` — GHCR username to authenticate publishing with. Falls back to $GHCR_USERNAME. Required (here or via env) to actually push to ghcr.io
+- `--registry-username` — Username(s) for registries in --registries other than docker.io/ ghcr.io (Artifactory, a private registry, etc.), as "<registry>=<username>" pairs, comma-separated — e.g. "myco.jfrog.io=deploy-bot". These are built and published natively through Dagger (`Container.withRegistryAuth`), not via the docker.io/ghcr.io-only `dockerRelease` call. The matching token/password is read from an env var derived from the registry: uppercased, every non-alphanumeric character replaced with `_`, suffixed `_TOKEN` — e.g. "myco.jfrog.io" reads $MYCO_JFROG_IO_TOKEN
+
+## paws semver
+
+Compute the next semantic version from PR labels or an explicit increment, matching `actions/semver`'s current behavior
+
+- `--base` — Base version to start from instead of the last matching tag
+- `--prefix` — Prefix used to filter/build tag versions, e.g. "chart-name-"
+- `--increment` — Explicit increment (major, minor, patch); skips label/branch inference
+- `--major-label` (default: `major`) — 
+- `--minor-label` (default: `minor`) — 
+- `--patch-label` (default: `patch`) — 
+- `--labels` — PR/commit labels to check against major/minor/patch-label, comma-separated
+- `--branch` (default: `main`) — Branch name used for fallback inference when no configured label matches
+- `--pr` — Whether this is a PR build (produces a `-pr.<sha>` prerelease)
+- `--push` — Create and push the computed version as an annotated git tag, then create a matching GitHub Release with auto-generated notes (GitHub's git/tags + git/refs + releases APIs — no local git identity or worktree needed). Replaces a hand-rolled `git tag`/`git push`/`gh release create` step in the calling workflow
+- `--tagger-name` (default: `paws-bot`) — Tagger identity attributed to the pushed tag
+- `--tagger-email` (default: `paws-bot@users.noreply.github.com`) — 
+
+## paws init
+
+Install the `dagger` CLI (most other subcommands need it on PATH)
+
+## paws audit
+
+Run the audit/compliance scanner suite
+
+## paws docs
+
+Publish generated docs (e.g. rustdoc) to GitHub Pages
+
+## paws provision
+
+Provision toolchains concurrently (rust, node, python, ...)
+
+- `--toolchains` — Comma-separated ecosystems to install, e.g. "rust,node,python"
+- `--verbose` — Print per-ecosystem provisioning start/elapsed timing to stderr
+
+## paws helm
+
+Lint (and optionally package) Helm chart(s) — `charts/*/Chart.yaml` or a root `Chart.yaml`
+
+- `--source` (default: `.`) — Host path to the source tree to scan for chart(s)
+- `--package` — Also `helm package` every chart after linting, exported to `--output`
+- `--output` (default: `tmp`) — Host directory packaged `.tgz`s are exported to (only with `--package`)
+- `--publish` — Publish: a per-chart GitHub Release (tag `<chart>-<version>`, asset uploaded only if missing) plus a real Helm `index.yaml` pushed to `--pages-branch`, so `helm repo add` against this repo's GitHub Pages URL works. Does its own packaging internally (per-chart, not the flat `--output` directory); mutually exclusive with `--package`
+- `--repository` — "owner/repo" to publish releases/index.yaml to. Falls back to $GITHUB_REPOSITORY. Only used with `--publish`
+- `--pages-branch` (default: `gh-pages`) — Branch `index.yaml` is published to. Only used with `--publish`
+- `--index-path` (default: `index.yaml`) — Path to `index.yaml` on `--pages-branch`. Only used with `--publish`
+- `--silent` — Suppress dagger's live build progress; only print output once the pipeline finishes (or on failure). Default is streamed live
+
+## paws release
+
+Cross-target build, package, and publish a release binary to GitHub Releases
+
+- `--target` — Rust target triple to build, e.g. "x86_64-unknown-linux-gnu". Must be one of `paws_release::known_targets()` — each maps to a `./builders/<dir>` Dockerfile the build runs through Dagger
+- `--source` (default: `.`) — Host path to the source tree to build
+- `--package` (default: `paws-cli`) — Cargo package(s) to build, comma-separated (one [[bin]] each) — e.g. "agent,server". Paired 1:1 with --binary-name
+- `--binary-name` (default: `paws`) — Binary name(s) as declared in each package's [[bin]] section, comma-separated, paired 1:1 with --package. All built binaries are packaged into one archive
+- `--local-build` — Build locally via Dagger's `docker-build` against paws's embedded generic Rust-Linux builder instead of pulling paws's own prebuilt builder image. Use this outside paws's own repo (e.g. a target repo with no `builders/` directory) — only `paws_release::local_build_targets()` are supported
+- `--tag` — Release tag, e.g. "v0.0.1-prerelease.1". Falls back to $GITHUB_REF_NAME
+- `--prerelease` — Mark the GitHub Release as a prerelease
+- `--repository` — "owner/repo". Falls back to $GITHUB_REPOSITORY
+- `--no-upload` — Build and package only; skip the GitHub upload
+- `--skip-smoke-test` — Skip the post-build smoke test (not recommended — it's what catches a binary that builds but doesn't actually run)
+
+## paws mcp
+
+Model Context Protocol integration: expose every `paws` subcommand as an MCP tool, calling the same Rust code the CLI calls — not a CLI subprocess proxy
+
+## paws mcp setup
+
+Write/merge an MCP client config so `paws mcp serve` is discoverable
+
+- `--client` — Which MCP client config to write/merge into: "claude-code" (default, project-local `.mcp.json`) or "claude-desktop" (global, platform-specific `claude_desktop_config.json`)
+
+## paws mcp serve
+
+Run the MCP server (stdio transport). Exposes every `paws` subcommand as an MCP tool by calling this crate's `run_*` functions directly
+
+## paws llms
+
+Generate `llms.txt`, a machine-readable summary of `paws`'s own tooling surface (see <https://llmstxt.org>)
+
+## paws llms generate
+
+Generate `llms.txt` from this CLI's own `--help` metadata
+
+- `--output` (default: `llms.txt`) — Path to write the generated file to
+- `--publish` — After generating, commit the file to GitHub via the Contents API (reuses `paws_release::GitHubReleaseClient`, the same mechanism `paws helm --publish` uses for `index.yaml` — no local git identity needed). Skips the commit if the generated content is unchanged
+- `--branch` (default: `main`) — Branch to publish to. Only used with `--publish`
+- `--repository` — "owner/repo" to publish to. Falls back to $GITHUB_REPOSITORY. Only used with `--publish`
+
+## paws workflow
+
+Generate a starter CI workflow for a *consumer* repo: detects its ecosystem(s) and emits a workflow wiring in `paws-up` plus the matching `paws` subcommands
+
+## paws workflow generate
+
+Detect this repo's ecosystem(s) and generate a starter CI workflow
+
+- `--provider` (default: `github`) — Which CI origin to generate for. Only "github" is implemented today — more origins (e.g. "gitlab") are planned; this keys off the same idea as `paws_environment::Provider` (currently GitHub-only too) rather than a separate abstraction
+- `--output` (default: `.github/workflows/paws.yml`) — Path to write the generated workflow file to
+
+## paws auth
+
+Credential helpers — mint tokens `paws` (or other tools) can use
+
+## paws auth github-app
+
+Mint a GitHub App installation access token and print it to stdout (nothing else goes to stdout, so `TOKEN=$(paws auth github-app)` works as a shell capture) — the same mechanism `actions/create-github-app-token` provides as a separate Action, done natively so no extra CI step is needed. Every other `paws` subcommand that needs a GitHub token (`semver --push`, `helm --publish`, `release`, `llms generate --publish`) already picks up App auth automatically via the same `$GH_APP_CLIENT_ID`/ `$GH_APP_PRIVATE_KEY` env vars — this subcommand exists for cases that want the raw token directly (e.g. handing it to another tool)
+
+- `--client-id` — The GitHub App's Client ID (the `Iv23...`-style string). Falls back to $GH_APP_CLIENT_ID
+- `--private-key` — The GitHub App's private key, PEM-encoded, given directly. Falls back to $GH_APP_PRIVATE_KEY. Mutually exclusive with --private-key-file in practice — if both are given, the file wins
+- `--private-key-file` — Path to a file containing the GitHub App's private key. Falls back to $GH_APP_PRIVATE_KEY_FILE
+- `--repository` — "owner/repo" the App is installed on. Falls back to $GITHUB_REPOSITORY
+
+## GitHub Actions
+
+paws also ships composite GitHub Actions for wiring into a *consumer* repo's own CI/CD, separate from the CLI subcommands above — `paws workflow generate` scaffolds a starter workflow using these automatically.
+
+### paws-up
+
+Downloads a paws release binary for the current runner, puts it on PATH, and installs the dagger CLI via `paws init` (most paws subcommands need it). Composite (not Docker-based) so paws's own Dagger calls talk to the runner's real Docker daemon directly, with no Docker-in-Docker nesting.
+
+```yaml
+- uses: mbround18/paws/actions/paws-up@main
+  with:
+    github-token: ${{ github.token }}
+    install-dagger: true
+    version: latest
+```
+
+**Inputs**
+
+- `github-token` (optional, default: `${{ github.token }}`) — Token used to query/download releases (avoids low anonymous rate limits).
+- `install-dagger` (optional, default: `true`) — Also run `paws init` to install the dagger CLI, which most paws subcommands need on PATH. Set to "false" to skip if the runner already has it (e.g. a self-hosted runner with dagger pre-installed).
+- `version` (optional, default: `latest`) — paws version to install, e.g. "v0.0.1-prerelease.1". Defaults to the most recent GitHub Release (prereleases included — this is meant for fast dogfooding iteration, not just stable pins).
+
+**Outputs**
+
+- `version` — The resolved paws version that was installed.
+
