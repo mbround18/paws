@@ -1,0 +1,11 @@
+{
+  "name": "node-server-fixture",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node --check server.js",
+    "lint": "node --check server.js",
+    "test": "node server.test.js"
+  }
+}

@@ -12,7 +12,10 @@ Confirmed directly against the code, not from memory:
   `tauri-android`, `flatpak` (`crates/paws-cli-core/src/lib.rs`). Node execution is now natively multi-package-manager
   (`crates/paws-node` — npm/yarn/pnpm/bun, detected from lockfiles or `package.json`'s
   `packageManager` field, no longer the old `pnpmBuildAndTest`-only interim path) and
-  framework-aware (Vite, Next.js, or plain, informational for now). Verified for real against
+  framework-aware (Vite, Next.js, or plain, informational for now). The `Node` row's "Backend
+  Server" output half is verified for real, end to end, against `examples/node-server-fixture` (a
+  plain `node:http` server, no framework/bundler) — the "NPM Package" half stays unverified since
+  it's really about publishing, which `paws publish` (see below) doesn't do yet. Verified for real against
   fixtures covering all 4 package managers plus real `create-vite`/`create-next-app` scaffolds
   (including a React+TSX one) — see `examples/README.md`. It also detects Playwright e2e projects
   (`@playwright/test` dependency or a `playwright.config.*` file) and runs a dedicated

@@ -12,6 +12,12 @@ part of `paws` itself.
 - `rust-fixture/` — a minimal crate that builds and tests cleanly; the "clean" half of
   `paws ci --toolchain rust`'s acceptance scenario.
 - `node-fixture/` — a minimal pnpm-style project; the target for `paws ci --toolchain node`.
+- `node-server-fixture/` — a plain (`Framework::Plain`, no bundler/framework) Node backend server:
+  `server.js` exports a real `node:http` server with a `/health` route, and `server.test.js` binds
+  it to an ephemeral port and hits it with a real `fetch()`, asserting on the actual HTTP
+  response — not just importing a pure function like `node-fixture/`. Verifies the `Node` row's
+  "Backend Server" output type in `docs/ROADMAP.md` specifically, run for real end to end through
+  `paws ci --toolchain node`.
 - `docker-fixture/` — a plain `Dockerfile`, no compose file at all; exercises `paws docker`'s
   "no `docker-compose.yml`" fallback to `./Dockerfile` + `.` (spec.md's Edge Cases, FR-004).
 - `docker-compose-fixture/` — a `docker-compose.yml` with two services, one whose `image:`
