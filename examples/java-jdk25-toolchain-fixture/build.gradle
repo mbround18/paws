@@ -1,0 +1,32 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.example'
+version = '0.1.0'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:5.11.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// The real signal this fixture exists for: a project explicitly declaring
+// a JDK 25 toolchain (confirmed for real against
+// mbround18/hytale-modding-template's plugin/build.gradle) needs a real
+// JDK 25 install to resolve against -- builders/java provides one
+// alongside JDK 21, so this resolves without network-based toolchain
+// auto-provisioning.
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+test {
+    useJUnitPlatform()
+}

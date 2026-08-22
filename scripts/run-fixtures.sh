@@ -53,6 +53,7 @@ fixtures=(
     "java-react-fixture (node)|examples/java-react-fixture/frontend|pass|ci --toolchain node --silent"
     "kotlin-fixture|examples/kotlin-fixture|pass|ci --toolchain kotlin --silent"
     "java-kotlin-mixed-fixture|examples/java-kotlin-mixed-fixture|pass|ci --toolchain kotlin --silent"
+    "java-jdk25-toolchain-fixture|examples/java-jdk25-toolchain-fixture|pass|ci --toolchain java --silent"
     "go-fixture (cross-compile)|examples/go-fixture|pass|ci --toolchain go --silent --targets linux/amd64,darwin/arm64,windows/amd64"
     "tauri-fixture|examples/tauri-fixture|pass|ci --toolchain tauri --silent"
     "tauri-react-fixture|examples/tauri-react-fixture|pass|ci --toolchain tauri --silent"

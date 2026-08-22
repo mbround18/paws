@@ -847,7 +847,13 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
                 build_system.as_str(),
                 dir.display()
             );
-            let args = paws_java::dagger_pipeline_args(build_system, &dir.to_string_lossy());
+            let builder_dir = paws_java::write_builder_dockerfile()
+                .context("failed to materialize the java builder Dockerfile")?;
+            let args = paws_java::dagger_pipeline_args(
+                build_system,
+                &dir.to_string_lossy(),
+                &builder_dir.to_string_lossy(),
+            );
             run_dagger_core(&args, silent).await?;
             println!("ci: java build/test succeeded");
         }
@@ -856,7 +862,12 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
             paws_kotlin::detect_project(&dir)
                 .context("failed to detect a Kotlin project in the current directory")?;
             println!("ci: kotlin project ({})", dir.display());
-            let args = paws_kotlin::dagger_pipeline_args(&dir.to_string_lossy());
+            let builder_dir = paws_kotlin::write_builder_dockerfile()
+                .context("failed to materialize the java builder Dockerfile")?;
+            let args = paws_kotlin::dagger_pipeline_args(
+                &dir.to_string_lossy(),
+                &builder_dir.to_string_lossy(),
+            );
             run_dagger_core(&args, silent).await?;
             println!("ci: kotlin build/test succeeded");
         }

@@ -8,13 +8,17 @@
 //! Gradle-based (the `kotlin-maven-plugin` exists but is rare in practice),
 //! and unlike Java, Kotlin's compiler isn't part of the JDK at all — it's
 //! entirely a Gradle plugin dependency, fetched by Gradle itself the same
-//! way any other dependency is. That means **no new base image or build
-//! commands are needed here**: this crate reuses the exact same
-//! `eclipse-temurin:21-jdk-jammy` + `sh gradlew build` pipeline shape as
-//! `paws-java`'s Gradle path (duplicated rather than shared, matching how
-//! every other per-toolchain crate in this workspace — `paws-go`,
-//! `paws-rust`, `paws-python` — independently owns its own pipeline
-//! builder rather than reaching into a sibling crate for one).
+//! way any other dependency is.
+//!
+//! Reuses `paws-java`'s `builders/java` image (JDK 21 + JDK 25 side by
+//! side — see `crates/paws-java`'s module doc for the full finding on why
+//! one pin can't cover both an old Gradle <=8.10 project and a real
+//! `java.toolchain.languageVersion = JavaLanguageVersion.of(25)`
+//! declaration) rather than a plain image pull, embedding the same
+//! Dockerfile independently (matching how every other per-toolchain crate
+//! in this workspace — `paws-go`, `paws-rust`, `paws-python` —
+//! independently owns its own pipeline builder rather than reaching into a
+//! sibling crate for one, even when the underlying image is identical).
 //!
 //! This is also what closes `docs/ROADMAP.md`'s `Java + Kotlin` row for
 //! free, the same "zero code changes" story as `Go + C/C++ (cgo)`: a
@@ -27,16 +31,30 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
-/// Same image `paws-java` uses — Kotlin needs nothing beyond a working JDK
-/// plus network access for Gradle to fetch the Kotlin compiler itself.
-/// Pinned to JDK 21, not the newer JDK 25 LTS, for a reason specific to
-/// *this* crate: confirmed for real that a JDK-25 build JVM breaks a real
-/// `gradlew build` with Gradle 8.10 + Kotlin Gradle plugin 1.9.24 (still
-/// common in the wild), even though `gradle --version` alone succeeds on
-/// it — see `paws_java::BASE_IMAGE`'s doc comment for the full finding.
-pub const BASE_IMAGE: &str = "eclipse-temurin:21-jdk-jammy";
+/// The `builders/java` Dockerfile, embedded independently from
+/// `paws-java`'s own copy — see this module's doc comment on why that
+/// duplication is deliberate.
+const JAVA_DOCKERFILE: &str = include_str!("../../../builders/java/Dockerfile");
+
+fn write_dockerfile(name: &str, contents: &str) -> Result<PathBuf> {
+    let dir = std::env::temp_dir().join("paws-builders").join(name);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create temp dir for the {name} builder Dockerfile"))?;
+    std::fs::write(dir.join("Dockerfile"), contents)
+        .with_context(|| format!("failed to write the {name} builder Dockerfile"))?;
+    Ok(dir)
+}
+
+/// Writes the embedded `builders/java` Dockerfile to a temp directory and
+/// returns that directory's path, suitable for `dagger_pipeline_args`'s
+/// `builder_dir` argument. Dagger's own BuildKit layer caching means this
+/// resolves to the same cached image `paws-java` already built in the same
+/// `paws ci` process/host, not a second independent build.
+pub fn write_builder_dockerfile() -> Result<PathBuf> {
+    write_dockerfile("java", JAVA_DOCKERFILE)
+}
 
 /// Every `.kt`/`.kts` file under `dir`, recursing but skipping hidden
 /// directories — same walking strategy as `paws_go::go_files`.
@@ -96,13 +114,23 @@ pub fn detect_project(dir: &Path) -> Result<()> {
 }
 
 /// Builds the `dagger core <chain>` argument list (see `paws_dagger::core`)
-/// for `source_dir`: `sh gradlew build` against [`BASE_IMAGE`] — identical
-/// in shape to `paws_java::dagger_pipeline_args`'s Gradle path.
-pub fn dagger_pipeline_args(source_dir: &str) -> Vec<String> {
+/// for `source_dir`: builds `builder_dir` (see [`write_builder_dockerfile`]),
+/// then runs `sh gradlew build` — identical in shape to
+/// `paws_java::dagger_pipeline_args`'s Gradle path.
+pub fn dagger_pipeline_args(source_dir: &str, builder_dir: &str) -> Vec<String> {
+    let created_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let build_args =
+        format!("BUILDER_VERSION=dev,BUILDER_REVISION=unknown,BUILDER_CREATED={created_unix}");
+
     vec![
-        "container".into(),
-        "from".into(),
-        format!("--address={BASE_IMAGE}"),
+        "host".into(),
+        "directory".into(),
+        format!("--path={builder_dir}"),
+        "docker-build".into(),
+        format!("--build-args={build_args}"),
         "with-mounted-directory".into(),
         "--path=/src".into(),
         format!("--source={source_dir}"),
@@ -180,23 +208,20 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_runs_the_wrapper_via_sh() {
-        let args = dagger_pipeline_args("/host/src");
-        assert_eq!(
-            args,
-            vec![
-                "container".to_string(),
-                "from".to_string(),
-                "--address=eclipse-temurin:21-jdk-jammy".to_string(),
-                "with-mounted-directory".to_string(),
-                "--path=/src".to_string(),
-                "--source=/host/src".to_string(),
-                "with-workdir".to_string(),
-                "--path=/src".to_string(),
-                "with-exec".to_string(),
-                "--args=sh,gradlew,build".to_string(),
-                "stdout".to_string(),
-            ]
-        );
+    fn write_builder_dockerfile_materializes_the_embedded_dockerfile() {
+        let dir = write_builder_dockerfile().unwrap();
+        let contents = fs::read_to_string(dir.join("Dockerfile")).unwrap();
+        assert_eq!(contents, JAVA_DOCKERFILE);
+    }
+
+    #[test]
+    fn pipeline_builds_the_builder_then_runs_the_wrapper_via_sh() {
+        let args = dagger_pipeline_args("/host/src", "/builder/dir");
+        assert_eq!(args[0], "host");
+        assert_eq!(args[1], "directory");
+        assert_eq!(args[2], "--path=/builder/dir");
+        assert_eq!(args[3], "docker-build");
+        assert!(args.contains(&"--args=sh,gradlew,build".to_string()));
+        assert_eq!(args.last(), Some(&"stdout".to_string()));
     }
 }

@@ -12,21 +12,12 @@
       "automerge": false
     },
     {
-      "description": "eclipse-temurin (Java/Kotlin's shared base image) needs a deliberate look before bumping, not an automatic merge -- confirmed for real that a JDK-25 build JVM breaks a real `gradlew build` under Gradle 8.10 + a still-common Kotlin Gradle plugin version, even though `gradle --version` alone succeeds on it (see crates/paws-java/src/lib.rs's BASE_IMAGE doc comment).",
+      "description": "eclipse-temurin (builders/java's JDK 21 + JDK 25 pair, shared by paws-java/paws-kotlin) needs a deliberate look before bumping either FROM line, not an automatic merge -- confirmed for real that Gradle <=8.10 can't even launch on a JDK-25 host JVM at all, and that a real project's `java.toolchain.languageVersion` requirement needs the specific JDK installed, not just \"newer\" (see builders/java/Dockerfile's header comment).",
       "matchDepNames": ["eclipse-temurin"],
       "automerge": false
     }
   ],
   "customManagers": [
-    {
-      "customType": "regex",
-      "description": "crates/paws-java and crates/paws-kotlin intentionally pin the exact same eclipse-temurin tag in two places (documented as a deliberate shared pin, not an oversight) -- Renovate's built-in docker manager only scans Dockerfiles/compose files, not Rust string literals, so without this customManager these embedded image references are invisible to it.",
-      "managerFilePatterns": ["/^crates/paws-(java|kotlin)/src/lib\\.rs$/"],
-      "matchStrings": [
-        "pub const BASE_IMAGE: &str = \"(?<depName>eclipse-temurin):(?<currentValue>[^\"]+)\";"
-      ],
-      "datasourceTemplate": "docker"
-    },
     {
       "customType": "regex",
       "description": "paws-python's astral/uv base image tag encodes the pinned Python minor version (crates/paws-python/src/lib.rs's DEFAULT_PYTHON_VERSION doc comment: CPython has no self-updating \"latest\"/LTS tag the way node:lts-trixie does, so this is a real pin needing a real bump when a new Python minor ships). Matched against pipeline_uses_the_default_python_image's assertion specifically (anchored by function name, not just the tag shape) -- the production constant only holds the bare \"3.13\" fragment `format!` interpolates into it, and a second test (pipeline_respects_an_explicit_python_version) asserts an unrelated, deliberately-non-default \"3.11\" literal in the exact same shape that must NOT be tracked as a dependency to bump.",

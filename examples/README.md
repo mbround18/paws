@@ -141,6 +141,12 @@ pytest`, run against `astral/uv:python3.12-trixie-slim` through Dagger.
   beyond what `kotlin-fixture/` already exercises: Gradle's `java`/`kotlin` plugins already handle
   mixed compilation themselves. Verified for real: `:compileJava`/`:compileKotlin` both run,
   `CalculatorTest` (Kotlin) asserts on `Calculator.add` (Kotlin) calling `Adder.add` (Java).
+- `java-jdk25-toolchain-fixture/` — a minimal Java module with a real, generated Gradle 9.3.1
+  wrapper and an explicit `java.toolchain.languageVersion = JavaLanguageVersion.of(25)` — the real
+  requirement found in `mbround18/hytale-modding-template`'s `plugin/build.gradle`. Proves
+  `builders/java`'s JDK 21 + JDK 25 split actually resolves a real toolchain requirement, not just
+  launches Gradle successfully: full build+test verified for real through both a raw `docker run`
+  against the builder image directly and the real `paws` CLI end to end.
 - `playwright-fixture/` — a real `npm create playwright@latest -- --quiet --lang=TypeScript
 --no-browsers` scaffold; the target for `paws-node`'s Playwright detection. Exercises
   `crates/paws-node`'s `has_playwright` detection (`@playwright/test` dependency or

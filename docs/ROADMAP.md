@@ -17,14 +17,17 @@ Confirmed directly against the code, not from memory:
   `mvn`/`gradle` this crate would have to install and version itself — a repo without one
   committed gets a clear error instead. Runs `sh mvnw -B verify` or `sh gradlew build` (invoked via
   `sh`, not `./`, so a missing execute bit on the wrapper isn't a build failure) against
-  `eclipse-temurin:21-jdk-jammy` — not a port of `gh-reusable`'s own `DEFAULT_TEMURIN_IMAGE`
+  `builders/java` (JDK 21 + JDK 25 side by side, not a plain image pull — see "JVM / Go stacks"
+  below for the full finding on why one JDK pin can't cover both an old Gradle <=8.10 project and
+  a real `java.toolchain.languageVersion = JavaLanguageVersion.of(25)` declaration).
+  `eclipse-temurin`'s base layer isn't a port of `gh-reusable`'s own `DEFAULT_TEMURIN_IMAGE`
   (`eclipse-temurin:<version>-jdk-trixie`), which doesn't actually exist on Docker Hub (confirmed
   directly: no Debian-suffixed tag is published for `eclipse-temurin` at all); `-jammy` is the real
   verified equivalent for the same JDK 21 Temurin distribution. Verified for real, end to end,
-  against both `examples/java-maven-fixture` and `examples/java-gradle-fixture` — real `mvnw`/
-  `gradlew` wrappers generated from actual Maven 3.9.9/Gradle 8.10 installs, JUnit 5 tests
-  genuinely executing (`Tests run: 1, Failures: 0` / a real `:test` task) through Dagger. No
-  `paws-provision` support for `java` yet (unlike `go`) — JDK version management has no single
+  against `examples/java-maven-fixture`, `examples/java-gradle-fixture`, and
+  `examples/java-jdk25-toolchain-fixture` — real `mvnw`/`gradlew` wrappers generated from actual
+  Maven 3.9.9/Gradle 8.10/Gradle 9.3.1 installs, JUnit 5 tests genuinely executing through Dagger.
+  No `paws-provision` support for `java` yet (unlike `go`) — JDK version management has no single
   obviously-right "assume it's already present" tool the way `rustup`/`corepack`/`uv`/Go's own
   `golang.org/dl` mechanism do, so that's left as a deliberate gap rather than a guess.
   `go` (2026-08-22, `crates/paws-go`) is a new native implementation, not a port — unlike
@@ -138,19 +141,46 @@ myco.jfrog.io=you`, token read from a derived `$MYCO_JFROG_IO_TOKEN`-style env v
   targets only, no macOS/Windows. See `docs/DEVELOPMENT.md`'s release-pipeline section.
 - **Java** was flagged 2026-08-18 as the next gap worth naming, per a real `gh api
   users/mbround18/repos` audit: after Rust/JS/TS, Java was the next-most-common language across
-  `mbround18`'s own non-fork repos (3, all Gradle-based Hytale mods). Closed 2026-08-22
-  (`crates/paws-java`, `paws ci --toolchain java` — see "JVM / Go stacks" below); those 3 repos
-  are real, ready-to-convert candidates now, the same shape as the Docker conversions below.
-- **`paws publish` doesn't exist** — a real gap surfaced by a second repo audit (2026-08-19)
-  that checked which of `mbround18`'s active repos still call `gh-reusable` directly (candidates
-  for a `paws docker`/`paws ci`-style conversion, same shape as the `ark-manager-web` work
-  above). Seven of eight (`valheim-docker`, `meilisearch-operator`,
-  `cloudflare-discord-oidc-worker`, `vein-docker`, `helm-hub`, `backup-docker`,
-  `foundryvtt-docker`) only call `rust-build-n-test`/`docker-release`/`tagger` — functions `paws
-ci`/`paws docker`/`paws semver` already cover, pure conversion work. The eighth,
-  `game-server-management`, also depends on `gh-reusable`'s `publish.yaml` (`target: node |
-rust-crate | helm-chart` — crates.io/npm/OCI Helm-chart publishing), which nothing in `paws`
-  replaces yet.
+  `mbround18`'s own non-fork repos (3, all Gradle-based Hytale mods). `crates/paws-java`/`paws ci
+  --toolchain java` landed 2026-08-22 — but re-checked for real against those same 3 repos the
+  same day, none of them actually built with it: `hytale-modding-template`/
+  `hytale-vex-lich-dungeon`/`hytale-demo-ui` all declare `java.toolchain.languageVersion =
+  JavaLanguageVersion.of(25)` for plugin compilation, and `paws-java`'s original
+  `eclipse-temurin:21-jdk-jammy` pin had no JDK 25 to resolve that against.
+  **Root-caused and fixed the same day**: the earlier "JDK 25 breaks Gradle" finding was
+  real but the wrong culprit was blamed — confirmed for real it's Gradle **8.10** that can't even
+  *launch* on a JDK-25 host JVM at all (`Unsupported class file major version 69`, Gradle's own
+  Groovy DSL parsing, unrelated to Kotlin specifically), while the actual Hytale repos pin Gradle
+  **9.3.x**, which launches fine on JDK 21 *or* 25 — confirmed for real with an isolated pure-Java
+  Gradle-9.3.1 project. So the real fix wasn't "pick one JDK" at all: `builders/java` (new,
+  2026-08-22) installs JDK 21 *and* JDK 25 side by side under `/usr/lib/jvm/` — the location
+  Gradle's own toolchain auto-detection scans on Linux, confirmed for real, no target-project
+  config needed — with `JAVA_HOME` defaulting to 21 so old Gradle <=8.10 pins keep working while a
+  real `languageVersion = JavaLanguageVersion.of(25)` declaration resolves the 25 install
+  alongside it. `crates/paws-java`/`crates/paws-kotlin` both now build through this image instead
+  of a plain pull — the same "needs multiple toolchains combined" reasoning every other
+  `builders/*` image exists for (`docs/DEVELOPMENT.md`'s "How a new stack gets added"), just
+  discovered for JVM version selection rather than a language combination. Verified for real, end
+  to end, against `examples/java-jdk25-toolchain-fixture` (a real Gradle 9.3.1 wrapper, `.
+  toolchain.languageVersion = JavaLanguageVersion.of(25)`, full build+test) *and* against
+  `hytale-modding-template` itself directly — its `plugin` module's JDK-25 toolchain resolves and
+  its own orchestration tasks (`:ensureDirectories`/`:assetsZip`) run fine; the repo's *root*
+  `:ensureServerJar` task then fails on an unrelated, genuinely out-of-scope requirement (Docker-
+  in-Docker plus an interactive OAuth login, to fetch a proprietary game server jar) — a
+  repo-level CI design question for that project, not a `paws-java` gap.
+- **`paws publish` doesn't exist** — a real gap first surfaced by a 2026-08-19 repo audit checking
+  which of `mbround18`'s active repos still call `gh-reusable` directly (candidates for a `paws
+  docker`/`paws ci`-style conversion, same shape as the `ark-manager-web` work above), re-verified
+  for real 2026-08-22: two of the original eight (`vein-docker`, `foundryvtt-docker`) turned out
+  to already be converted to `paws-up` by then — that first audit's list was stale within days.
+  Six real candidates remain (`valheim-docker`, `meilisearch-operator`,
+  `cloudflare-discord-oidc-worker`, `helm-hub`, `backup-docker`, `game-server-management`) that
+  only call `rust-build-n-test`/`docker-release`/`tagger` — functions `paws ci`/`paws docker`/
+  `paws semver` already cover, pure conversion work. `game-server-management` also depends on
+  `gh-reusable`'s `publish.yaml`; re-checked for real against its actual workflow (not assumed
+  from `publish.yaml`'s general `target: node | rust-crate | helm-chart` shape) — it only uses
+  `target: rust-crate` (crates.io, for `libs/env-parse`), a narrower gap than the general
+  `publish.yaml` contract implies. `paws publish` replaces none of these targets yet.
 - **`paws helm`** (2026-08-19): closes the lint/package half of the Helm-chart gap above, found
   converting `mbround18/helm-charts` itself. New `paws-helm` crate + `builders/helm/Dockerfile`
   (Alpine + Helm's own official install script, no maintained "official" Helm image exists to
@@ -263,10 +293,10 @@ trip against a real `/api/health` response, not just a compile check.
 
 `Kotlin (JVM)` (`crates/paws-kotlin`, 2026-08-22) is Gradle-only, deliberately — real Kotlin
 projects are overwhelmingly Gradle-based, and unlike Java, `kotlinc` isn't part of the JDK at all;
-it's a Gradle plugin dependency Gradle fetches itself, so this needed **no new base image or build
-commands** beyond reusing `paws-java`'s exact `eclipse-temurin:21-jdk-jammy` + `sh gradlew build`
-pipeline shape (duplicated rather than shared, matching how `paws-go`/`paws-rust`/`paws-python`
-each independently own their pipeline builder). Detection scans for real `.kt`/`.kts` source files
+it's a Gradle plugin dependency Gradle fetches itself, so this needed no *new* build commands,
+just reusing `paws-java`'s `sh gradlew build` pipeline shape — and, since 2026-08-22, `paws-java`'s
+`builders/java` image too (duplicated rather than shared, matching how `paws-go`/`paws-rust`/
+`paws-python` each independently own their pipeline builder). Detection scans for real `.kt`/`.kts` source files
 under a Gradle build — a build file merely mentioning Kotlin isn't the same as having Kotlin code
 — and, like `paws-java`, requires the project's own `gradlew` wrapper. Verified for real, end to
 end, against `examples/kotlin-fixture` through Dagger (`:compileKotlin`/`:test`/`:build` all
@@ -359,15 +389,16 @@ Roughly, in order:
 4. **Fixtures** — add a real example project under `examples/` (see `examples/README.md`) so the
    new support is tested against something real, not just unit tests of the Rust logic.
 
-None of this needs a new builder image under `./builders/*` unless the stack also needs
-cross-compilation support for _`paws` itself_ to target — that's a separate concern from `paws`
-being able to build _other projects_ written in that language. `./builders/*` exists only for
-pipelines needing *multiple* toolchains combined that no single public image provides (Rust+Node+
-GTK for `tauri`, JDK+Android SDK/NDK+Rust+Node for `tauri-android`, Ubuntu+flatpak-builder+runtime
-for `flatpak`) — every single-toolchain crate (`paws-go`/`paws-java`/`paws-kotlin`/`paws-python`/
-`paws-rust`, plus `paws-node`) just pulls a public image directly, since one already has everything
-needed; confirmed for real per-crate (e.g. `gcc`/`CGO_ENABLED=1` already present in
-`golang:1-bookworm` for cgo).
+Most stacks don't need a new builder image under `./builders/*` — only ones needing *multiple*
+toolchains (or, per `java/`'s 2026-08-22 addition, multiple *versions* of the same toolchain)
+combined that no single public image provides (Rust+Node+GTK for `tauri`, JDK+Android SDK/NDK+
+Rust+Node for `tauri-android`, Ubuntu+flatpak-builder+runtime for `flatpak`, JDK 21+JDK 25 for
+`java`/`kotlin` — see `builders/java/Dockerfile`'s header comment). `paws-go`/`paws-python`/
+`paws-rust`, plus `paws-node`, still just pull a public image directly, since one already has
+everything needed; confirmed for real per-crate (e.g. `gcc`/`CGO_ENABLED=1` already present in
+`golang:1-bookworm` for cgo). A stack needing cross-compilation support for _`paws` itself_ to
+target is a separate, third reason a builder image might exist — unrelated to `paws` being able to
+build _other projects_ written in that language.
 
 **Base image version policy** (2026-08-22): pin to a tag that *itself* tracks "current" wherever
 the upstream image publishes one, and only hardcode a specific version where it doesn't:

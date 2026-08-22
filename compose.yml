@@ -226,3 +226,18 @@ services:
       tags:
         - ghcr.io/mbround18/paws-builders:helm-${VERSION:-dev}
         - docker.io/mbround18/paws-builders:helm-${VERSION:-dev}
+
+  java:
+    build:
+      context: ./builders/java
+      args:
+        BUILDER_VERSION: ${VERSION:-dev}
+        BUILDER_REVISION: ${REVISION:-unknown}
+        BUILDER_CREATED: ${CREATED:-unknown}
+      cache_from:
+        - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-java
+      cache_to:
+        - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-java,mode=max
+      tags:
+        - ghcr.io/mbround18/paws-builders:java-${VERSION:-dev}
+        - docker.io/mbround18/paws-builders:java-${VERSION:-dev}
