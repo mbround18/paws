@@ -63,11 +63,55 @@ for ((i = 0; i < parallel; i++)); do
     echo >&3
 done
 
+is_tty=0
+[[ -t 1 ]] && is_tty=1
+
+interrupted=0
+supervisor_pids=()
+
+# cleanup: runs on normal exit *and* on Ctrl-C/SIGTERM. On interrupt it
+# first terminates every in-flight fixture -- each one's real work
+# (`paws`, and whatever `dagger` subprocess it spawns) runs under `setsid`
+# specifically so it's the leader of its own process group, letting us
+# `kill` that whole group by PID rather than just the wrapper shell,
+# leaving orphaned dagger builds running in the background.
 cleanup() {
+    local rc=$?
+    if ((interrupted)); then
+        echo
+        echo "interrupted -- stopping in-flight fixtures..."
+        for i in "${!fixtures[@]}"; do
+            [[ -f "$results_dir/$i.pid" ]] || continue
+            local pgid; pgid=$(<"$results_dir/$i.pid")
+            kill -TERM -- "-$pgid" 2>/dev/null || true
+        done
+        for pid in "${supervisor_pids[@]}"; do
+            kill -TERM "$pid" 2>/dev/null || true
+        done
+        # Grace period, then escalate to SIGKILL for anything that ignored it.
+        local waited=0
+        while ((waited < 20)) && jobs -r >/dev/null 2>&1 && [[ -n "$(jobs -r)" ]]; do
+            sleep 0.1
+            waited=$((waited + 1))
+        done
+        for i in "${!fixtures[@]}"; do
+            [[ -f "$results_dir/$i.pid" ]] || continue
+            local pgid; pgid=$(<"$results_dir/$i.pid")
+            kill -KILL -- "-$pgid" 2>/dev/null || true
+        done
+        for pid in "${supervisor_pids[@]}"; do
+            kill -KILL "$pid" 2>/dev/null || true
+        done
+        wait 2>/dev/null || true
+    fi
+    ((is_tty)) && printf '\033[?25h'
     exec 3>&- 2>/dev/null || true
     rm -rf "$results_dir"
+    ((interrupted)) && exit 130
+    exit "$rc"
 }
 trap cleanup EXIT
+trap 'interrupted=1; exit 130' INT TERM
 
 fmt_hms() {
     local s=$1
@@ -77,13 +121,40 @@ fmt_hms() {
 # run_one <index>: waits for a semaphore token (i.e. sits "queued" until a
 # slot frees up), then runs one fixture for real, recording start/end times
 # and pass/fail so the renderer and the final summary can read them back.
+# The real work runs under `setsid --wait` so it's the leader of its own
+# process group -- `cleanup` can kill that whole group by PID on interrupt
+# (see above) -- while `--wait` still forwards the real exit code back to
+# us. The group leader's PID is captured by having it write its own `$$` to
+# a pidfile (rather than trusting bash's `$!` for the backgrounded `setsid`
+# invocation), since `setsid` forks internally -- and so gets a *different*
+# PID than the program it starts -- whenever the caller already happens to
+# be a process group leader; confirmed for real, this really happens for a
+# script backgrounded under its own session (e.g. this script re-launched
+# via `setsid script.sh &` for testing).
 run_one() {
+    # Each run_one instance is its own forked subshell (from `run_one &`)
+    # and inherits the INT/TERM trap set below on the main script. Left
+    # alone, a Ctrl-C delivered to the whole process group would make every
+    # worker race to run cleanup() concurrently -- confirmed for real, this
+    # causes a lost-kill race where the first worker to finish removes
+    # results_dir before slower workers read their fixture's pidfile,
+    # leaving that fixture's paws/dagger processes orphaned. Resetting to
+    # the *default* disposition (not ignoring -- an explicit `kill -TERM`
+    # from the main script's own cleanup() must still work) means a
+    # worker just dies immediately with no custom trap code racing;
+    # cleanup() is the sole thing that ever kills a fixture's setsid group.
+    trap - INT TERM
     local index="$1"
     IFS='|' read -r label dir expect args <<<"${fixtures[$index]}"
     read -r -u 3 _
     date +%s >"$results_dir/$index.start"
-    # shellcheck disable=SC2086 -- args is a deliberate word-split arg list
-    (cd "$repo_root/$dir" && "$paws" $args) >"$results_dir/$index.log" 2>&1
+    cd "$repo_root/$dir" || return
+    local -a arg_array
+    read -r -a arg_array <<<"$args"
+    setsid --wait bash -c 'pidfile=$1; shift; echo $$ >"$pidfile"; exec "$@"' \
+        _ "$results_dir/$index.pid" "$paws" "${arg_array[@]}" \
+        >"$results_dir/$index.log" 2>&1 &
+    wait "$!"
     local rc=$?
     date +%s >"$results_dir/$index.end"
     local outcome=pass
@@ -94,6 +165,7 @@ run_one() {
 
 for i in "${!fixtures[@]}"; do
     run_one "$i" &
+    supervisor_pids+=("$!")
 done
 
 # Live status board: redraws $count lines in place each tick, driven purely
@@ -103,8 +175,7 @@ done
 spinner=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
 frame=0
 first_draw=1
-is_tty=0
-[[ -t 1 ]] && is_tty=1
+((is_tty)) && printf '\033[?25l'
 
 render() {
     local now; now=$(date +%s)
