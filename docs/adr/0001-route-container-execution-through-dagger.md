@@ -8,7 +8,7 @@ decision-makers: "mbround18, Claude (pairing)"
 
 ## Context and Problem Statement
 
-`paws` exists to be "run-anywhere CI/CD pipelines, backed by Dagger" — a single Rust binary that
+`paws` exists to be "run-anywhere CI/CD pipelines, built on Dagger" — a single Rust binary that
 replaces `gh-reusable`'s TypeScript/GitHub-Actions-only pipeline surface. The project's own
 constitution (Principle II, "Subprocess-First Dagger Access, Single Call Site") already commits
 to this: Dagger is invoked exclusively as a subprocess through `paws-dagger::call`, enforced by a

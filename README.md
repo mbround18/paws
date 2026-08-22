@@ -4,7 +4,7 @@
 
 # paws
 
-**Run-anywhere CI/CD pipelines, backed by [Dagger](https://dagger.io), shipped as a single Rust
+**Run-anywhere CI/CD pipelines, built on [Dagger](https://dagger.io), shipped as a single Rust
 binary.**
 
 `paws` runs the same build/test/audit/release pipeline whether it's executing inside GitHub
@@ -19,7 +19,7 @@ set of commands, everywhere.
 Most CI setups tie your build logic to your CI provider's YAML dialect. Debugging a failing
 check usually means pushing a commit and waiting, because there's no easy way to reproduce the
 exact pipeline locally. `paws` exists to remove that dependency: every subcommand is a normal CLI
-program that runs the same way on your machine as it does in CI, backed by
+program that runs the same way on your machine as it does in CI, built on
 [Dagger](https://dagger.io) for portable, cacheable container execution rather than
 provider-specific scripting.
 

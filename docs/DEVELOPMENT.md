@@ -6,11 +6,16 @@ stack support is planned versus already wired, see [`docs/ROADMAP.md`](ROADMAP.m
 
 ## Origin
 
-`paws` grew out of [gh-reusable](https://github.com/MBRound18/gh-reusable)'s reusable-workflow
-library. That repo's `specs/002-reusable-rust-pipeline/` spec (copied here under `specs/`)
-is the original inspiration for a first-class Rust pipeline contract — this project takes
-that idea further: instead of adding Rust as one more supported language inside a
-TypeScript-orchestrated system, the orchestrator itself is Rust.
+`paws` is a full rebuild, not an extension, of [gh-reusable](https://github.com/MBRound18/gh-reusable)'s
+reusable-workflow library — `gh-reusable` is inspiration and, for logic being ported for real
+parity (`rustBuildAndTest`, `pythonBuildAndTest`, etc.), a reference to read directly rather than
+reimplement from memory, never a runtime dependency `paws` calls into or relies on. That repo's
+`specs/002-reusable-rust-pipeline/` spec (copied here under `specs/`) is the original inspiration
+for a first-class Rust pipeline contract, but `paws` takes the idea in a different direction
+entirely: instead of adding Rust as one more supported language inside a TypeScript-orchestrated
+system, the orchestrator itself is Rust, and every language `paws` supports gets built natively —
+see `docs/ROADMAP.md`'s "Current coverage" for the running tally of what's been fully ported off
+`gh-reusable` versus still calling into it (as of 2026-08-19, nothing does, for any subcommand).
 
 ## Layout
 
