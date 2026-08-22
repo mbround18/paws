@@ -407,12 +407,19 @@ pub struct DockerArgs {
     #[arg(long, value_delimiter = ',')]
     #[serde(default)]
     pub registries: Vec<String>,
+    /// Path to the Dockerfile to build, relative to the repo root. Falls
+    /// back to auto-detection (`Dockerfile` at the repo root, or a
+    /// `compose.yml` service's own `dockerfile`/`context`).
     #[arg(long)]
     #[serde(default)]
     pub dockerfile: Option<String>,
+    /// Build context directory, relative to the repo root. Falls back to
+    /// auto-detection alongside `--dockerfile`.
     #[arg(long)]
     #[serde(default)]
     pub context: Option<String>,
+    /// PR label that, when present, pushes the image for that PR build too
+    /// (normally only a push to --default-branch or a tag push pushes).
     #[arg(long, default_value = "canary")]
     #[serde(default = "field_defaults::canary")]
     pub canary_label: String,
@@ -420,12 +427,20 @@ pub struct DockerArgs {
     #[arg(long)]
     #[serde(default)]
     pub push: bool,
+    /// Also tag and push `:latest` alongside `--version`, but only when
+    /// the build is actually pushing and the ref is a real (non-prerelease)
+    /// version tag — a plain branch/PR build never gets `:latest`
+    /// regardless of this flag.
     #[arg(long)]
     #[serde(default)]
     pub with_latest: bool,
+    /// Build a specific stage of a multi-stage Dockerfile instead of the
+    /// final stage.
     #[arg(long)]
     #[serde(default)]
     pub target: Option<String>,
+    /// Prefix the image tag with `--target`'s name, e.g. `<target>-<version>`
+    /// instead of just `<version>`. Only used with `--target`.
     #[arg(long)]
     #[serde(default)]
     pub prepend_target: bool,
@@ -433,6 +448,9 @@ pub struct DockerArgs {
     #[arg(long, value_delimiter = ',')]
     #[serde(default)]
     pub labels: Vec<String>,
+    /// The repo's default branch. A push directly to this branch, or any
+    /// tag push, always pushes the image — --canary-label/--push only
+    /// matter for everything else (feature branches, PRs).
     #[arg(long, default_value = "main")]
     #[serde(default = "field_defaults::main_branch")]
     pub default_branch: String,
@@ -449,8 +467,8 @@ pub struct DockerArgs {
     #[arg(long)]
     #[serde(default)]
     pub ghcr_username: Option<String>,
-    /// Username(s) for registries in --registries other than docker.io/
-    /// ghcr.io (Artifactory, a private registry, etc.), as
+    /// Username(s) for registries in --registries other than
+    /// docker.io/ghcr.io (Artifactory, a private registry, etc.), as
     /// "<registry>=<username>" pairs, comma-separated — e.g.
     /// "myco.jfrog.io=deploy-bot". These are built and published
     /// natively through Dagger (`Container.withRegistryAuth`), not via
@@ -511,12 +529,15 @@ pub struct SemverArgs {
     #[arg(long)]
     #[serde(default)]
     pub increment: Option<Increment>,
+    /// PR/commit label name that triggers a major bump.
     #[arg(long, default_value = "major")]
     #[serde(default = "field_defaults::major")]
     pub major_label: String,
+    /// PR/commit label name that triggers a minor bump.
     #[arg(long, default_value = "minor")]
     #[serde(default = "field_defaults::minor")]
     pub minor_label: String,
+    /// PR/commit label name that triggers a patch bump.
     #[arg(long, default_value = "patch")]
     #[serde(default = "field_defaults::patch")]
     pub patch_label: String,
@@ -545,6 +566,7 @@ pub struct SemverArgs {
     #[arg(long, default_value = "paws-bot")]
     #[serde(default = "field_defaults::paws_bot_name")]
     pub tagger_name: String,
+    /// Email attributed to the pushed tag, alongside --tagger-name.
     #[arg(long, default_value = "paws-bot@users.noreply.github.com")]
     #[serde(default = "field_defaults::paws_bot_email")]
     pub tagger_email: String,

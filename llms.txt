@@ -42,18 +42,18 @@ Build and gate a container image the same way `docker-facts` + `docker-release` 
 - `--image` — Image name, e.g. "ghcr.io/example/app". Falls back to $GITHUB_REPOSITORY
 - `--version` — Version to tag with. Falls back to $GITHUB_SHA (short)
 - `--registries` — Additional registries to mirror tags into, comma-separated
-- `--dockerfile` — 
-- `--context` — 
-- `--canary-label` (default: `canary`) — 
+- `--dockerfile` — Path to the Dockerfile to build, relative to the repo root. Falls back to auto-detection (`Dockerfile` at the repo root, or a `compose.yml` service's own `dockerfile`/`context`)
+- `--context` — Build context directory, relative to the repo root. Falls back to auto-detection alongside `--dockerfile`
+- `--canary-label` (default: `canary`) — PR label that, when present, pushes the image for that PR build too (normally only a push to --default-branch or a tag push pushes)
 - `--push` — Force push regardless of branch/tag/label gating
-- `--with-latest` — 
-- `--target` — 
-- `--prepend-target` — 
+- `--with-latest` — Also tag and push `:latest` alongside `--version`, but only when the build is actually pushing and the ref is a real (non-prerelease) version tag — a plain branch/PR build never gets `:latest` regardless of this flag
+- `--target` — Build a specific stage of a multi-stage Dockerfile instead of the final stage
+- `--prepend-target` — Prefix the image tag with `--target`'s name, e.g. `<target>-<version>` instead of just `<version>`. Only used with `--target`
 - `--labels` — PR labels to check against --canary-label, comma-separated
-- `--default-branch` (default: `main`) — 
+- `--default-branch` (default: `main`) — The repo's default branch. A push directly to this branch, or any tag push, always pushes the image — --canary-label/--push only matter for everything else (feature branches, PRs)
 - `--dockerhub-username` — Docker Hub username to authenticate publishing with. Falls back to $DOCKERHUB_USERNAME. Required (here or via env) to actually push to docker.io — without it, `dockerRelease` builds but can't authenticate, so `push=true` still publishes nothing
 - `--ghcr-username` — GHCR username to authenticate publishing with. Falls back to $GHCR_USERNAME. Required (here or via env) to actually push to ghcr.io
-- `--registry-username` — Username(s) for registries in --registries other than docker.io/ ghcr.io (Artifactory, a private registry, etc.), as "<registry>=<username>" pairs, comma-separated — e.g. "myco.jfrog.io=deploy-bot". These are built and published natively through Dagger (`Container.withRegistryAuth`), not via the docker.io/ghcr.io-only `dockerRelease` call. The matching token/password is read from an env var derived from the registry: uppercased, every non-alphanumeric character replaced with `_`, suffixed `_TOKEN` — e.g. "myco.jfrog.io" reads $MYCO_JFROG_IO_TOKEN
+- `--registry-username` — Username(s) for registries in --registries other than docker.io/ghcr.io (Artifactory, a private registry, etc.), as "<registry>=<username>" pairs, comma-separated — e.g. "myco.jfrog.io=deploy-bot". These are built and published natively through Dagger (`Container.withRegistryAuth`), not via the docker.io/ghcr.io-only `dockerRelease` call. The matching token/password is read from an env var derived from the registry: uppercased, every non-alphanumeric character replaced with `_`, suffixed `_TOKEN` — e.g. "myco.jfrog.io" reads $MYCO_JFROG_IO_TOKEN
 - `--silent` — Suppress dagger's live build/publish progress; only print output once each pipeline finishes (or on failure). Default is streamed live
 
 ## paws semver
@@ -63,15 +63,15 @@ Compute the next semantic version from PR labels or an explicit increment, match
 - `--base` — Base version to start from instead of the last matching tag
 - `--prefix` — Prefix used to filter/build tag versions, e.g. "chart-name-"
 - `--increment` — Explicit increment (major, minor, patch); skips label/branch inference
-- `--major-label` (default: `major`) — 
-- `--minor-label` (default: `minor`) — 
-- `--patch-label` (default: `patch`) — 
+- `--major-label` (default: `major`) — PR/commit label name that triggers a major bump
+- `--minor-label` (default: `minor`) — PR/commit label name that triggers a minor bump
+- `--patch-label` (default: `patch`) — PR/commit label name that triggers a patch bump
 - `--labels` — PR/commit labels to check against major/minor/patch-label, comma-separated
 - `--branch` (default: `main`) — Branch name used for fallback inference when no configured label matches
 - `--pr` — Whether this is a PR build (produces a `-pr.<sha>` prerelease)
 - `--push` — Create and push the computed version as an annotated git tag, then create a matching GitHub Release with auto-generated notes (GitHub's git/tags + git/refs + releases APIs — no local git identity or worktree needed). Replaces a hand-rolled `git tag`/`git push`/`gh release create` step in the calling workflow
 - `--tagger-name` (default: `paws-bot`) — Tagger identity attributed to the pushed tag
-- `--tagger-email` (default: `paws-bot@users.noreply.github.com`) — 
+- `--tagger-email` (default: `paws-bot@users.noreply.github.com`) — Email attributed to the pushed tag, alongside --tagger-name
 
 ## paws init
 
