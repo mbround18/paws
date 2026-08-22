@@ -168,19 +168,34 @@ myco.jfrog.io=you`, token read from a derived `$MYCO_JFROG_IO_TOKEN`-style env v
   `:ensureServerJar` task then fails on an unrelated, genuinely out-of-scope requirement (Docker-
   in-Docker plus an interactive OAuth login, to fetch a proprietary game server jar) — a
   repo-level CI design question for that project, not a `paws-java` gap.
-- **`paws publish` doesn't exist** — a real gap first surfaced by a 2026-08-19 repo audit checking
-  which of `mbround18`'s active repos still call `gh-reusable` directly (candidates for a `paws
-  docker`/`paws ci`-style conversion, same shape as the `ark-manager-web` work above), re-verified
-  for real 2026-08-22: two of the original eight (`vein-docker`, `foundryvtt-docker`) turned out
-  to already be converted to `paws-up` by then — that first audit's list was stale within days.
-  Six real candidates remain (`valheim-docker`, `meilisearch-operator`,
-  `cloudflare-discord-oidc-worker`, `helm-hub`, `backup-docker`, `game-server-management`) that
-  only call `rust-build-n-test`/`docker-release`/`tagger` — functions `paws ci`/`paws docker`/
-  `paws semver` already cover, pure conversion work. `game-server-management` also depends on
-  `gh-reusable`'s `publish.yaml`; re-checked for real against its actual workflow (not assumed
-  from `publish.yaml`'s general `target: node | rust-crate | helm-chart` shape) — it only uses
-  `target: rust-crate` (crates.io, for `libs/env-parse`), a narrower gap than the general
-  `publish.yaml` contract implies. `paws publish` replaces none of these targets yet.
+- **`paws publish --target rust-crate`** (2026-08-22): closes the `game-server-management` half of
+  the gap below (`--target rust-crate`, crates.io, for `libs/env-parse` — the only `publish.yaml`
+  target that repo's real workflow actually uses, confirmed against its actual workflow rather than
+  assumed from `publish.yaml`'s general `target: node | rust-crate | helm-chart` shape). New
+  `paws-publish` crate runs `cargo check && cargo test && cargo package && cargo publish` via
+  `dagger core`, gated on `$CARGO_REGISTRY_TOKEN` (or `$CARGO_REGISTRIES_<NAME>_TOKEN` for a
+  non-default `--registry`), with `--dry-run` to verify packaging without publishing. Along the way,
+  found and fixed a real, previously undiagnosed bug in the pipeline it replaces: `gh-reusable`'s
+  `publishRustCrate` mounts only the target crate's own subdirectory, which breaks on any crate
+  that's a workspace member (`edition.workspace = true` etc. needs the real workspace root
+  Cargo.toml on disk) — confirmed for real via `gh run list`/`gh api .../logs` against
+  `mbround18/game-server-management`'s actual tag-triggered publish runs: all 10 `libs/*` crates
+  have failed on every real attempt. `paws-publish::find_workspace_root` walks up to the real
+  workspace root (stopping correctly at a crate's own self-contained `[workspace]` declaration,
+  e.g. `examples/rust-fixture`, rather than walking past it into an enclosing workspace) and mounts
+  that instead, with `workdir` set to the crate's relative subpath. Verified for real, end to end,
+  against three cases: `examples/rust-fixture` (standalone, own empty `[workspace]`), `crates/paws-
+  go` (a real member of paws's own workspace), and a downloaded copy of the actual blocked crate,
+  `libs/env-parse` from `mbround18/game-server-management`.
+  Deliberately narrow, matching `gh-reusable`'s own actual usage rather than its full advertised
+  contract: only `--target rust-crate` exists — `node`/`helm-chart` targets are unneeded (no real
+  caller uses them; `paws helm --publish` already covers Helm chart publishing on a different,
+  OCI-registry path — see below). The five remaining real conversion candidates from the
+  2026-08-19/2026-08-22 repo audit (`valheim-docker`, `meilisearch-operator`,
+  `cloudflare-discord-oidc-worker`, `helm-hub`, `backup-docker` — `vein-docker` and
+  `foundryvtt-docker` turned out already converted) only call `rust-build-n-test`/`docker-release`/
+  `tagger`, functions `paws ci`/`paws docker`/`paws semver` already cover — pure conversion work,
+  not a `paws` gap.
 - **`paws helm`** (2026-08-19): closes the lint/package half of the Helm-chart gap above, found
   converting `mbround18/helm-charts` itself. New `paws-helm` crate + `builders/helm/Dockerfile`
   (Alpine + Helm's own official install script, no maintained "official" Helm image exists to

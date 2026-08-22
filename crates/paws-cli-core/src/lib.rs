@@ -243,6 +243,9 @@ pub enum Commands {
     /// Credential helpers — mint tokens `paws` (or other tools) can use.
     #[command(subcommand)]
     Auth(AuthCommand),
+    /// Publish a package to its registry (`--target rust-crate` for
+    /// crates.io today).
+    Publish(PublishArgs),
 }
 
 #[derive(Subcommand)]
@@ -460,6 +463,33 @@ pub struct DockerArgs {
 }
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct PublishArgs {
+    /// Publish target — only "rust-crate" today (crates.io or another
+    /// Cargo registry).
+    #[arg(long)]
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Path to the package to publish. Defaults to the current directory.
+    #[arg(long)]
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Registry to publish to. Defaults to crates.io.
+    #[arg(long)]
+    #[serde(default)]
+    pub registry: Option<String>,
+    /// Build/test/package only — skip the actual publish step. Useful for
+    /// verifying a package is publish-ready without a registry token.
+    #[arg(long)]
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Suppress dagger's live build progress; only print output once
+    /// the pipeline finishes (or on failure). Default is streamed live.
+    #[arg(long)]
+    #[serde(default)]
+    pub silent: bool,
+}
+
+#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct SemverArgs {
     /// Base version to start from instead of the last matching tag.
     #[arg(long)]
@@ -647,6 +677,7 @@ pub async fn execute(command: Commands) -> anyhow::Result<()> {
         Commands::Llms(LlmsCommand::Generate(args)) => run_llms_generate(args).await,
         Commands::Workflow(WorkflowCommand::Generate(args)) => run_workflow_generate(args).await,
         Commands::Auth(AuthCommand::GithubApp(args)) => run_auth_github_app(args).await,
+        Commands::Publish(args) => run_publish(args).await,
         Commands::Mcp(McpCommand::Setup(args)) => mcp_setup::run_mcp_setup(args).await,
         Commands::Mcp(McpCommand::Serve(_)) => anyhow::bail!(
             "`paws mcp serve` must be invoked through the `paws` binary directly, not through \
@@ -1101,6 +1132,80 @@ pub async fn run_docker(args: DockerArgs) -> anyhow::Result<()> {
         });
         run_dagger_core(&build_only_args, silent).await?;
         println!("docker: build succeeded");
+    }
+
+    Ok(())
+}
+
+pub async fn run_publish(args: PublishArgs) -> anyhow::Result<()> {
+    let PublishArgs {
+        target,
+        source,
+        registry,
+        dry_run,
+        silent,
+    } = args;
+
+    match target.as_deref() {
+        Some("rust-crate") => {
+            let dir = match source {
+                Some(s) => std::path::PathBuf::from(s),
+                None => std::env::current_dir()?,
+            };
+            let dir = dir
+                .canonicalize()
+                .with_context(|| format!("failed to resolve {}", dir.display()))?;
+            if !paws_publish::is_rust_crate(&dir) {
+                anyhow::bail!(
+                    "--target rust-crate given, but no Cargo.toml found in {}",
+                    dir.display()
+                );
+            }
+            let name = paws_publish::read_crate_name(&dir)?;
+            let registry = registry.unwrap_or_else(|| paws_publish::DEFAULT_REGISTRY.to_string());
+            let token_env_var = paws_publish::token_env_var(&registry);
+            if !dry_run && std::env::var(&token_env_var).is_err() {
+                anyhow::bail!(
+                    "--target rust-crate needs ${token_env_var} set (registry: {registry}) — pass --dry-run to verify the package without publishing"
+                );
+            }
+            // A workspace member (e.g. one crate among several in a real
+            // repo, like mbround18/game-server-management's libs/*) needs
+            // its real workspace root mounted, not just its own
+            // subdirectory — see paws_publish's module doc for the real
+            // bug (confirmed against that repo's own actual CI failures)
+            // this routes around.
+            let (mount_dir, workdir) = match paws_publish::find_workspace_root(&dir) {
+                Some(root) => {
+                    let relative = dir.strip_prefix(&root).unwrap_or(&dir);
+                    let workdir = std::path::Path::new("/src").join(relative);
+                    (root, workdir)
+                }
+                None => (dir.clone(), std::path::PathBuf::from("/src")),
+            };
+            println!(
+                "publish: {name} -> {registry}{}",
+                if dry_run { " (dry run)" } else { "" }
+            );
+            let args = paws_publish::dagger_pipeline_args(
+                &mount_dir.to_string_lossy(),
+                &workdir.to_string_lossy(),
+                &registry,
+                &token_env_var,
+                dry_run,
+            );
+            run_dagger_core(&args, silent).await?;
+            println!(
+                "publish: {name} {}",
+                if dry_run {
+                    "packaged successfully (dry run, not published)"
+                } else {
+                    "published successfully"
+                }
+            );
+        }
+        Some(other) => anyhow::bail!("unsupported --target '{other}'; expected 'rust-crate'"),
+        None => anyhow::bail!("--target is required (e.g. --target rust-crate)"),
     }
 
     Ok(())

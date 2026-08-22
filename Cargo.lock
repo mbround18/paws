@@ -1180,6 +1180,7 @@ dependencies = [
  "paws-kotlin",
  "paws-node",
  "paws-provision",
+ "paws-publish",
  "paws-python",
  "paws-release",
  "paws-rust",
@@ -1305,6 +1306,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "tokio",
+]
+
+[[package]]
+name = "paws-publish"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]
