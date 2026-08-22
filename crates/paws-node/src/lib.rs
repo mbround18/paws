@@ -123,10 +123,19 @@ impl PackageManager {
     /// The container image whose build should run in. `npm`/`yarn`/`pnpm`
     /// all ship with the official Node image (`corepack` handles yarn/pnpm
     /// version pinning); `bun` needs its own image since it isn't bundled
-    /// with Node.
+    /// with Node. `node:lts-trixie` (not a pinned major like `node:24-trixie`)
+    /// is Docker Hub's own self-updating alias for whichever Node major is
+    /// current LTS — confirmed for real this tag exists and is maintained
+    /// by the official image, so there's nothing for `paws` itself (or
+    /// Renovate) to track here; it moves on its own as Node designates new
+    /// LTS releases, the same way `oven/bun:1-debian`/`golang:1-bookworm`/
+    /// `rust:1-bookworm` already float to "latest" for ecosystems with no
+    /// LTS concept to track in the first place.
     pub fn base_image(&self) -> &'static str {
         match self {
-            PackageManager::Npm | PackageManager::Yarn | PackageManager::Pnpm => "node:24-trixie",
+            PackageManager::Npm | PackageManager::Yarn | PackageManager::Pnpm => {
+                "node:lts-trixie"
+            }
             PackageManager::Bun => "oven/bun:1-debian",
         }
     }
@@ -481,7 +490,7 @@ mod tests {
     #[test]
     fn dagger_pipeline_args_use_the_right_base_image_and_install_command() {
         let pnpm_args = dagger_pipeline_args(&project_for(PackageManager::Pnpm), "/host/src");
-        assert_eq!(pnpm_args[2], "--address=node:24-trixie");
+        assert_eq!(pnpm_args[2], "--address=node:lts-trixie");
         assert!(pnpm_args.contains(&"--args=corepack,enable".to_string()));
         assert!(pnpm_args.contains(&"--args=pnpm,install,--frozen-lockfile".to_string()));
         assert!(pnpm_args.contains(&"--args=pnpm,run,build".to_string()));
@@ -569,7 +578,7 @@ mod tests {
         project.has_playwright = true;
         let args = dagger_pipeline_args(&project, "/host/src");
         assert_eq!(args[0], "container");
-        assert_eq!(args[2], "--address=node:24-trixie");
+        assert_eq!(args[2], "--address=node:lts-trixie");
         assert!(args.contains(&"--args=npm,ci".to_string()));
         assert!(!args.contains(&"--args=npm,run,build".to_string()));
         assert!(!args.contains(&"--args=npm,run,test".to_string()));

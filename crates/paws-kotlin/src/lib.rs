@@ -31,6 +31,11 @@ use anyhow::Result;
 
 /// Same image `paws-java` uses — Kotlin needs nothing beyond a working JDK
 /// plus network access for Gradle to fetch the Kotlin compiler itself.
+/// Pinned to JDK 21, not the newer JDK 25 LTS, for a reason specific to
+/// *this* crate: confirmed for real that a JDK-25 build JVM breaks a real
+/// `gradlew build` with Gradle 8.10 + Kotlin Gradle plugin 1.9.24 (still
+/// common in the wild), even though `gradle --version` alone succeeds on
+/// it — see `paws_java::BASE_IMAGE`'s doc comment for the full finding.
 pub const BASE_IMAGE: &str = "eclipse-temurin:21-jdk-jammy";
 
 /// Every `.kt`/`.kts` file under `dir`, recursing but skipping hidden

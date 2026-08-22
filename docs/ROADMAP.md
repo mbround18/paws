@@ -359,7 +359,41 @@ Roughly, in order:
 
 None of this needs a new builder image under `./builders/*` unless the stack also needs
 cross-compilation support for _`paws` itself_ to target — that's a separate concern from `paws`
-being able to build _other projects_ written in that language.
+being able to build _other projects_ written in that language. `./builders/*` exists only for
+pipelines needing *multiple* toolchains combined that no single public image provides (Rust+Node+
+GTK for `tauri`, JDK+Android SDK/NDK+Rust+Node for `tauri-android`, Ubuntu+flatpak-builder+runtime
+for `flatpak`) — every single-toolchain crate (`paws-go`/`paws-java`/`paws-kotlin`/`paws-python`/
+`paws-rust`, plus `paws-node`) just pulls a public image directly, since one already has everything
+needed; confirmed for real per-crate (e.g. `gcc`/`CGO_ENABLED=1` already present in
+`golang:1-bookworm` for cgo).
+
+**Base image version policy** (2026-08-22): pin to a tag that *itself* tracks "current" wherever
+the upstream image publishes one, and only hardcode a specific version where it doesn't:
+- `node:lts-trixie` (`paws-node`), `golang:1-bookworm` (`paws-go`), `rust:1-bookworm`
+  (`paws-rust`), `oven/bun:1-debian` (`paws-node`'s Bun path) all self-update — Node's official
+  image publishes a genuine `lts` alias Docker Hub itself maintains (confirmed for real: not to be
+  confused with `ltsc*`-suffixed tags there, which are Windows Server's unrelated *Long-Term
+  Servicing Channel*), and Go/Rust/Bun have no LTS concept at all — "latest major" already *is*
+  "current" for them. Nothing to bump here, ever; not a Renovate target.
+- `astral/uv:python<X.Y>-trixie-slim` (`paws-python`, `DEFAULT_PYTHON_VERSION`) is a real, bare
+  hardcoded pin (`3.13` currently) — confirmed directly against Docker Hub that `astral/uv`
+  publishes no floating "latest Python" tag, unlike Node. A genuine Renovate target (see
+  `renovate.json`'s `customManagers`).
+- `eclipse-temurin:21-jdk-jammy` (`paws-java`/`paws-kotlin`, shared) stays on JDK 21, not the
+  newer JDK 25 LTS (Sept 2025), *not* because no floating tag exists (true, but not the reason) —
+  confirmed for real that a JDK-25 build JVM breaks a genuine `gradlew build` under Gradle 8.10 +
+  Kotlin Gradle plugin 1.9.24 (still common), even though `gradle --version` alone succeeds on it.
+  `renovate.json` marks this dependency `automerge: false` specifically so a version-bump PR gets
+  a human's judgment call, not blind automation, given that real regression risk.
+
+`renovate.json`'s default `config:recommended` docker manager only scans `Dockerfile`/compose
+files — it's blind to image tags embedded in Rust string literals like all of the above. The
+`customManagers` entries there (regex-based) exist to give Renovate visibility into the ones that
+actually need bumping over time (`DEFAULT_PYTHON_VERSION`, the shared Temurin pin,
+`paws-provision`'s `DEFAULT_GO_VERSION`); verified for real against the actual
+`renovate-config-validator`/`renovate --dry-run=extract` tooling, not just JSON-schema validity,
+including a real bug caught and fixed in the process — the Python regex, unanchored, also matched
+an unrelated test's deliberately-non-default `"3.11"` literal as a second false dependency.
 
 ## MCP + llms.txt
 

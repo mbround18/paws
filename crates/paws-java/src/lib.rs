@@ -28,6 +28,19 @@ use std::path::Path;
 /// `eclipse-temurin`, only Ubuntu/Alpine/Windows variants), so this isn't a
 /// port of that constant — `-jammy` is the real, verified equivalent for
 /// the same JDK 21 Temurin distribution gh-reusable defaults to.
+///
+/// Deliberately still JDK 21, not the newer JDK 25 LTS (Sept 2025) —
+/// `eclipse-temurin` has no self-updating "latest LTS" tag the way
+/// `node:lts-trixie` does (`ltsc*`-suffixed tags there are Windows Server's
+/// *Long-Term Servicing Channel*, an unrelated Microsoft versioning scheme,
+/// not a Java LTS alias), and confirmed for real that JDK 25 as the build
+/// JVM breaks `paws-kotlin`'s shared pipeline: `gradle --version` succeeds
+/// on it, but a real `gradlew build` fails outright with Gradle 8.10 +
+/// Kotlin Gradle plugin 1.9.24 (still a very common pin in the wild) — a
+/// regression this crate's Java-only builds don't hit, but the shared
+/// image can't risk for Kotlin projects. Move this once the ecosystem's
+/// broadly-used Gradle/Kotlin plugin versions confirm JDK 25 support, not
+/// on a timer.
 pub const BASE_IMAGE: &str = "eclipse-temurin:21-jdk-jammy";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -11,7 +11,14 @@ use std::path::Path;
 
 use anyhow::Result;
 
-pub const DEFAULT_PYTHON_VERSION: &str = "3.12";
+/// CPython has no LTS branding the way Node/Java do — just a rolling
+/// "current stable" minor version, each supported for ~5 years. `3.13` is
+/// that current stable as of this pin; unlike `node:lts-trixie`, there's no
+/// self-updating "latest" tag `astral/uv` publishes for this
+/// (`python3-trixie-slim` doesn't exist, confirmed directly against Docker
+/// Hub — every tag pins an exact minor), so this needs a real version
+/// bump when Python ships a new one, same as any other pinned dependency.
+pub const DEFAULT_PYTHON_VERSION: &str = "3.13";
 
 fn base_image(python_version: &str) -> String {
     format!("astral/uv:python{python_version}-trixie-slim")
@@ -136,7 +143,7 @@ mod tests {
         let args = dagger_pipeline_args(&project, "/host/src");
         assert_eq!(args[0], "container");
         assert_eq!(args[1], "from");
-        assert_eq!(args[2], "--address=astral/uv:python3.12-trixie-slim");
+        assert_eq!(args[2], "--address=astral/uv:python3.13-trixie-slim");
     }
 
     #[test]
