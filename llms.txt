@@ -53,6 +53,7 @@ Build and gate a container image the same way `docker-facts` + `docker-release` 
 - `--dockerhub-username` — Docker Hub username to authenticate publishing with. Falls back to $DOCKERHUB_USERNAME. Required (here or via env) to actually push to docker.io — without it, `dockerRelease` builds but can't authenticate, so `push=true` still publishes nothing
 - `--ghcr-username` — GHCR username to authenticate publishing with. Falls back to $GHCR_USERNAME. Required (here or via env) to actually push to ghcr.io
 - `--registry-username` — Username(s) for registries in --registries other than docker.io/ ghcr.io (Artifactory, a private registry, etc.), as "<registry>=<username>" pairs, comma-separated — e.g. "myco.jfrog.io=deploy-bot". These are built and published natively through Dagger (`Container.withRegistryAuth`), not via the docker.io/ghcr.io-only `dockerRelease` call. The matching token/password is read from an env var derived from the registry: uppercased, every non-alphanumeric character replaced with `_`, suffixed `_TOKEN` — e.g. "myco.jfrog.io" reads $MYCO_JFROG_IO_TOKEN
+- `--silent` — Suppress dagger's live build/publish progress; only print output once each pipeline finishes (or on failure). Default is streamed live
 
 ## paws semver
 
