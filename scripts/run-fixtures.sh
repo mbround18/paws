@@ -49,7 +49,7 @@ fixtures=(
     "rust-react-fixture (rust)|examples/rust-react-fixture|pass|ci --toolchain rust --silent"
     "rust-react-fixture (node)|examples/rust-react-fixture/frontend|pass|ci --toolchain node --silent"
     "docker-fixture|examples/docker-fixture|pass|docker --image paws-fixtures/docker-fixture"
-    "docker-compose-fixture|examples/docker-compose-fixture|pass|docker --image paws-fixtures/docker-compose-fixture"
+    "docker-compose-fixture|examples/docker-compose-fixture|pass|docker --image ghcr.io/example/app"
     "docker-buildkit-fixture|examples/docker-buildkit-fixture|pass|docker --image paws-fixtures/docker-buildkit-fixture"
 )
 count=${#fixtures[@]}
