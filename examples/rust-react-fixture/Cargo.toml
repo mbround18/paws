@@ -1,0 +1,16 @@
+[workspace]
+
+[package]
+name = "rust-react-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tower-http = { version = "0.5", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tower = "0.5"

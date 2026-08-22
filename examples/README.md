@@ -33,6 +33,12 @@ part of `paws` itself.
   `detect_family` python-family signals (`pyproject.toml`, `uv.lock`, `poetry.lock`,
   `requirements.txt`, `setup.py`) and `paws-provision`'s future python/uv ecosystem support a
   real target to point at.
+- `rust-react-fixture/` — an Axum backend (`src/main.rs`) serving a real `create vite --template
+react-ts` React SPA (`frontend/`) as static assets, plus a `/api/health` JSON route — the
+  "Backend API + Static UI" shape from `docs/ROADMAP.md`'s Rust + React row. Not a composite
+  pipeline: `paws ci --toolchain rust` (repo root) and `paws ci --toolchain node` (`frontend/`)
+  are two independent runs, both verified for real, end to end, through Dagger. See the fixture's
+  own README for why no new `paws` capability was needed here.
 - `multi-ecosystem-fixture/` — a single repo containing both a minimal Rust crate
   (`Cargo.toml` + `src/lib.rs`, `cargo test`-clean) and a minimal Node project (`package.json`
   - `index.js`/`index.test.js`) in the same directory, simulating "a repo with both a Rust crate

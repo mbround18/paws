@@ -136,7 +136,7 @@ pytest` pipeline shape — no package meant for `uv build`, several separately-s
 | Node                        | JavaScript, TypeScript | npm, yarn, pnpm, bun        | Node.js                                   | NPM Package / Backend Server          | 🚧           |
 | Rust                        | Rust                   | cargo                       | rustc, Cargo                              | Native Executable (.exe, ELF, Mach-O) | ✅           |
 | Node + React                | JavaScript, TypeScript | npm, yarn, pnpm, bun        | Node.js, React, Next.js / Express         | SSR Web App / Full-stack              | ✅           |
-| Rust + React                | Rust, JS/TS            | cargo & (npm/yarn/pnpm/bun) | Rust (Actix/Axum), React                  | Backend API + Static UI               | 🚧           |
+| Rust + React                | Rust, JS/TS            | cargo & (npm/yarn/pnpm/bun) | Rust (Actix/Axum), React                  | Backend API + Static UI               | ✅           |
 | Node + Rust                 | JS/TS, Rust            | npm/yarn/pnpm/bun & cargo   | Node.js, Rust, napi-rs or neon            | Native Node bindings (.node)          | 📋           |
 | React + Rust                | JS/TS, Rust            | npm/yarn/pnpm/bun & cargo   | React, Rust, wasm-pack                    | WebAssembly (.wasm) + React UI        | 📋           |
 | Tauri + Rust                | Rust, HTML/CSS/JS      | cargo                       | Tauri, Rust, OS Webview (WebKit/WebView2) | Desktop App Installer                 | ✅           |
@@ -176,6 +176,13 @@ license terms require Xcode to run on genuine Apple hardware/macOS. That's a leg
 constraint a container image can't route around. iOS support would need a real macOS build host
 (a GitHub-hosted `macos-*` runner or a self-hosted Mac) wired in as a _different kind_ of backend
 than the Docker-image-through-Dagger approach every other target here uses — not attempted yet.
+
+`Rust + React` (2026-08-22) is not one composite pipeline the way Tauri is — `paws ci` takes one
+`--toolchain` per invocation, so this row is two independent, unwired runs against the same repo:
+`paws ci --toolchain rust` (Axum backend) and `paws ci --toolchain node` (the React SPA it serves
+as static assets from `frontend/dist`). Both verified for real, end to end, against
+`examples/rust-react-fixture` — no new `paws` capability needed, since the existing `rust`/`node`
+toolchains already compose cleanly for this shape (see that fixture's README).
 
 `Node + Rust`/`React + Rust` need real new capability, not just wiring: native addon builds
 (`napi-rs`/`neon`) and `wasm-pack` WebAssembly builds are each a distinct toolchain `paws` doesn't
