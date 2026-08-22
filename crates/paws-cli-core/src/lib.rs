@@ -363,6 +363,14 @@ pub struct GenerateArgs {
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct CiArgs {
+    /// Which toolchain to build: node, rust, python, go, java, kotlin,
+    /// tauri, or tauri-android. For `node`, the package manager
+    /// (npm/yarn/pnpm/bun) and framework (Vite, Next.js, or plain) are
+    /// auto-detected from lockfiles/package.json — no separate flag needed
+    /// — and a Playwright e2e project (`@playwright/test` dependency or a
+    /// playwright.config.*) is detected automatically too, running
+    /// `npx playwright install --with-deps && npx playwright test`
+    /// instead of the plain build+test pipeline.
     #[arg(long)]
     #[serde(default)]
     pub toolchain: Option<String>,

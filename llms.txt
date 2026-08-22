@@ -30,7 +30,7 @@ After step 3, restart/reload the MCP client (or start a new session) so it picks
 
 Build and test a language target (node, rust, python, tauri, tauri-android, ...)
 
-- `--toolchain` — 
+- `--toolchain` — Which toolchain to build: node, rust, python, go, java, kotlin, tauri, or tauri-android. For `node`, the package manager (npm/yarn/pnpm/bun) and framework (Vite, Next.js, or plain) are auto-detected from lockfiles/package.json — no separate flag needed — and a Playwright e2e project (`@playwright/test` dependency or a playwright.config.*) is detected automatically too, running `npx playwright install --with-deps && npx playwright test` instead of the plain build+test pipeline
 - `--verbose` — Print per-ecosystem provisioning start/elapsed timing to stderr
 - `--silent` — Suppress dagger's live build progress; only print output once the pipeline finishes (or on failure). Default is streamed live
 - `--targets` — Cross-compile to these GOOS/GOARCH pairs instead of the native build, e.g. "linux/amd64,darwin/arm64,windows/amd64" — only valid with `--toolchain go`. Binaries land in `dist/` under the project root; `go test` is skipped for every target (none of them can run in this build container, native or not)
