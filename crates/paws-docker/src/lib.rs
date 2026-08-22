@@ -504,13 +504,39 @@ pub fn docker_hub_tags<'a>(tags: &'a [String], extra_registries: &[String]) -> V
 /// replays from cache rather than rebuilding (same reasoning
 /// `paws-helm`'s `publish_packages_pipeline_args`/`publish_index_pipeline_args`
 /// split relies on).
+/// `resolve_docker_facts` deliberately computes `dockerfile` relative to
+/// the repo root (mirroring real `docker build -f`'s CLI semantics, where
+/// `-f`'s path is relative to the caller's cwd, not to `context` -- see
+/// its pinned unit tests), but the dagger `host directory --path=<context>`
+/// call above only mounts `context` itself, not the whole repo. Passing
+/// the repo-root-relative dockerfile straight through double-nests it once
+/// `context` is a subdirectory (e.g. context "./app", dockerfile
+/// "./app/Dockerfile" looked up *inside* the already-mounted "./app" ->
+/// "app/app/Dockerfile", which doesn't exist) -- confirmed for real against
+/// `examples/docker-compose-fixture`. This strips the mounted context's
+/// prefix back off so the path is relative to what's actually mounted.
+fn dockerfile_relative_to_context(context: &str, dockerfile: &str) -> String {
+    let ctx = context.trim_start_matches("./").trim_end_matches('/');
+    if ctx.is_empty() {
+        return dockerfile.to_string();
+    }
+    let df = dockerfile.trim_start_matches("./");
+    match df.strip_prefix(ctx).and_then(|rest| rest.strip_prefix('/')) {
+        Some(rest) => format!("./{rest}"),
+        None => dockerfile.to_string(),
+    }
+}
+
 fn docker_build_pipeline_prefix(build: &BuildSpec) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "host".into(),
         "directory".into(),
         format!("--path={}", build.context),
         "docker-build".into(),
-        format!("--dockerfile={}", build.dockerfile),
+        format!(
+            "--dockerfile={}",
+            dockerfile_relative_to_context(build.context, build.dockerfile)
+        ),
     ];
     if !build.target.is_empty() {
         args.push(format!("--target={}", build.target));
@@ -828,6 +854,38 @@ mod tests {
                 "docker-build".to_string(),
                 "--dockerfile=./Dockerfile".to_string(),
                 "--target=base".to_string(),
+                "sync".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_only_pipeline_args_relativizes_dockerfile_against_a_compose_context_subdir() {
+        // resolve_docker_facts (see its own tests) deliberately computes
+        // `dockerfile` relative to the repo root -- "./app/Dockerfile" for
+        // a compose service with context "./app" -- matching real
+        // `docker build -f`'s CLI semantics. But dagger's `host directory
+        // --path=./app` only mounts "./app" itself, so the `--dockerfile`
+        // arg must be relative to *that* mount ("./Dockerfile"), not the
+        // repo root, or dagger looks for "./app/Dockerfile" inside the
+        // already-mounted "./app" (i.e. an "app/app/Dockerfile" that
+        // doesn't exist) -- reproduced for real against
+        // examples/docker-compose-fixture before this fix.
+        let args = build_only_pipeline_args(&BuildSpec {
+            context: "./app",
+            dockerfile: "./app/Dockerfile",
+            target: "runtime",
+            build_args: &[],
+        });
+        assert_eq!(
+            args,
+            vec![
+                "host".to_string(),
+                "directory".to_string(),
+                "--path=./app".to_string(),
+                "docker-build".to_string(),
+                "--dockerfile=./Dockerfile".to_string(),
+                "--target=runtime".to_string(),
                 "sync".to_string(),
             ]
         );
