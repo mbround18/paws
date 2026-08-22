@@ -191,15 +191,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_REF_NAME: ${{ inputs.tag || github.ref_name }}
+          # NOT `GITHUB_REF_NAME` — that name is on GitHub Actions'
+          # reserved-default-env-var list, so a step `env:` entry for it is
+          # silently ignored and the runner's own value (the ref the
+          # workflow was *dispatched from*, "main" for workflow_dispatch —
+          # not the `tag` input) wins instead. Confirmed for real: this is
+          # exactly why the very first `workflow_dispatch` run of this
+          # workflow (from tag-manager.yaml) looked for prebuilt builder
+          # images tagged "-main" instead of the actual release tag, even
+          # though `build-builders` (which reads a non-reserved custom
+          # `VERSION` var) had pushed them correctly tagged.
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           # A tag with a "-" (e.g. v0.0.1-prerelease.1) is a semver
           # prerelease; a plain vX.Y.Z tag is a full release.
           prerelease_flag=""
-          case "$GITHUB_REF_NAME" in
+          case "$RELEASE_TAG" in
             *-*) prerelease_flag="--prerelease" ;;
           esac
           ./target/release/paws release \
             --target ${{ matrix.target }} \
-            --tag "$GITHUB_REF_NAME" \
+            --tag "$RELEASE_TAG" \
             $prerelease_flag
