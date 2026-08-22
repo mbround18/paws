@@ -1174,6 +1174,7 @@ dependencies = [
  "paws-docs",
  "paws-environment",
  "paws-flatpak",
+ "paws-go",
  "paws-helm",
  "paws-node",
  "paws-provision",
@@ -1238,6 +1239,13 @@ dependencies = [
 
 [[package]]
 name = "paws-flatpak"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
+name = "paws-go"
 version = "0.1.0"
 dependencies = [
  "anyhow",

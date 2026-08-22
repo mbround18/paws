@@ -42,6 +42,7 @@ fixtures=(
     "next-fixture|examples/next-fixture|pass|ci --toolchain node --silent"
     "playwright-fixture|examples/playwright-fixture|pass|ci --toolchain node --silent"
     "python-fixture|examples/python-fixture|pass|ci --toolchain python --silent"
+    "go-fixture|examples/go-fixture|pass|ci --toolchain go --silent"
     "tauri-fixture|examples/tauri-fixture|pass|ci --toolchain tauri --silent"
     "tauri-react-fixture|examples/tauri-react-fixture|pass|ci --toolchain tauri --silent"
     "multi-ecosystem-fixture (rust)|examples/multi-ecosystem-fixture|pass|ci --toolchain rust --silent"

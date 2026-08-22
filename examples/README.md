@@ -88,6 +88,12 @@ react-ts` React SPA (`frontend/`) as static assets, plus a `/api/health` JSON ro
   the target for `paws ci --toolchain python`. Exercises `crates/paws-python`'s detection
   (`pyproject.toml` + `uv.lock`) and a real `uv sync --all-groups --frozen && uv build && uv run
 pytest`, run against `astral/uv:python3.12-trixie-slim` through Dagger.
+- `go-fixture/` — a minimal Go module (`go.mod` + a two-function `main.go`/`main_test.go`); the
+  target for `paws ci --toolchain go`. Exercises `crates/paws-go`'s detection (`go.mod`) and a
+  real `go build ./... && go vet ./... && go test ./...`, run against the plain `golang:1-bookworm`
+  image through Dagger. Unlike `paws-python`/`paws-rust`, `crates/paws-go` isn't a port of an
+  existing `gh-reusable` function — `gh-reusable` only ever had a container-setup `setupGo`, no
+  build/test steps to port for parity.
 - `playwright-fixture/` — a real `npm create playwright@latest -- --quiet --lang=TypeScript
 --no-browsers` scaffold; the target for `paws-node`'s Playwright detection. Exercises
   `crates/paws-node`'s `has_playwright` detection (`@playwright/test` dependency or

@@ -8,8 +8,22 @@ see [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) for how a new stack actually gets ad
 
 Confirmed directly against the code, not from memory:
 
-- **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node`, `python`, `tauri`,
-  `tauri-android`, `flatpak` (`crates/paws-cli-core/src/lib.rs`). Node execution is now natively multi-package-manager
+- **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node`, `python`, `go`,
+  `tauri`, `tauri-android`, `flatpak` (`crates/paws-cli-core/src/lib.rs`). `go` (2026-08-22,
+  `crates/paws-go`) is a new native implementation, not a port — unlike `rust`/`python`,
+  `gh-reusable` never had a `goBuildAndTest` Dagger function, only `setupGo` (container setup with
+  no build/test steps of its own), so there was no real logic to port for parity. Runs `go build
+  ./...`, `go vet ./...`, `go test ./...` against the plain `golang:1-bookworm` image,
+  fail-fast — deliberately no `gofmt` gate for this first cut (`gofmt -l` doesn't itself fail on
+  unformatted code the way `cargo fmt -- --check` does, and wiring a shell one-liner through
+  `dagger core`'s comma-joined `--args` risks the same CSV-parsing fragility `paws-audit` moved
+  away from). Verified for real, end to end, against `examples/go-fixture` — a genuine `go1.23.4`
+  toolchain was installed into this dev environment specifically to sanity-check the fixture
+  locally first (it had none beforehand), then the actual `paws ci --toolchain go` run went
+  through a real Dagger `golang:1-bookworm` container, independent of that local toolchain.
+  `paws ci`'s auto-multi-provision detection (`detect_needed_ecosystems`) also now treats `go.mod`
+  as a signal, alongside `paws-provision`'s `install_go` (see below) making `go` a real
+  `paws provision` target too. Node execution is now natively multi-package-manager
   (`crates/paws-node` — npm/yarn/pnpm/bun, detected from lockfiles or `package.json`'s
   `packageManager` field, no longer the old `pnpmBuildAndTest`-only interim path) and
   framework-aware (Vite, Next.js, or plain, informational for now). The `Node` row's "Backend
@@ -211,7 +225,7 @@ drive today, on top of whatever multi-ecosystem provisioning already gets you pa
 | Java                 | Java              | Maven (mvn), Gradle     | JDK, Spring Boot, Quarkus              | .jar, .war, Docker Image                        | 📋     |
 | Kotlin (JVM)         | Kotlin            | Gradle, Maven           | JDK, kotlinc, Ktor, Spring Boot        | .jar, Docker Image                              | 📋     |
 | Java + Kotlin        | Java, Kotlin      | Gradle                  | JDK, Mixed Kotlin/Java Compilation     | .jar, Maven/Gradle Package                      | 📋     |
-| Go                   | Go                | Go Modules (go mod)     | Go Toolchain (go build), standard lib  | Native Executables (ELF, .exe, Mach-O)          | 🚧     |
+| Go                   | Go                | Go Modules (go mod)     | Go Toolchain (go build), standard lib  | Native Executables (ELF, .exe, Mach-O)          | ✅     |
 | Kotlin (Android)     | Kotlin            | Gradle                  | Android SDK, Jetpack Compose           | .apk, .aab (Android App Bundle)                 | 📋     |
 | Kotlin Multiplatform | Kotlin            | Gradle                  | Kotlin/JVM, Kotlin/Native, Kotlin/Wasm | .jar (JVM), .framework (iOS), .js / .wasm (Web) | 📋     |
 | Go + WebAssembly     | Go                | Go Modules              | Go Compiler (GOOS=js GOARCH=wasm)      | WebAssembly (.wasm) + JS wrapper                | 📋     |
@@ -219,12 +233,13 @@ drive today, on top of whatever multi-ecosystem provisioning already gets you pa
 | Java + React/Node    | Java, JS/TS       | Maven/Gradle & npm/yarn | JDK, Node.js, Spring Boot, React       | Backend .jar + Static Web Assets                | 📋     |
 | Go + React/Node      | Go, JS/TS         | Go Modules & npm/yarn   | Go Toolchain, Node.js, React           | Go Binary + Static Web Assets                   | 📋     |
 
-`Go`'s `paws-provision` support (`install_go`, see "Current coverage" above) landed 2026-08-22 --
-it was the most natural first pickup here, needing no JVM-style version-matrix design the way
-`Java`/`Kotlin` would. That's why the `Go` row above is 🚧 rather than 📋 now: provisioning is
-real, but `paws ci --toolchain go` (actually building/testing a Go project) doesn't exist yet --
-still the real next step for this row, and a prerequisite for the `Go + WebAssembly`/`Go + C/C++
-(cgo)`/`Go + React/Node` rows below it, none of which can start until plain `Go` does.
+`Go`'s `paws-provision` support (`install_go`) landed 2026-08-22, and `paws ci --toolchain go`
+(`crates/paws-go`, see "Current coverage" above) followed the same day — it was the most natural
+first pickup here, needing no JVM-style version-matrix design the way `Java`/`Kotlin` would. The
+`Go + WebAssembly`/`Go + C/C++ (cgo)`/`Go + React/Node` rows below it are each real new capability
+on top of plain `Go`, not just wiring: `GOOS=js GOARCH=wasm` builds, `cgo`'s C toolchain
+dependency, and a second (Node) toolchain composing alongside it the way
+`examples/rust-react-fixture` already proved out for Rust + React — none attempted yet.
 
 ## Other language ecosystems
 

@@ -778,6 +778,19 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
             run_dagger_core(&args, silent).await?;
             println!("ci: rust build/test succeeded");
         }
+        Some("go") => {
+            let dir = std::env::current_dir()?;
+            if !paws_go::is_go_project(&dir) {
+                anyhow::bail!(
+                    "--toolchain go given, but no go.mod found in {}",
+                    dir.display()
+                );
+            }
+            println!("ci: go project ({})", dir.display());
+            let args = paws_go::dagger_pipeline_args(&dir.to_string_lossy());
+            run_dagger_core(&args, silent).await?;
+            println!("ci: go build/test succeeded");
+        }
         Some("flatpak") => {
             let dir = std::env::current_dir()?;
             let project = paws_flatpak::detect_project(&dir)
@@ -798,7 +811,7 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: flatpak build succeeded");
         }
         Some(other) => anyhow::bail!(
-            "unsupported --toolchain '{other}'; expected 'node', 'rust', 'python', 'tauri', 'tauri-android', or 'flatpak'"
+            "unsupported --toolchain '{other}'; expected 'node', 'rust', 'python', 'go', 'tauri', 'tauri-android', or 'flatpak'"
         ),
         None => anyhow::bail!("--toolchain is required (e.g. --toolchain node)"),
     }
