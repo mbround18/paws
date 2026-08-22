@@ -86,6 +86,9 @@ fn detect_needed_ecosystems() -> Vec<Ecosystem> {
     if std::path::Path::new("pyproject.toml").exists() {
         ecosystems.push(Ecosystem::Python);
     }
+    if std::path::Path::new("go.mod").exists() {
+        ecosystems.push(Ecosystem::Go);
+    }
     ecosystems
 }
 
@@ -512,7 +515,7 @@ pub struct DocsArgs {}
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct ProvisionArgs {
-    /// Comma-separated ecosystems to install, e.g. "rust,node,python".
+    /// Comma-separated ecosystems to install, e.g. "rust,node,python,go".
     #[arg(long, value_delimiter = ',')]
     #[serde(default)]
     pub toolchains: Vec<String>,
@@ -1206,7 +1209,7 @@ pub async fn run_provision(args: ProvisionArgs) -> anyhow::Result<()> {
         verbose,
     } = args;
     if toolchains.is_empty() {
-        anyhow::bail!("--toolchains is required (e.g. --toolchains rust,node,python)");
+        anyhow::bail!("--toolchains is required (e.g. --toolchains rust,node,python,go)");
     }
     let ecosystems = toolchains
         .iter()

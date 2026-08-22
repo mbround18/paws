@@ -46,11 +46,26 @@ compose` runtime difference under this pipeline's root context that a real GitHu
   `mbround18/oled-wallpaper`'s actual manifest — a real, heavy wgpu/winit GUI app, not a
   synthetic fixture; a full bundle/release flow should keep using its own existing pipeline for
   now (see `builders/README.md` for the full story).
-- **`paws provision`** (concurrent toolchain installers): `rust`, `node`, `python`
-  (`paws_provision::Ecosystem`). `gh-reusable` (the TS system `paws` is replacing) already has
-  `setupGo`/`setupRuby`/`setupJava`/`setupTerraform`/`setupPulumi` — none of those ecosystems are
-  wired into `paws-provision` yet, they're just precedent for what "add a new ecosystem" looks
-  like.
+- **`paws provision`** (concurrent toolchain installers): `rust`, `node`, `python`, `go`
+  (`paws_provision::Ecosystem`). `go` (2026-08-22) is real, not detection-only: `install_go` runs
+  `go install golang.org/dl/goX.Y.Z@latest` then that version's own `download` subcommand — Go's
+  own official mechanism for fetching an additional pinned toolchain version, the same shape as
+  `install_rust`/`install_node`/`install_python` shelling out to `rustup`/`corepack`/`uv`
+  respectively rather than reimplementing an installer. Unlike those three, Go has no floating
+  "stable"/"latest" alias for this specific mechanism, so the version is a real pinned release
+  (`1.23.4` by default, overridable via `$PAWS_GO_VERSION`) rather than a moving target — mirrors
+  `gh-reusable`'s own `DEFAULT_GO_VERSION` in spirit, a concrete version instead of a floating
+  Docker tag. Verified for real: downloaded a genuine `go1.23.4` toolchain into this dev
+  environment (which had no `go` at all beforehand) specifically to exercise `install_go` against
+  it, confirming both a first install and a repeated (idempotent) call succeed — this also caught
+  a real test-harness bug, not a production one: the crate's own `tool_on_path` test helper checks
+  `<bin> --version`, which `go` doesn't support (only the `version` subcommand), so every
+  Go-dependent test had been silently skipping via a captured `eprintln!` that only became visible
+  under `--nocapture`. `paws ci`'s auto-multi-provision path (`detect_needed_ecosystems`) now also
+  treats `go.mod` as a signal, matching `Cargo.toml`/`package.json`/`pyproject.toml`. `gh-reusable`
+  (the TS system `paws` is replacing) also has `setupRuby`/`setupJava`/`setupTerraform`/
+  `setupPulumi` — none of those ecosystems are wired into `paws-provision` yet, they're just
+  precedent for what "add a new ecosystem" looks like next.
 - **`paws audit`** (language detection for scanner selection): detects `rust`, `node`, `python`,
   `go`, `docker` signals (`paws_audit::LanguageFamily`) — detection only, not execution. A repo
   with a `go.mod` gets audited correctly; `paws ci --toolchain go` doesn't exist.
@@ -196,7 +211,7 @@ drive today, on top of whatever multi-ecosystem provisioning already gets you pa
 | Java                 | Java              | Maven (mvn), Gradle     | JDK, Spring Boot, Quarkus              | .jar, .war, Docker Image                        | 📋     |
 | Kotlin (JVM)         | Kotlin            | Gradle, Maven           | JDK, kotlinc, Ktor, Spring Boot        | .jar, Docker Image                              | 📋     |
 | Java + Kotlin        | Java, Kotlin      | Gradle                  | JDK, Mixed Kotlin/Java Compilation     | .jar, Maven/Gradle Package                      | 📋     |
-| Go                   | Go                | Go Modules (go mod)     | Go Toolchain (go build), standard lib  | Native Executables (ELF, .exe, Mach-O)          | 📋     |
+| Go                   | Go                | Go Modules (go mod)     | Go Toolchain (go build), standard lib  | Native Executables (ELF, .exe, Mach-O)          | 🚧     |
 | Kotlin (Android)     | Kotlin            | Gradle                  | Android SDK, Jetpack Compose           | .apk, .aab (Android App Bundle)                 | 📋     |
 | Kotlin Multiplatform | Kotlin            | Gradle                  | Kotlin/JVM, Kotlin/Native, Kotlin/Wasm | .jar (JVM), .framework (iOS), .js / .wasm (Web) | 📋     |
 | Go + WebAssembly     | Go                | Go Modules              | Go Compiler (GOOS=js GOARCH=wasm)      | WebAssembly (.wasm) + JS wrapper                | 📋     |
@@ -204,9 +219,12 @@ drive today, on top of whatever multi-ecosystem provisioning already gets you pa
 | Java + React/Node    | Java, JS/TS       | Maven/Gradle & npm/yarn | JDK, Node.js, Spring Boot, React       | Backend .jar + Static Web Assets                | 📋     |
 | Go + React/Node      | Go, JS/TS         | Go Modules & npm/yarn   | Go Toolchain, Node.js, React           | Go Binary + Static Web Assets                   | 📋     |
 
-`Go`'s `paws-provision` support is the most natural first pickup here — `gh-reusable` already has
-a `setupGo` function to port from, and Go's toolchain is a single static binary (`go`), no JVM
-version-matrix complexity to design around the way `Java`/`Kotlin` would need.
+`Go`'s `paws-provision` support (`install_go`, see "Current coverage" above) landed 2026-08-22 --
+it was the most natural first pickup here, needing no JVM-style version-matrix design the way
+`Java`/`Kotlin` would. That's why the `Go` row above is 🚧 rather than 📋 now: provisioning is
+real, but `paws ci --toolchain go` (actually building/testing a Go project) doesn't exist yet --
+still the real next step for this row, and a prerequisite for the `Go + WebAssembly`/`Go + C/C++
+(cgo)`/`Go + React/Node` rows below it, none of which can start until plain `Go` does.
 
 ## Other language ecosystems
 

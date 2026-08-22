@@ -18,6 +18,7 @@ pub enum Ecosystem {
     Rust,
     Node,
     Python,
+    Go,
 }
 
 impl Ecosystem {
@@ -26,6 +27,7 @@ impl Ecosystem {
             Ecosystem::Rust => "rust",
             Ecosystem::Node => "node",
             Ecosystem::Python => "python",
+            Ecosystem::Go => "go",
         }
     }
 }
@@ -38,6 +40,7 @@ impl std::str::FromStr for Ecosystem {
             "rust" => Ok(Ecosystem::Rust),
             "node" => Ok(Ecosystem::Node),
             "python" => Ok(Ecosystem::Python),
+            "go" => Ok(Ecosystem::Go),
             other => anyhow::bail!("unsupported ecosystem: {other}"),
         }
     }
@@ -178,6 +181,55 @@ pub async fn install_python() -> Result<()> {
     run_command("uv", &["python", "install"]).await
 }
 
+/// Pinned Go toolchain version `install_go` ensures is present, mirroring
+/// `gh-reusable`'s own `DEFAULT_GO_VERSION` ("1.24" there, used as a
+/// floating Docker image tag) with a concrete patch release here — Go's
+/// `golang.org/dl` mechanism (see `install_go`) has no floating "latest"
+/// alias the way `rustup`'s "stable" or `corepack prepare pnpm@latest` do,
+/// so a real release has to be named. Overridable via `$PAWS_GO_VERSION`.
+pub const DEFAULT_GO_VERSION: &str = "1.23.4";
+
+/// Real, idempotent installer for a Go toolchain via `go install
+/// golang.org/dl/goX.Y.Z@latest` followed by that version's own `download`
+/// subcommand — Go's own official mechanism for fetching an additional
+/// toolchain version alongside whatever `go` is already on PATH (ported
+/// intent of `gh-reusable`'s `setupGo`, which pins the same way via a
+/// Docker image tag instead of this host-level mechanism). Like
+/// `install_rust` assumes `rustup`, `install_node` assumes `corepack`, and
+/// `install_python` assumes `uv` are already present, this assumes a base
+/// `go` binary is already on PATH to bootstrap from — this crate shells to
+/// real installers, it doesn't reimplement them. The freshly-installed
+/// `goX.Y.Z` binary is invoked by its full `$(go env GOPATH)/bin` path
+/// rather than by bare name, since that directory isn't guaranteed to be
+/// on PATH the way `~/.cargo/bin`/`corepack`'s shims typically are.
+pub async fn install_go() -> Result<()> {
+    let version =
+        std::env::var("PAWS_GO_VERSION").unwrap_or_else(|_| DEFAULT_GO_VERSION.to_string());
+    run_command(
+        "go",
+        &["install", &format!("golang.org/dl/go{version}@latest")],
+    )
+    .await?;
+
+    let gopath_output = Command::new("go")
+        .args(["env", "GOPATH"])
+        .output()
+        .await
+        .context("failed to run `go env GOPATH` — is `go` installed and on PATH?")?;
+    if !gopath_output.status.success() {
+        anyhow::bail!(
+            "`go env GOPATH` failed: {}",
+            String::from_utf8_lossy(&gopath_output.stderr)
+        );
+    }
+    let gopath = String::from_utf8_lossy(&gopath_output.stdout)
+        .trim()
+        .to_string();
+    let go_bin = format!("{gopath}/bin/go{version}");
+
+    run_command(&go_bin, &["download"]).await
+}
+
 /// Builds a real installer closure for `ecosystem`, matching it to the
 /// concrete `install_*` function above.
 pub fn real_installer(ecosystem: Ecosystem) -> Box<dyn Installer> {
@@ -185,6 +237,7 @@ pub fn real_installer(ecosystem: Ecosystem) -> Box<dyn Installer> {
         Ecosystem::Rust => Box::new(install_rust),
         Ecosystem::Node => Box::new(install_node),
         Ecosystem::Python => Box::new(install_python),
+        Ecosystem::Go => Box::new(install_go),
     }
 }
 
@@ -283,6 +336,19 @@ mod tests {
             .unwrap_or(false)
     }
 
+    /// `go` has no `--version` flag (only the `version` subcommand) --
+    /// `tool_on_path("go")` always reported false, silently skipping every
+    /// Go-dependent test in this file even when a real `go` was on PATH;
+    /// the skip's `eprintln!` was hidden by cargo test's default output
+    /// capturing, so it looked like the tests were genuinely passing.
+    fn go_on_path() -> bool {
+        std::process::Command::new("go")
+            .arg("version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
     #[tokio::test]
     async fn real_installers_provision_concurrently_when_their_tools_are_present() {
         let mut tasks: Vec<(Ecosystem, Box<dyn Installer>)> = Vec::new();
@@ -295,8 +361,11 @@ mod tests {
         if tool_on_path("uv") {
             tasks.push((Ecosystem::Python, real_installer(Ecosystem::Python)));
         }
+        if go_on_path() {
+            tasks.push((Ecosystem::Go, real_installer(Ecosystem::Go)));
+        }
         if tasks.is_empty() {
-            eprintln!("skipping: none of rustup/corepack/uv are on PATH");
+            eprintln!("skipping: none of rustup/corepack/uv/go are on PATH");
             return;
         }
 
@@ -312,5 +381,22 @@ mod tests {
                 result
             );
         }
+    }
+
+    #[tokio::test]
+    async fn install_go_fetches_the_pinned_version_when_go_is_on_path() {
+        if !go_on_path() {
+            eprintln!("skipping: `go` is not on PATH");
+            return;
+        }
+        install_go().await.expect("install_go should succeed");
+
+        // Idempotency: `go install .../dl/goX.Y.Z@latest` + `download` must
+        // succeed again without erroring once the version is already
+        // fetched, same contract as install_rust/install_node/
+        // install_python being safe to call repeatedly.
+        install_go()
+            .await
+            .expect("a second install_go call should be a no-op success, not an error");
     }
 }
