@@ -171,6 +171,16 @@ Mint a GitHub App installation access token and print it to stdout (nothing else
 - `--private-key-file` — Path to a file containing the GitHub App's private key. Falls back to $GH_APP_PRIVATE_KEY_FILE
 - `--repository` — "owner/repo" the App is installed on. Falls back to $GITHUB_REPOSITORY
 
+## paws publish
+
+Publish a package to its registry (`--target rust-crate` for crates.io today)
+
+- `--target` — Publish target — only "rust-crate" today (crates.io or another Cargo registry)
+- `--source` — Path to the package to publish. Defaults to the current directory
+- `--registry` — Registry to publish to. Defaults to crates.io
+- `--dry-run` — Build/test/package only — skip the actual publish step. Useful for verifying a package is publish-ready without a registry token
+- `--silent` — Suppress dagger's live build progress; only print output once the pipeline finishes (or on failure). Default is streamed live
+
 ## GitHub Actions
 
 paws also ships composite GitHub Actions for wiring into a *consumer* repo's own CI/CD, separate from the CLI subcommands above — `paws workflow generate` scaffolds a starter workflow using these automatically.
