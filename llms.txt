@@ -33,6 +33,7 @@ Build and test a language target (node, rust, python, tauri, tauri-android, ...)
 - `--toolchain` — 
 - `--verbose` — Print per-ecosystem provisioning start/elapsed timing to stderr
 - `--silent` — Suppress dagger's live build progress; only print output once the pipeline finishes (or on failure). Default is streamed live
+- `--targets` — Cross-compile to these GOOS/GOARCH pairs instead of the native build, e.g. "linux/amd64,darwin/arm64,windows/amd64" — only valid with `--toolchain go`. Binaries land in `dist/` under the project root; `go test` is skipped for every target (none of them can run in this build container, native or not)
 
 ## paws docker
 
@@ -88,7 +89,7 @@ Publish generated docs (e.g. rustdoc) to GitHub Pages
 
 Provision toolchains concurrently (rust, node, python, ...)
 
-- `--toolchains` — Comma-separated ecosystems to install, e.g. "rust,node,python"
+- `--toolchains` — Comma-separated ecosystems to install, e.g. "rust,node,python,go"
 - `--verbose` — Print per-ecosystem provisioning start/elapsed timing to stderr
 
 ## paws helm
