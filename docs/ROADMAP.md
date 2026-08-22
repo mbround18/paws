@@ -138,7 +138,7 @@ pytest` pipeline shape — no package meant for `uv build`, several separately-s
 | React + Rust                | JS/TS, Rust            | npm/yarn/pnpm/bun & cargo   | React, Rust, wasm-pack                    | WebAssembly (.wasm) + React UI        | 📋           |
 | Tauri + Rust                | Rust, HTML/CSS/JS      | cargo                       | Tauri, Rust, OS Webview (WebKit/WebView2) | Desktop App Installer                 | ✅           |
 | Tauri + Node + Rust         | Rust, JS/TS            | cargo & (npm/yarn/pnpm/bun) | Tauri, Node.js (Sidecar), Rust            | Desktop App + Node Backend Process    | 📋           |
-| Tauri + React + Rust        | Rust, JS/TS            | cargo & (npm/yarn/pnpm/bun) | Tauri, React, Rust, Vite/Next.js          | Desktop App (React UI)                | 🚧           |
+| Tauri + React + Rust        | Rust, JS/TS            | cargo & (npm/yarn/pnpm/bun) | Tauri, React, Rust, Vite/Next.js          | Desktop App (React UI)                | ✅           |
 | Tauri + React + Node + Rust | Rust, JS/TS            | cargo & (npm/yarn/pnpm/bun) | Tauri, React, Node.js, Rust               | Desktop App + Embedded Node APIs      | 📋           |
 | Tauri + Android             | Rust, JS/TS            | cargo & (npm/yarn/pnpm/bun) | Tauri, JDK, Android SDK/NDK               | .apk / .aab                           | 🚧           |
 | Tauri + iOS                 | Rust, JS/TS            | cargo & (npm/yarn/pnpm/bun) | Tauri, Xcode, `xcodebuild`                | .ipa                                  | 📋 (blocked) |
@@ -149,9 +149,10 @@ and runs `<package manager> run tauri build` against a dedicated `builders/tauri
 builder — Tauri's own CLI handles the frontend-then-Rust sequencing via `tauri.conf.json`'s
 `beforeBuildCommand`, so `paws` never has to. Verified for real, full (non-`--no-bundle`) build —
 producing `.deb`/`.rpm`/`.AppImage` — against a real `create-tauri-app` vanilla-ts scaffold
-(`examples/tauri-fixture`); marked ✅ only for that plain-TS case. The React/Vue rows should follow
-the same code path (the pipeline is package-manager-driven, not framework-driven) but aren't
-independently verified yet, hence 🚧 rather than ✅. Linux-only for now — no macOS/Windows Tauri
+(`examples/tauri-fixture`) and, as of 2026-08-22, a real `create-tauri-app` react-ts scaffold
+(`examples/tauri-react-fixture`) — same full, non-`--no-bundle` build, same three bundle outputs,
+confirming the pipeline is genuinely package-manager-driven rather than framework-driven as
+predicted, so this row is now ✅. Linux-only for now — no macOS/Windows Tauri
 builder exists yet, and the Node-sidecar row is a distinct capability (spawning a persistent Node
 process alongside the Tauri shell) this crate doesn't attempt.
 

@@ -66,6 +66,12 @@ part of `paws` itself.
   (`src-tauri/tauri.conf.json`) and a real, full `tauri build` — frontend build via
   `beforeBuildCommand`, then Rust bundling into `.deb`/`.rpm`/`.AppImage` — run against the
   `builders/tauri-linux` Dockerfile through Dagger.
+- `tauri-react-fixture/` — a real `npm create tauri-app@latest -- --template react-ts --manager npm`
+  scaffold (React + TSX, not just vanilla-ts). Exercises the React/Vue row of `docs/ROADMAP.md`'s
+  Tauri table, which the plain `tauri-fixture` run alone didn't cover — same
+  `crates/paws-tauri` code path (package-manager-driven, not framework-driven), verified for real,
+  full (non-`--no-bundle`) build producing `.deb`/`.rpm`/`.AppImage` through `builders/tauri-linux`
+  via Dagger.
 - `python-fixture/` — a real `uv init` scaffold (with a `pytest` dev dependency and one real test);
   the target for `paws ci --toolchain python`. Exercises `crates/paws-python`'s detection
   (`pyproject.toml` + `uv.lock`) and a real `uv sync --all-groups --frozen && uv build && uv run
