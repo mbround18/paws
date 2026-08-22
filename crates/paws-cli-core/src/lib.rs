@@ -372,6 +372,14 @@ pub struct CiArgs {
     #[arg(long)]
     #[serde(default)]
     pub silent: bool,
+    /// Cross-compile to these GOOS/GOARCH pairs instead of the native
+    /// build, e.g. "linux/amd64,darwin/arm64,windows/amd64" — only valid
+    /// with `--toolchain go`. Binaries land in `dist/` under the project
+    /// root; `go test` is skipped for every target (none of them can run
+    /// in this build container, native or not).
+    #[arg(long, value_delimiter = ',')]
+    #[serde(default)]
+    pub targets: Vec<String>,
 }
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
@@ -652,7 +660,12 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
         toolchain,
         verbose,
         silent,
+        targets,
     } = args;
+
+    if !targets.is_empty() && toolchain.as_deref() != Some("go") {
+        anyhow::bail!("--targets is only valid with --toolchain go");
+    }
 
     // FR-015: provisioning must go through the same concurrent path as
     // `paws provision`, never a sequential loop, whenever the target
@@ -790,15 +803,40 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
                     dir.display()
                 );
             }
-            let is_wasm = paws_go::is_wasm_project(&dir);
-            println!(
-                "ci: go project{} ({})",
-                if is_wasm { " (js/wasm)" } else { "" },
-                dir.display()
-            );
-            let args = paws_go::dagger_pipeline_args(&dir.to_string_lossy(), is_wasm);
-            run_dagger_core(&args, silent).await?;
-            println!("ci: go build/test succeeded");
+            if targets.is_empty() {
+                let is_wasm = paws_go::is_wasm_project(&dir);
+                println!(
+                    "ci: go project{} ({})",
+                    if is_wasm { " (js/wasm)" } else { "" },
+                    dir.display()
+                );
+                let args = paws_go::dagger_pipeline_args(&dir.to_string_lossy(), is_wasm);
+                run_dagger_core(&args, silent).await?;
+                println!("ci: go build/test succeeded");
+            } else {
+                let parsed_targets = targets
+                    .iter()
+                    .map(|t| paws_go::Target::parse(t))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                let module = paws_go::module_name(&dir)?;
+                let dist_dir = dir.join("dist");
+                println!(
+                    "ci: go project ({}) cross-compiling to {}",
+                    dir.display(),
+                    targets.join(", ")
+                );
+                let args = paws_go::cross_dagger_pipeline_args(
+                    &dir.to_string_lossy(),
+                    &module,
+                    &parsed_targets,
+                    &dist_dir.to_string_lossy(),
+                );
+                run_dagger_core(&args, silent).await?;
+                println!(
+                    "ci: go cross-compile succeeded — binaries in {}",
+                    dist_dir.display()
+                );
+            }
         }
         Some("java") => {
             let dir = std::env::current_dir()?;
@@ -812,6 +850,15 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
             let args = paws_java::dagger_pipeline_args(build_system, &dir.to_string_lossy());
             run_dagger_core(&args, silent).await?;
             println!("ci: java build/test succeeded");
+        }
+        Some("kotlin") => {
+            let dir = std::env::current_dir()?;
+            paws_kotlin::detect_project(&dir)
+                .context("failed to detect a Kotlin project in the current directory")?;
+            println!("ci: kotlin project ({})", dir.display());
+            let args = paws_kotlin::dagger_pipeline_args(&dir.to_string_lossy());
+            run_dagger_core(&args, silent).await?;
+            println!("ci: kotlin build/test succeeded");
         }
         Some("flatpak") => {
             let dir = std::env::current_dir()?;
@@ -833,7 +880,7 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: flatpak build succeeded");
         }
         Some(other) => anyhow::bail!(
-            "unsupported --toolchain '{other}'; expected 'node', 'rust', 'python', 'go', 'java', 'tauri', 'tauri-android', or 'flatpak'"
+            "unsupported --toolchain '{other}'; expected 'node', 'rust', 'python', 'go', 'java', 'kotlin', 'tauri', 'tauri-android', or 'flatpak'"
         ),
         None => anyhow::bail!("--toolchain is required (e.g. --toolchain node)"),
     }

@@ -24,8 +24,21 @@
 //!   resulting binary in this container (no JS engine), so `go test` is
 //!   skipped — same rationale as `paws-rust::is_wasm_project`'s wasm path
 //!   skipping `cargo test` for a `cdylib` that can't run on the host either.
+//!
+//! [`cross_dagger_pipeline_args`] generalizes that wasm insight into a real
+//! multi-platform matrix: Go's cross-compilation story needs no cross
+//! linker or extra toolchain component the way most other compiled
+//! languages do (confirmed for real against `golang:1-bookworm` — plain
+//! `GOOS`/`GOARCH` env vars are enough), so building for N targets in one
+//! pipeline is just N `with-env-variable`×2/`with-exec`×2 groups, ending in
+//! a single `directory`/`export` of the whole `dist/` folder rather than
+//! `paws-release`'s one-`file`-per-invocation pattern (`crates/paws-release`)
+//! — verified for real that `dagger core`'s `directory ... export` chain
+//! exports a populated build directory correctly, not just single files.
 
 use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
 
 pub const BASE_IMAGE: &str = "golang:1-bookworm";
 
@@ -126,6 +139,115 @@ pub fn dagger_pipeline_args(source_dir: &str, is_wasm: bool) -> Vec<String> {
     }
 
     args.push("stdout".into());
+    args
+}
+
+/// One cross-compile target, e.g. `linux/amd64`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub goos: String,
+    pub goarch: String,
+}
+
+impl Target {
+    /// Parses a `"<GOOS>/<GOARCH>"` spec, e.g. `"darwin/arm64"`.
+    pub fn parse(spec: &str) -> Result<Self> {
+        let (goos, goarch) = spec.split_once('/').ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid target {spec:?}, expected \"<GOOS>/<GOARCH>\" (e.g. \"linux/amd64\")"
+            )
+        })?;
+        if goos.is_empty() || goarch.is_empty() {
+            anyhow::bail!(
+                "invalid target {spec:?}, expected \"<GOOS>/<GOARCH>\" (e.g. \"linux/amd64\")"
+            );
+        }
+        Ok(Target {
+            goos: goos.to_string(),
+            goarch: goarch.to_string(),
+        })
+    }
+
+    fn binary_suffix(&self) -> &'static str {
+        if self.goos == "windows" { ".exe" } else { "" }
+    }
+}
+
+/// Reads the short module name (the last path segment of `go.mod`'s
+/// `module` directive) used to name each cross-compiled binary — e.g.
+/// module `github.com/mbround18/paws/examples/go-fixture` names its
+/// binaries `go-fixture-<goos>-<goarch>`.
+pub fn module_name(dir: &Path) -> Result<String> {
+    let contents = std::fs::read_to_string(dir.join("go.mod"))
+        .with_context(|| format!("failed to read go.mod in {}", dir.display()))?;
+    let module_path = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("module "))
+        .ok_or_else(|| anyhow::anyhow!("go.mod in {} has no `module` directive", dir.display()))?
+        .trim();
+    Ok(module_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(module_path)
+        .to_string())
+}
+
+/// Builds the `dagger core <chain>` argument list for cross-compiling
+/// `source_dir`'s Go module to every target in `targets`, exporting the
+/// resulting binaries (named `<module>-<goos>-<goarch>[.exe]`) into
+/// `host_dist_dir`, an absolute host path. Each target's `GOOS`/`GOARCH`
+/// are set immediately before its own `go vet`/`go build -o
+/// dist/<name>` pair; `go test` is skipped for every target, native
+/// included — once multiple targets are being produced there's no single
+/// "the" native one to special-case, and none of the resulting binaries
+/// can run inside this build container regardless.
+pub fn cross_dagger_pipeline_args(
+    source_dir: &str,
+    module: &str,
+    targets: &[Target],
+    host_dist_dir: &str,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "container".into(),
+        "from".into(),
+        format!("--address={BASE_IMAGE}"),
+        "with-mounted-directory".into(),
+        "--path=/src".into(),
+        format!("--source={source_dir}"),
+        "with-workdir".into(),
+        "--path=/src".into(),
+    ];
+
+    for target in targets {
+        args.extend([
+            "with-env-variable".into(),
+            "--name=GOOS".into(),
+            format!("--value={}", target.goos),
+        ]);
+        args.extend([
+            "with-env-variable".into(),
+            "--name=GOARCH".into(),
+            format!("--value={}", target.goarch),
+        ]);
+        let out_path = format!(
+            "dist/{module}-{}-{}{}",
+            target.goos,
+            target.goarch,
+            target.binary_suffix()
+        );
+        args.extend(["with-exec".into(), "--args=go,vet,./...".into()]);
+        args.extend([
+            "with-exec".into(),
+            format!("--args=go,build,-o,{out_path},./..."),
+        ]);
+    }
+
+    args.extend([
+        "directory".into(),
+        "--path=dist".into(),
+        "export".into(),
+        format!("--path={host_dist_dir}"),
+    ]);
     args
 }
 
@@ -252,5 +374,98 @@ mod tests {
             "a syscall/js import inside vendor/ must not count as this module's own signal"
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn target_parses_a_valid_goos_goarch_spec() {
+        let target = Target::parse("linux/amd64").unwrap();
+        assert_eq!(target.goos, "linux");
+        assert_eq!(target.goarch, "amd64");
+    }
+
+    #[test]
+    fn target_rejects_a_spec_with_no_slash() {
+        assert!(Target::parse("linux-amd64").is_err());
+    }
+
+    #[test]
+    fn target_rejects_an_empty_goos_or_goarch() {
+        assert!(Target::parse("/amd64").is_err());
+        assert!(Target::parse("linux/").is_err());
+    }
+
+    #[test]
+    fn windows_targets_get_an_exe_suffix_others_dont() {
+        assert_eq!(
+            Target::parse("windows/amd64").unwrap().binary_suffix(),
+            ".exe"
+        );
+        assert_eq!(Target::parse("linux/amd64").unwrap().binary_suffix(), "");
+        assert_eq!(Target::parse("darwin/arm64").unwrap().binary_suffix(), "");
+    }
+
+    #[test]
+    fn module_name_reads_the_last_path_segment_of_go_mod() {
+        let dir = temp_dir("module-name");
+        fs::write(
+            dir.join("go.mod"),
+            "module github.com/mbround18/paws/examples/go-fixture\n\ngo 1.23\n",
+        )
+        .unwrap();
+        assert_eq!(module_name(&dir).unwrap(), "go-fixture");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn module_name_errors_without_a_go_mod() {
+        let dir = temp_dir("module-name-missing");
+        assert!(module_name(&dir).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cross_pipeline_sets_env_and_builds_each_target_then_exports_dist() {
+        let targets = vec![
+            Target::parse("linux/amd64").unwrap(),
+            Target::parse("windows/arm64").unwrap(),
+        ];
+        let args = cross_dagger_pipeline_args("/host/src", "app", &targets, "/host/dist");
+        assert_eq!(
+            args,
+            vec![
+                "container".to_string(),
+                "from".to_string(),
+                "--address=golang:1-bookworm".to_string(),
+                "with-mounted-directory".to_string(),
+                "--path=/src".to_string(),
+                "--source=/host/src".to_string(),
+                "with-workdir".to_string(),
+                "--path=/src".to_string(),
+                "with-env-variable".to_string(),
+                "--name=GOOS".to_string(),
+                "--value=linux".to_string(),
+                "with-env-variable".to_string(),
+                "--name=GOARCH".to_string(),
+                "--value=amd64".to_string(),
+                "with-exec".to_string(),
+                "--args=go,vet,./...".to_string(),
+                "with-exec".to_string(),
+                "--args=go,build,-o,dist/app-linux-amd64,./...".to_string(),
+                "with-env-variable".to_string(),
+                "--name=GOOS".to_string(),
+                "--value=windows".to_string(),
+                "with-env-variable".to_string(),
+                "--name=GOARCH".to_string(),
+                "--value=arm64".to_string(),
+                "with-exec".to_string(),
+                "--args=go,vet,./...".to_string(),
+                "with-exec".to_string(),
+                "--args=go,build,-o,dist/app-windows-arm64.exe,./...".to_string(),
+                "directory".to_string(),
+                "--path=dist".to_string(),
+                "export".to_string(),
+                "--path=/host/dist".to_string(),
+            ]
+        );
     }
 }

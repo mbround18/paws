@@ -1177,6 +1177,7 @@ dependencies = [
  "paws-go",
  "paws-helm",
  "paws-java",
+ "paws-kotlin",
  "paws-node",
  "paws-provision",
  "paws-python",
@@ -1263,6 +1264,13 @@ dependencies = [
 
 [[package]]
 name = "paws-java"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
+name = "paws-kotlin"
 version = "0.1.0"
 dependencies = [
  "anyhow",

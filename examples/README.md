@@ -93,7 +93,10 @@ pytest`, run against `astral/uv:python3.12-trixie-slim` through Dagger.
   real `go build ./... && go vet ./... && go test ./...`, run against the plain `golang:1-bookworm`
   image through Dagger. Unlike `paws-python`/`paws-rust`, `crates/paws-go` isn't a port of an
   existing `gh-reusable` function — `gh-reusable` only ever had a container-setup `setupGo`, no
-  build/test steps to port for parity.
+  build/test steps to port for parity. Also the target for `paws ci --toolchain go --targets
+  <GOOS>/<GOARCH>[,...]`'s cross-compile matrix (`paws_go::cross_dagger_pipeline_args`) — verified
+  for real with `--targets linux/amd64,darwin/arm64,windows/amd64`, `file` confirming genuine
+  ELF/Mach-O/PE32+ binaries land in `dist/`, not just three plausibly-named files.
 - `go-wasm-fixture/` — a minimal Go module that imports `syscall/js` and registers a JS-callable
   function; the target for `paws-go`'s `is_wasm_project` detection and its `GOOS=js`/`GOARCH=wasm`
   build path. Not runnable via plain `go run`/`go test` (a wasm binary can't execute in the build
@@ -125,6 +128,19 @@ pytest`, run against `astral/uv:python3.12-trixie-slim` through Dagger.
   Like `go-react-fixture/`, not a composite pipeline: `paws ci --toolchain java` (repo root) and
   `paws ci --toolchain node` (`frontend/`) are two independent runs. `ServerTest` makes a genuine
   `java.net.http.HttpClient` round trip against `/api/health`, verified for real through Dagger.
+- `kotlin-fixture/` — a minimal Kotlin module (`build.gradle.kts` with the `kotlin("jvm")` plugin
+  + a two-object `Calculator`/`CalculatorTest` pair) with a real, generated `gradlew` wrapper; the
+  target for `paws ci --toolchain kotlin`. Exercises `crates/paws-kotlin`'s `.kt`-file detection
+  and a real `sh gradlew build` — `:compileKotlin`/`:test`/`:build` genuinely executing through
+  Dagger, no new base image or build commands beyond reusing `paws-java`'s Gradle pipeline shape
+  (Kotlin's compiler is a Gradle plugin dependency, not part of the JDK, so Gradle fetches it
+  itself).
+- `java-kotlin-mixed-fixture/` — a single Gradle module with both a Java class (`Adder.java`) and
+  a Kotlin class (`Calculator.kt`) that calls into it — real interop, not two languages sitting
+  side by side unused — proving `docs/ROADMAP.md`'s Java + Kotlin row needs **zero code changes**
+  beyond what `kotlin-fixture/` already exercises: Gradle's `java`/`kotlin` plugins already handle
+  mixed compilation themselves. Verified for real: `:compileJava`/`:compileKotlin` both run,
+  `CalculatorTest` (Kotlin) asserts on `Calculator.add` (Kotlin) calling `Adder.add` (Java).
 - `playwright-fixture/` — a real `npm create playwright@latest -- --quiet --lang=TypeScript
 --no-browsers` scaffold; the target for `paws-node`'s Playwright detection. Exercises
   `crates/paws-node`'s `has_playwright` detection (`@playwright/test` dependency or

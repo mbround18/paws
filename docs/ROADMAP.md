@@ -241,8 +241,8 @@ drive today, on top of whatever multi-ecosystem provisioning already gets you pa
 | Stack Permutation    | Primary Languages | Package Manager(s)      | Core Toolchain / Frameworks            | Output Type                                     | Status |
 | -------------------- | ----------------- | ----------------------- | -------------------------------------- | ----------------------------------------------- | ------ |
 | Java                 | Java              | Maven (mvn), Gradle     | JDK, Spring Boot, Quarkus              | .jar, .war, Docker Image                        | ✅     |
-| Kotlin (JVM)         | Kotlin            | Gradle, Maven           | JDK, kotlinc, Ktor, Spring Boot        | .jar, Docker Image                              | 📋     |
-| Java + Kotlin        | Java, Kotlin      | Gradle                  | JDK, Mixed Kotlin/Java Compilation     | .jar, Maven/Gradle Package                      | 📋     |
+| Kotlin (JVM)         | Kotlin            | Gradle, Maven           | JDK, kotlinc, Ktor, Spring Boot        | .jar, Docker Image                              | ✅     |
+| Java + Kotlin        | Java, Kotlin      | Gradle                  | JDK, Mixed Kotlin/Java Compilation     | .jar, Maven/Gradle Package                      | ✅     |
 | Go                   | Go                | Go Modules (go mod)     | Go Toolchain (go build), standard lib  | Native Executables (ELF, .exe, Mach-O)          | ✅     |
 | Kotlin (Android)     | Kotlin            | Gradle                  | Android SDK, Jetpack Compose           | .apk, .aab (Android App Bundle)                 | 📋     |
 | Kotlin Multiplatform | Kotlin            | Gradle                  | Kotlin/JVM, Kotlin/Native, Kotlin/Wasm | .jar (JVM), .framework (iOS), .js / .wasm (Web) | 📋     |
@@ -257,9 +257,24 @@ runs against one repo rather than one composite pipeline: `paws ci --toolchain j
 `com.sun.net.httpserver.HttpServer` backend, no framework dependency) and `paws ci --toolchain
 node` (the React SPA it serves from `frontend/dist`), both verified for real against
 `examples/java-react-fixture` — its `ServerTest` makes a genuine `java.net.http.HttpClient` round
-trip against a real `/api/health` response, not just a compile check. `Kotlin`/`Java + Kotlin` stay
-📋: Kotlin needs its own compiler (`kotlinc`) and detection story `paws-java` doesn't attempt —
-sharing Gradle as a build system with `Java` isn't the same as sharing toolchain support.
+trip against a real `/api/health` response, not just a compile check.
+
+`Kotlin (JVM)` (`crates/paws-kotlin`, 2026-08-22) is Gradle-only, deliberately — real Kotlin
+projects are overwhelmingly Gradle-based, and unlike Java, `kotlinc` isn't part of the JDK at all;
+it's a Gradle plugin dependency Gradle fetches itself, so this needed **no new base image or build
+commands** beyond reusing `paws-java`'s exact `eclipse-temurin:21-jdk-jammy` + `sh gradlew build`
+pipeline shape (duplicated rather than shared, matching how `paws-go`/`paws-rust`/`paws-python`
+each independently own their pipeline builder). Detection scans for real `.kt`/`.kts` source files
+under a Gradle build — a build file merely mentioning Kotlin isn't the same as having Kotlin code
+— and, like `paws-java`, requires the project's own `gradlew` wrapper. Verified for real, end to
+end, against `examples/kotlin-fixture` through Dagger (`:compileKotlin`/`:test`/`:build` all
+genuinely executing). This also closed `Java + Kotlin` for free, the same "zero code changes"
+story as `Go + C/C++ (cgo)`: a single Gradle module with both `.java` and `.kt` sources — one
+calling into the other, not just sitting side by side unused — compiles and tests through this
+exact same pipeline unchanged, because Gradle's `java`/`kotlin` plugins already handle mixed
+compilation themselves. `examples/java-kotlin-mixed-fixture` exists purely to prove that; its
+`CalculatorTest` (Kotlin) exercises `Calculator.add` (Kotlin) calling `Adder.add` (Java), real
+interop, not a coincidence of file extensions.
 
 `Go`'s `paws-provision` support (`install_go`) landed 2026-08-22, and `paws ci --toolchain go`
 (`crates/paws-go`, see "Current coverage" above) followed the same day — it was the most natural
@@ -281,6 +296,22 @@ three variant rows below all closed the same day too:
   rather than one composite pipeline — `paws ci --toolchain go` (a plain `net/http` backend) and
   `paws ci --toolchain node` (the React SPA it serves from `frontend/dist`), both verified for
   real against `examples/go-react-fixture`, no new capability needed.
+
+**`paws ci --toolchain go --targets <GOOS>/<GOARCH>[,...]`** (2026-08-22) is a real multi-platform
+build matrix, not just the single wasm cross-compile above generalized in name only: Go needs no
+cross-linker or extra toolchain component for any host/target combination (confirmed for real
+against `golang:1-bookworm` — plain `GOOS`/`GOARCH` env vars are enough for every pairing tried),
+so `paws_go::cross_dagger_pipeline_args` builds N targets in one pipeline (a `with-env-variable`
+pair + `go vet`/`go build -o dist/<module>-<goos>-<goarch>[.exe]` group per target, `go test`
+skipped for all of them — once multiple targets are being produced there's no single "the native
+one" to special-case, and none of the resulting binaries can run in this build container anyway),
+ending in one `directory`/`export` of the whole `dist/` folder — a different (and, for a matrix,
+more efficient) pattern than `paws-release`'s one-`file`-export-per-invocation
+(`crates/paws-release`), verified for real that `dagger core`'s `directory ... export` chain
+exports a populated build directory correctly, not just single files. Verified for real, end to
+end, against `examples/go-fixture` with `--targets linux/amd64,darwin/arm64,windows/amd64`: `file`
+confirms genuine ELF/Mach-O/PE32+ binaries came out, respectively, not just three files with
+plausible names. `--targets` is rejected outside `--toolchain go` with a clear error.
 
 ## Other language ecosystems
 

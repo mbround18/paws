@@ -18,6 +18,7 @@ members = [
     "crates/paws-rust",
     "crates/paws-go",
     "crates/paws-java",
+    "crates/paws-kotlin",
     "crates/paws-flatpak",
     "crates/paws-helm",
     "crates/paws-mcp",
