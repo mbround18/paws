@@ -800,6 +800,19 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
             run_dagger_core(&args, silent).await?;
             println!("ci: go build/test succeeded");
         }
+        Some("java") => {
+            let dir = std::env::current_dir()?;
+            let build_system = paws_java::detect_project(&dir)
+                .context("failed to detect a Java project in the current directory")?;
+            println!(
+                "ci: java project using {} ({})",
+                build_system.as_str(),
+                dir.display()
+            );
+            let args = paws_java::dagger_pipeline_args(build_system, &dir.to_string_lossy());
+            run_dagger_core(&args, silent).await?;
+            println!("ci: java build/test succeeded");
+        }
         Some("flatpak") => {
             let dir = std::env::current_dir()?;
             let project = paws_flatpak::detect_project(&dir)
@@ -820,7 +833,7 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: flatpak build succeeded");
         }
         Some(other) => anyhow::bail!(
-            "unsupported --toolchain '{other}'; expected 'node', 'rust', 'python', 'go', 'tauri', 'tauri-android', or 'flatpak'"
+            "unsupported --toolchain '{other}'; expected 'node', 'rust', 'python', 'go', 'java', 'tauri', 'tauri-android', or 'flatpak'"
         ),
         None => anyhow::bail!("--toolchain is required (e.g. --toolchain node)"),
     }

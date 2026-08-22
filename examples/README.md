@@ -110,6 +110,21 @@ pytest`, run against `astral/uv:python3.12-trixie-slim` through Dagger.
   `rust-react-fixture/`, not a composite pipeline: `paws ci --toolchain go` (repo root) and `paws
   ci --toolchain node` (`frontend/`) are two independent runs, both verified for real, end to end,
   through Dagger.
+- `java-maven-fixture/` — a minimal Maven module (`pom.xml` + a two-class `Calculator`/
+  `CalculatorTest` pair) with a real, generated `mvnw` wrapper (`mvn -N wrapper:wrapper`); the
+  Maven target for `paws ci --toolchain java`. Exercises `crates/paws-java`'s Maven detection and
+  a real `sh mvnw -B verify`, JUnit 5 tests genuinely executing, run against
+  `eclipse-temurin:21-jdk-jammy` through Dagger.
+- `java-gradle-fixture/` — the same fixture shape for Gradle (`build.gradle` + a real, generated
+  `gradlew` wrapper via a genuine Gradle 8.10 install); the Gradle target for `paws ci --toolchain
+  java`. Exercises `crates/paws-java`'s Gradle detection and a real `sh gradlew build`.
+- `java-react-fixture/` — a plain JDK-only backend (`Server.java`,
+  `com.sun.net.httpserver.HttpServer`, no framework dependency) serving a real `create vite
+  --template react-ts` React SPA (`frontend/`) as static assets, plus a `/api/health` JSON route
+  — the "Backend .jar + Static Web Assets" shape from `docs/ROADMAP.md`'s Java + React/Node row.
+  Like `go-react-fixture/`, not a composite pipeline: `paws ci --toolchain java` (repo root) and
+  `paws ci --toolchain node` (`frontend/`) are two independent runs. `ServerTest` makes a genuine
+  `java.net.http.HttpClient` round trip against `/api/health`, verified for real through Dagger.
 - `playwright-fixture/` — a real `npm create playwright@latest -- --quiet --lang=TypeScript
 --no-browsers` scaffold; the target for `paws-node`'s Playwright detection. Exercises
   `crates/paws-node`'s `has_playwright` detection (`@playwright/test` dependency or

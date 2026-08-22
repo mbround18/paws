@@ -18,6 +18,7 @@ paws-node = { path = "../paws-node" }
 paws-python = { path = "../paws-python" }
 paws-rust = { path = "../paws-rust" }
 paws-go = { path = "../paws-go" }
+paws-java = { path = "../paws-java" }
 paws-flatpak = { path = "../paws-flatpak" }
 paws-helm = { path = "../paws-helm" }
 paws-provision = { path = "../paws-provision" }

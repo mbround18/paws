@@ -17,6 +17,7 @@ members = [
     "crates/paws-python",
     "crates/paws-rust",
     "crates/paws-go",
+    "crates/paws-java",
     "crates/paws-flatpak",
     "crates/paws-helm",
     "crates/paws-mcp",

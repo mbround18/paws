@@ -9,9 +9,27 @@ see [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) for how a new stack actually gets ad
 Confirmed directly against the code, not from memory:
 
 - **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node`, `python`, `go`,
-  `tauri`, `tauri-android`, `flatpak` (`crates/paws-cli-core/src/lib.rs`). `go` (2026-08-22,
-  `crates/paws-go`) is a new native implementation, not a port — unlike `rust`/`python`,
-  `gh-reusable` never had a `goBuildAndTest` Dagger function, only `setupGo` (container setup with
+  `java`, `tauri`, `tauri-android`, `flatpak` (`crates/paws-cli-core/src/lib.rs`). `java`
+  (2026-08-22, `crates/paws-java`) is a new native implementation too — `gh-reusable` only ever
+  had `setupJava` (container setup picking a JDK distribution/image, no build/test steps). Detects
+  Maven (`pom.xml`) vs Gradle (`build.gradle`/`build.gradle.kts`) and **requires** the project's
+  own wrapper script (`mvnw`/`gradlew`) rather than falling back to an unpinned system
+  `mvn`/`gradle` this crate would have to install and version itself — a repo without one
+  committed gets a clear error instead. Runs `sh mvnw -B verify` or `sh gradlew build` (invoked via
+  `sh`, not `./`, so a missing execute bit on the wrapper isn't a build failure) against
+  `eclipse-temurin:21-jdk-jammy` — not a port of `gh-reusable`'s own `DEFAULT_TEMURIN_IMAGE`
+  (`eclipse-temurin:<version>-jdk-trixie`), which doesn't actually exist on Docker Hub (confirmed
+  directly: no Debian-suffixed tag is published for `eclipse-temurin` at all); `-jammy` is the real
+  verified equivalent for the same JDK 21 Temurin distribution. Verified for real, end to end,
+  against both `examples/java-maven-fixture` and `examples/java-gradle-fixture` — real `mvnw`/
+  `gradlew` wrappers generated from actual Maven 3.9.9/Gradle 8.10 installs, JUnit 5 tests
+  genuinely executing (`Tests run: 1, Failures: 0` / a real `:test` task) through Dagger. No
+  `paws-provision` support for `java` yet (unlike `go`) — JDK version management has no single
+  obviously-right "assume it's already present" tool the way `rustup`/`corepack`/`uv`/Go's own
+  `golang.org/dl` mechanism do, so that's left as a deliberate gap rather than a guess.
+  `go` (2026-08-22, `crates/paws-go`) is a new native implementation, not a port — unlike
+  `rust`/`python`, `gh-reusable` never had a `goBuildAndTest` Dagger function, only `setupGo`
+  (container setup with
   no build/test steps of its own), so there was no real logic to port for parity. Runs `go build
   ./...`, `go vet ./...`, `go test ./...` against the plain `golang:1-bookworm` image,
   fail-fast — deliberately no `gofmt` gate for this first cut (`gofmt -l` doesn't itself fail on
@@ -222,7 +240,7 @@ drive today, on top of whatever multi-ecosystem provisioning already gets you pa
 
 | Stack Permutation    | Primary Languages | Package Manager(s)      | Core Toolchain / Frameworks            | Output Type                                     | Status |
 | -------------------- | ----------------- | ----------------------- | -------------------------------------- | ----------------------------------------------- | ------ |
-| Java                 | Java              | Maven (mvn), Gradle     | JDK, Spring Boot, Quarkus              | .jar, .war, Docker Image                        | 📋     |
+| Java                 | Java              | Maven (mvn), Gradle     | JDK, Spring Boot, Quarkus              | .jar, .war, Docker Image                        | ✅     |
 | Kotlin (JVM)         | Kotlin            | Gradle, Maven           | JDK, kotlinc, Ktor, Spring Boot        | .jar, Docker Image                              | 📋     |
 | Java + Kotlin        | Java, Kotlin      | Gradle                  | JDK, Mixed Kotlin/Java Compilation     | .jar, Maven/Gradle Package                      | 📋     |
 | Go                   | Go                | Go Modules (go mod)     | Go Toolchain (go build), standard lib  | Native Executables (ELF, .exe, Mach-O)          | ✅     |
@@ -230,8 +248,18 @@ drive today, on top of whatever multi-ecosystem provisioning already gets you pa
 | Kotlin Multiplatform | Kotlin            | Gradle                  | Kotlin/JVM, Kotlin/Native, Kotlin/Wasm | .jar (JVM), .framework (iOS), .js / .wasm (Web) | 📋     |
 | Go + WebAssembly     | Go                | Go Modules              | Go Compiler (GOOS=js GOARCH=wasm)      | WebAssembly (.wasm) + JS wrapper                | ✅     |
 | Go + C/C++ (cgo)     | Go, C/C++         | Go Modules, make/cmake  | Go Toolchain (cgo), GCC/Clang          | Native Executables (dynamically linked)         | ✅     |
-| Java + React/Node    | Java, JS/TS       | Maven/Gradle & npm/yarn | JDK, Node.js, Spring Boot, React       | Backend .jar + Static Web Assets                | 📋     |
+| Java + React/Node    | Java, JS/TS       | Maven/Gradle & npm/yarn | JDK, Node.js, Spring Boot, React       | Backend .jar + Static Web Assets                | ✅     |
 | Go + React/Node      | Go, JS/TS         | Go Modules & npm/yarn   | Go Toolchain, Node.js, React           | Go Binary + Static Web Assets                   | ✅     |
+
+`Java` (`crates/paws-java`, see "Current coverage" above) and `Java + React/Node` both landed
+2026-08-22 too — the latter is, like `Rust + React`/`Go + React/Node`, two independent `paws ci`
+runs against one repo rather than one composite pipeline: `paws ci --toolchain java` (a plain
+`com.sun.net.httpserver.HttpServer` backend, no framework dependency) and `paws ci --toolchain
+node` (the React SPA it serves from `frontend/dist`), both verified for real against
+`examples/java-react-fixture` — its `ServerTest` makes a genuine `java.net.http.HttpClient` round
+trip against a real `/api/health` response, not just a compile check. `Kotlin`/`Java + Kotlin` stay
+📋: Kotlin needs its own compiler (`kotlinc`) and detection story `paws-java` doesn't attempt —
+sharing Gradle as a build system with `Java` isn't the same as sharing toolchain support.
 
 `Go`'s `paws-provision` support (`install_go`) landed 2026-08-22, and `paws ci --toolchain go`
 (`crates/paws-go`, see "Current coverage" above) followed the same day — it was the most natural
