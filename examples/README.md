@@ -94,6 +94,22 @@ pytest`, run against `astral/uv:python3.12-trixie-slim` through Dagger.
   image through Dagger. Unlike `paws-python`/`paws-rust`, `crates/paws-go` isn't a port of an
   existing `gh-reusable` function — `gh-reusable` only ever had a container-setup `setupGo`, no
   build/test steps to port for parity.
+- `go-wasm-fixture/` — a minimal Go module that imports `syscall/js` and registers a JS-callable
+  function; the target for `paws-go`'s `is_wasm_project` detection and its `GOOS=js`/`GOARCH=wasm`
+  build path. Not runnable via plain `go run`/`go test` (a wasm binary can't execute in the build
+  container) — exercises `go vet ./...` + `go build -o app.wasm ./...` instead, verified for real
+  end to end through Dagger, `app.wasm` produced successfully.
+- `go-cgo-fixture/` — a Go module with a real `import "C"` cgo call (a small inline C `add`
+  function). Needs no special handling in `crates/paws-go`: `golang:1-bookworm` already has
+  `CGO_ENABLED=1` and ships `gcc`, so this exercises the exact same plain build/vet/test pipeline
+  as `go-fixture/` — this fixture exists purely to prove that claim for real, not because the
+  pipeline branches on cgo.
+- `go-react-fixture/` — a plain `net/http` backend (`main.go`) serving a real `create vite
+  --template react-ts` React SPA (`frontend/`) as static assets, plus a `/api/health` JSON route
+  — the "Go Binary + Static Web Assets" shape from `docs/ROADMAP.md`'s Go + React/Node row. Like
+  `rust-react-fixture/`, not a composite pipeline: `paws ci --toolchain go` (repo root) and `paws
+  ci --toolchain node` (`frontend/`) are two independent runs, both verified for real, end to end,
+  through Dagger.
 - `playwright-fixture/` — a real `npm create playwright@latest -- --quiet --lang=TypeScript
 --no-browsers` scaffold; the target for `paws-node`'s Playwright detection. Exercises
   `crates/paws-node`'s `has_playwright` detection (`@playwright/test` dependency or

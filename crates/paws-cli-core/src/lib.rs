@@ -771,7 +771,11 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
             let is_wasm = paws_rust::is_wasm_project(&dir);
             println!(
                 "ci: rust project{} ({})",
-                if is_wasm { " (wasm32-unknown-unknown)" } else { "" },
+                if is_wasm {
+                    " (wasm32-unknown-unknown)"
+                } else {
+                    ""
+                },
                 dir.display()
             );
             let args = paws_rust::dagger_pipeline_args(&dir.to_string_lossy(), is_wasm);
@@ -786,8 +790,13 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
                     dir.display()
                 );
             }
-            println!("ci: go project ({})", dir.display());
-            let args = paws_go::dagger_pipeline_args(&dir.to_string_lossy());
+            let is_wasm = paws_go::is_wasm_project(&dir);
+            println!(
+                "ci: go project{} ({})",
+                if is_wasm { " (js/wasm)" } else { "" },
+                dir.display()
+            );
+            let args = paws_go::dagger_pipeline_args(&dir.to_string_lossy(), is_wasm);
             run_dagger_core(&args, silent).await?;
             println!("ci: go build/test succeeded");
         }

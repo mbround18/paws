@@ -228,18 +228,31 @@ drive today, on top of whatever multi-ecosystem provisioning already gets you pa
 | Go                   | Go                | Go Modules (go mod)     | Go Toolchain (go build), standard lib  | Native Executables (ELF, .exe, Mach-O)          | ✅     |
 | Kotlin (Android)     | Kotlin            | Gradle                  | Android SDK, Jetpack Compose           | .apk, .aab (Android App Bundle)                 | 📋     |
 | Kotlin Multiplatform | Kotlin            | Gradle                  | Kotlin/JVM, Kotlin/Native, Kotlin/Wasm | .jar (JVM), .framework (iOS), .js / .wasm (Web) | 📋     |
-| Go + WebAssembly     | Go                | Go Modules              | Go Compiler (GOOS=js GOARCH=wasm)      | WebAssembly (.wasm) + JS wrapper                | 📋     |
-| Go + C/C++ (cgo)     | Go, C/C++         | Go Modules, make/cmake  | Go Toolchain (cgo), GCC/Clang          | Native Executables (dynamically linked)         | 📋     |
+| Go + WebAssembly     | Go                | Go Modules              | Go Compiler (GOOS=js GOARCH=wasm)      | WebAssembly (.wasm) + JS wrapper                | ✅     |
+| Go + C/C++ (cgo)     | Go, C/C++         | Go Modules, make/cmake  | Go Toolchain (cgo), GCC/Clang          | Native Executables (dynamically linked)         | ✅     |
 | Java + React/Node    | Java, JS/TS       | Maven/Gradle & npm/yarn | JDK, Node.js, Spring Boot, React       | Backend .jar + Static Web Assets                | 📋     |
-| Go + React/Node      | Go, JS/TS         | Go Modules & npm/yarn   | Go Toolchain, Node.js, React           | Go Binary + Static Web Assets                   | 📋     |
+| Go + React/Node      | Go, JS/TS         | Go Modules & npm/yarn   | Go Toolchain, Node.js, React           | Go Binary + Static Web Assets                   | ✅     |
 
 `Go`'s `paws-provision` support (`install_go`) landed 2026-08-22, and `paws ci --toolchain go`
 (`crates/paws-go`, see "Current coverage" above) followed the same day — it was the most natural
-first pickup here, needing no JVM-style version-matrix design the way `Java`/`Kotlin` would. The
-`Go + WebAssembly`/`Go + C/C++ (cgo)`/`Go + React/Node` rows below it are each real new capability
-on top of plain `Go`, not just wiring: `GOOS=js GOARCH=wasm` builds, `cgo`'s C toolchain
-dependency, and a second (Node) toolchain composing alongside it the way
-`examples/rust-react-fixture` already proved out for Rust + React — none attempted yet.
+first pickup here, needing no JVM-style version-matrix design the way `Java`/`Kotlin` would. Its
+three variant rows below all closed the same day too:
+- **`Go + WebAssembly`** genuinely needed new pipeline logic: `paws_go::is_wasm_project` scans
+  `.go` files for a `"syscall/js"` import (the same purpose-built-signal detection style
+  `paws_rust::is_wasm_project` uses for `wasm-bindgen`), and when detected,
+  `dagger_pipeline_args` sets `GOOS=js`/`GOARCH=wasm` on the container *before* `go vet`/`go
+  build -o app.wasm` run — Go's build-constraint system uses those to decide which files even
+  exist to the compiler — and skips `go test` (a `js`/`wasm` binary can't execute in this
+  container, no JS engine present, same rationale as `paws-rust`'s wasm path skipping `cargo
+  test`). Verified for real, end to end, against `examples/go-wasm-fixture`.
+- **`Go + C/C++ (cgo)`** needed **zero code changes** — confirmed for real that
+  `golang:1-bookworm` already has `CGO_ENABLED=1` as its default and already ships `gcc`, so a
+  package with `import "C"` already builds/tests through the exact same plain pipeline used for
+  ordinary `Go`. `examples/go-cgo-fixture` exists purely to prove that.
+- **`Go + React/Node`** is, like `Rust + React`, two independent `paws ci` runs against one repo
+  rather than one composite pipeline — `paws ci --toolchain go` (a plain `net/http` backend) and
+  `paws ci --toolchain node` (the React SPA it serves from `frontend/dist`), both verified for
+  real against `examples/go-react-fixture`, no new capability needed.
 
 ## Other language ecosystems
 
