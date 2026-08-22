@@ -9,7 +9,7 @@ see [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) for how a new stack actually gets ad
 Confirmed directly against the code, not from memory:
 
 - **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node`, `python`, `go`,
-  `java`, `tauri`, `tauri-android`, `flatpak` (`crates/paws-cli-core/src/lib.rs`). `java`
+  `java`, `kotlin`, `tauri`, `tauri-android`, `flatpak` (`crates/paws-cli-core/src/lib.rs`). `java`
   (2026-08-22, `crates/paws-java`) is a new native implementation too — `gh-reusable` only ever
   had `setupJava` (container setup picking a JDK distribution/image, no build/test steps). Detects
   Maven (`pom.xml`) vs Gradle (`build.gradle`/`build.gradle.kts`) and **requires** the project's
@@ -99,8 +99,10 @@ compose` runtime difference under this pipeline's root context that a real GitHu
   `setupPulumi` — none of those ecosystems are wired into `paws-provision` yet, they're just
   precedent for what "add a new ecosystem" looks like next.
 - **`paws audit`** (language detection for scanner selection): detects `rust`, `node`, `python`,
-  `go`, `docker` signals (`paws_audit::LanguageFamily`) — detection only, not execution. A repo
-  with a `go.mod` gets audited correctly; `paws ci --toolchain go` doesn't exist.
+  `go`, `docker` signals (`paws_audit::LanguageFamily`) — detection only, not execution; still
+  doesn't detect `java`/`kotlin` signals even though `paws ci --toolchain java`/`kotlin` both exist
+  now (`paws-audit`'s `LanguageFamily` hasn't been extended to match — a real, if minor, gap
+  between what `paws ci` can build and what `paws audit`'s scanner-selection step notices).
   As of 2026-08-19, `paws audit` no longer depends on `gh-reusable` at all — scanner execution
   (`semgrep`/`gitleaks`, the only two scanners `gh-reusable`'s `audit` function ran) is native
   `crates/paws-audit` logic running through `paws-dagger::core`, a byte-for-byte port of
@@ -134,11 +136,11 @@ myco.jfrog.io=you`, token read from a derived `$MYCO_JFROG_IO_TOKEN`-style env v
   stack coverage for user projects. `--local-build` (2026-08-19) extends it to other Rust repos,
   but narrowly: an embedded generic Linux-gnu builder only, `x86_64`/`aarch64-unknown-linux-gnu`
   targets only, no macOS/Windows. See `docs/DEVELOPMENT.md`'s release-pipeline section.
-- **Java** is the next gap worth naming specifically, per a real `gh api users/mbround18/repos`
-  audit (2026-08-18): after Rust/JS/TS, Java is the next-most-common language across
-  `mbround18`'s own non-fork repos (3, all Gradle-based Hytale mods) with no `paws-provision`/
-  `paws-audit` precedent yet to build on — unlike Python, which had both before `paws ci
---toolchain python` was wired.
+- **Java** was flagged 2026-08-18 as the next gap worth naming, per a real `gh api
+  users/mbround18/repos` audit: after Rust/JS/TS, Java was the next-most-common language across
+  `mbround18`'s own non-fork repos (3, all Gradle-based Hytale mods). Closed 2026-08-22
+  (`crates/paws-java`, `paws ci --toolchain java` — see "JVM / Go stacks" below); those 3 repos
+  are real, ready-to-convert candidates now, the same shape as the Docker conversions below.
 - **`paws publish` doesn't exist** — a real gap surfaced by a second repo audit (2026-08-19)
   that checked which of `mbround18`'s active repos still call `gh-reusable` directly (candidates
   for a `paws docker`/`paws ci`-style conversion, same shape as the `ark-manager-web` work
