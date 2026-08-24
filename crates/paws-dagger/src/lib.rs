@@ -455,6 +455,21 @@ struct ActionsCacheClientV2 {
     client: reqwest::Client,
 }
 
+/// Looks up a JSON string field trying both its lowerCamelCase name (the
+/// proto3 JSON default, and what protobuf-ts's own generated response
+/// parser expects) and its snake_case proto field name — confirmed live
+/// that the real receiver's response bodies don't reliably match the
+/// former alone (`CreateCacheEntry`'s `signedUploadUrl` came back missing
+/// even on a genuine `ok: true` response; the reservation itself had
+/// succeeded server-side, evidenced by a later `409 already_exists` for
+/// the same key/version).
+fn json_str<'a>(value: &'a serde_json::Value, camel: &str, snake: &str) -> Option<&'a str> {
+    value
+        .get(camel)
+        .or_else(|| value.get(snake))
+        .and_then(|v| v.as_str())
+}
+
 impl ActionsCacheClientV2 {
     fn new(base_url: String, token: String) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
@@ -527,10 +542,7 @@ impl ActionsCacheClientV2 {
         if !response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
             return Ok(None);
         }
-        Ok(response
-            .get("signedDownloadUrl")
-            .and_then(|v| v.as_str())
-            .map(String::from))
+        Ok(json_str(&response, "signedDownloadUrl", "signed_download_url").map(String::from))
     }
 
     async fn download(&self, signed_url: &str, dest: &std::path::Path) -> Result<()> {
@@ -561,9 +573,7 @@ impl ActionsCacheClientV2 {
                 .unwrap_or("response was not ok");
             anyhow::bail!("failed to reserve a Cache Service v2 entry: {message}");
         }
-        response
-            .get("signedUploadUrl")
-            .and_then(|v| v.as_str())
+        json_str(&response, "signedUploadUrl", "signed_upload_url")
             .map(String::from)
             .context("Cache Service v2 CreateCacheEntry response missing signedUploadUrl")
     }
