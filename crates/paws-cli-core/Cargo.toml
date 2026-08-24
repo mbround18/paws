@@ -14,6 +14,7 @@ paws-core = { path = "../paws-core" }
 paws-docker = { path = "../paws-docker" }
 paws-docs = { path = "../paws-docs" }
 paws-dagger = { path = "../paws-dagger" }
+paws-cache = { path = "../paws-cache" }
 paws-node = { path = "../paws-node" }
 paws-python = { path = "../paws-python" }
 paws-rust = { path = "../paws-rust" }

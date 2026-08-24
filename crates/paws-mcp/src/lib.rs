@@ -10,8 +10,8 @@ use rmcp::{
 };
 
 use paws_cli_core::{
-    AuditArgs, CiArgs, DockerArgs, DocsArgs, GithubAppLoginArgs, HelmArgs, InitArgs, ProvisionArgs,
-    ReleaseArgs, SemverArgs, WorkflowGenerateArgs,
+    AuditArgs, CacheArgs, CiArgs, DockerArgs, DocsArgs, GithubAppLoginArgs, HelmArgs, InitArgs,
+    ProvisionArgs, ReleaseArgs, SemverArgs, WorkflowGenerateArgs,
 };
 
 /// Runs `f`, capturing anything it prints to stdout/stderr instead of
@@ -117,6 +117,14 @@ impl PawsMcpServer {
     #[tool(description = "Run the audit/compliance scanner suite.")]
     async fn audit(&self, Parameters(args): Parameters<AuditArgs>) -> Result<String, McpError> {
         let (outcome, captured) = capture_output(|| paws_cli_core::run_audit(args)).await;
+        tool_result(outcome, captured)
+    }
+
+    #[tool(
+        description = "Reports which Dagger build-cache backend (dagger-cloud, github-actions, or none) paws ci/paws docker would select right now, and why."
+    )]
+    async fn cache(&self, Parameters(args): Parameters<CacheArgs>) -> Result<String, McpError> {
+        let (outcome, captured) = capture_output(|| paws_cli_core::run_cache(args)).await;
         tool_result(outcome, captured)
     }
 

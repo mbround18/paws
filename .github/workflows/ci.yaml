@@ -175,30 +175,32 @@ jobs:
               if (value) core.exportVariable(name, value);
             }
 
+      # `paws cache --json` runs the exact same detection
+      # `restore_cache_backend`/`save_cache_backend` use internally
+      # (paws_dagger::CacheBackend::detect()), so this is a direct
+      # assertion on the real selection, not a grep over free-text build
+      # log lines — no `pipefail`/broken-pipe footgun like the old
+      # `echo ... | grep -q` version had, and no dependency on exactly
+      # what CacheBackend::log_line() happens to say.
+      - name: Verify cache backend selection
+        run: |
+          set -euo pipefail
+          paws cache --json | tee /tmp/paws-cache-status.json
+          backend="$(jq -r '.backend' /tmp/paws-cache-status.json)"
+          if [ "$backend" != "github-actions" ]; then
+            echo "::error::expected paws cache --json's backend to be 'github-actions', got '$backend' — GitHubActionsCache did not activate on this real runner"
+            exit 1
+          fi
+
       - name: paws docker (cold run)
         id: run
         working-directory: examples/docker-fixture
         run: |
           set -euo pipefail
           start=$(date +%s)
-          # 2>&1: CacheBackend::log_line() and its restore/save status lines
-          # go to stderr, not stdout — a plain `$(cmd)` capture would miss
-          # them entirely and always fail the grep below regardless of
-          # whether the cache backend actually activated.
-          output="$(paws docker --image ghcr.io/example/paws-cache-e2e-fixture --dockerfile Dockerfile --default-branch __none__ 2>&1)"
+          paws docker --image ghcr.io/example/paws-cache-e2e-fixture --dockerfile Dockerfile --default-branch __none__
           end=$(date +%s)
-          echo "$output"
           echo "duration=$((end - start))" >> "$GITHUB_OUTPUT"
-          # Plain substring test, not `echo ... | grep -q` — under
-          # `pipefail`, `grep -q` exiting the moment it finds a match
-          # SIGPIPEs a still-writing `echo` on a large `$output`, and
-          # pipefail then reports the whole pipeline as failed even though
-          # grep matched. Confirmed reproducing locally with `set -euo
-          # pipefail; echo "$big_output" | grep -qF "$early_line"`.
-          if [[ "$output" != *'cache: using github-actions'* ]]; then
-            echo "::error::expected 'cache: using github-actions' in paws docker's log output — GitHubActionsCache did not activate on this real runner"
-            exit 1
-          fi
 
   github-actions-cache-e2e-warm:
     name: GitHub Actions cache backend (real runner, warm)
@@ -239,26 +241,26 @@ jobs:
               if (value) core.exportVariable(name, value);
             }
 
+      # See the cold job's comment on this same check.
+      - name: Verify cache backend selection
+        run: |
+          set -euo pipefail
+          paws cache --json | tee /tmp/paws-cache-status.json
+          backend="$(jq -r '.backend' /tmp/paws-cache-status.json)"
+          if [ "$backend" != "github-actions" ]; then
+            echo "::error::expected paws cache --json's backend to be 'github-actions' on the warm run too, got '$backend'"
+            exit 1
+          fi
+
       - name: paws docker (warm run, same unchanged Dockerfile)
         id: run
         working-directory: examples/docker-fixture
         run: |
           set -euo pipefail
           start=$(date +%s)
-          # 2>&1: CacheBackend::log_line() and its restore/save status lines
-          # go to stderr, not stdout — a plain `$(cmd)` capture would miss
-          # them entirely and always fail the grep below regardless of
-          # whether the cache backend actually activated.
-          output="$(paws docker --image ghcr.io/example/paws-cache-e2e-fixture --dockerfile Dockerfile --default-branch __none__ 2>&1)"
+          paws docker --image ghcr.io/example/paws-cache-e2e-fixture --dockerfile Dockerfile --default-branch __none__
           end=$(date +%s)
-          echo "$output"
           echo "duration=$((end - start))" >> "$GITHUB_OUTPUT"
-          # See the cold job's comment on this same check for why it's a
-          # plain substring test, not `echo ... | grep -q`.
-          if [[ "$output" != *'cache: using github-actions'* ]]; then
-            echo "::error::expected 'cache: using github-actions' in paws docker's log output on the warm run too"
-            exit 1
-          fi
 
       # SC-003: informational, not a hard gate — wall-clock timing across two
       # independent GitHub-hosted runners is noisy enough (neighbor

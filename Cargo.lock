@@ -1162,6 +1162,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "paws-cache"
+version = "0.1.0"
+dependencies = [
+ "paws-dagger",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "paws-changelog"
 version = "0.1.0"
 dependencies = [
@@ -1196,6 +1205,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "paws-audit",
+ "paws-cache",
  "paws-changelog",
  "paws-core",
  "paws-dagger",

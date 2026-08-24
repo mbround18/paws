@@ -255,6 +255,13 @@ pub enum Commands {
     /// similar changelog actions), standalone so it can be run on its own
     /// (e.g. to preview an entry) or chained after `paws semver --push`.
     Changelog(ChangelogArgs),
+    /// Reports which Dagger build-cache backend (`dagger-cloud`,
+    /// `github-actions`, or none) `paws ci`/`paws docker` would select
+    /// right now, and why — the same detection they use internally, not a
+    /// separate guess. `--json` for scripting (e.g. a CI step asserting
+    /// the expected backend actually activated, without grepping build log
+    /// text for it).
+    Cache(CacheArgs),
 }
 
 #[derive(Subcommand)]
@@ -673,6 +680,16 @@ pub struct InitArgs {}
 pub struct AuditArgs {}
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct CacheArgs {
+    /// Print machine-readable JSON instead of the human-readable summary —
+    /// `{"backend": "...", "api_version": "...", "base_url": "..."}`
+    /// (`api_version`/`base_url` omitted for `dagger-cloud`/`none`).
+    #[arg(long)]
+    #[serde(default)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct DocsArgs {
     /// Comma-delimited publish destination(s): "github-pages",
     /// "cloudflare-pages", "s3". Omitted (the default): builds
@@ -824,6 +841,7 @@ pub async fn execute(command: Commands) -> anyhow::Result<()> {
         Commands::Auth(AuthCommand::GithubApp(args)) => run_auth_github_app(args).await,
         Commands::Publish(args) => run_publish(args).await,
         Commands::Changelog(args) => run_changelog(args).await,
+        Commands::Cache(args) => run_cache(args).await,
         Commands::Mcp(McpCommand::Setup(args)) => mcp_setup::run_mcp_setup(args).await,
         Commands::Mcp(McpCommand::Serve(_)) => anyhow::bail!(
             "`paws mcp serve` must be invoked through the `paws` binary directly, not through \
@@ -1545,6 +1563,16 @@ pub async fn run_changelog(args: ChangelogArgs) -> anyhow::Result<()> {
         eprintln!("changelog: committed {output}@{branch}");
     }
 
+    Ok(())
+}
+
+pub async fn run_cache(args: CacheArgs) -> anyhow::Result<()> {
+    let status = paws_cache::CacheStatus::detect();
+    if args.json {
+        println!("{}", status.to_json());
+    } else {
+        println!("{}", status.to_text());
+    }
     Ok(())
 }
 

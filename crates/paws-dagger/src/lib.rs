@@ -476,18 +476,24 @@ impl ActionsCacheClientV2 {
             .await
             .with_context(|| format!("failed to call Cache Service v2 {method}"))?;
         let status = response.status();
-        let parsed: serde_json::Value = response
-            .json()
+        let request_url = response.url().clone();
+        let text = response
+            .text()
             .await
-            .with_context(|| format!("failed to parse Cache Service v2 {method} response"))?;
+            .with_context(|| format!("failed to read Cache Service v2 {method} response body"))?;
         if !status.is_success() {
-            let message = parsed
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            anyhow::bail!("Cache Service v2 {method} failed: {status}{}{message}", if message.is_empty() { "" } else { ": " });
+            // Temporary diagnostic: the receiver's exact error body has
+            // never been observed yet (only a bare 400 with no message
+            // came through the old message-only error), so surface it
+            // verbatim rather than guessing further — narrow this back
+            // down to a short message once the real cause is confirmed.
+            anyhow::bail!(
+                "Cache Service v2 {method} failed: {status} (url: {request_url}) — body: {}",
+                text.chars().take(500).collect::<String>()
+            );
         }
-        Ok(parsed)
+        serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse Cache Service v2 {method} response"))
     }
 
     /// `GetCacheEntryDownloadURL` — `Ok(None)` on a cache miss (`ok: false`
