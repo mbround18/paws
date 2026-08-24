@@ -182,10 +182,16 @@ jobs:
           end=$(date +%s)
           echo "$output"
           echo "duration=$((end - start))" >> "$GITHUB_OUTPUT"
-          echo "$output" | grep -qF 'cache: using github-actions' || {
+          # Plain substring test, not `echo ... | grep -q` — under
+          # `pipefail`, `grep -q` exiting the moment it finds a match
+          # SIGPIPEs a still-writing `echo` on a large `$output`, and
+          # pipefail then reports the whole pipeline as failed even though
+          # grep matched. Confirmed reproducing locally with `set -euo
+          # pipefail; echo "$big_output" | grep -qF "$early_line"`.
+          if [[ "$output" != *'cache: using github-actions'* ]]; then
             echo "::error::expected 'cache: using github-actions' in paws docker's log output — GitHubActionsCache did not activate on this real runner"
             exit 1
-          }
+          fi
 
   github-actions-cache-e2e-warm:
     name: GitHub Actions cache backend (real runner, warm)
@@ -233,10 +239,12 @@ jobs:
           end=$(date +%s)
           echo "$output"
           echo "duration=$((end - start))" >> "$GITHUB_OUTPUT"
-          echo "$output" | grep -qF 'cache: using github-actions' || {
+          # See the cold job's comment on this same check for why it's a
+          # plain substring test, not `echo ... | grep -q`.
+          if [[ "$output" != *'cache: using github-actions'* ]]; then
             echo "::error::expected 'cache: using github-actions' in paws docker's log output on the warm run too"
             exit 1
-          }
+          fi
 
       # SC-003: informational, not a hard gate — wall-clock timing across two
       # independent GitHub-hosted runners is noisy enough (neighbor
