@@ -9,6 +9,13 @@ anyhow.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
+# Not in [workspace.dependencies] — already resolved transitively via
+# paws-environment's jsonwebtoken/rust_crypto backend, so this adds no new
+# download/compile weight to the workspace. Used only to shape the Actions
+# Cache Service `version` field as a real SHA-256 hex digest (64 chars) —
+# the same shape actions/toolkit's own getCacheVersion() produces — rather
+# than an arbitrary shorter hash of our own invention.
+sha2 = "0.10"
 
 # Intentionally NOT depending on the `dagger-sdk` crate yet: Dagger's own
 # README marks the Rust SDK experimental / not for mission-critical use.

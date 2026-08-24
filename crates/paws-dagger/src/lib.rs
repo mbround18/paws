@@ -257,22 +257,21 @@ async fn find_engine_volume(container: &str) -> Result<String> {
     Ok(volume)
 }
 
-/// FNV-1a 64-bit hash, hex-encoded (16 chars) — no crate dependency needed
-/// for a short, fully deterministic fingerprint (same input -> same output
-/// across every process, unlike `std`'s randomized-seed `HashMap` hasher,
-/// which would break restore/save ever matching across separate CI job
-/// runs). Both Cache Service generations cap their `version` field at 64
-/// characters (confirmed live: `"version invalid length for cache entry
-/// version: must be between 1 and 64 characters"` from a real 400) — `key`
-/// has no such constraint (up to 512) and stays the full descriptive
-/// string; only `version` needs this.
+/// SHA-256 hex digest (64 chars) — the same shape `actions/toolkit`'s own
+/// `getCacheVersion()` produces (a hash of the compression tool/OS/paths
+/// being cached). A 16-char FNV-1a hash satisfied the receiver's stated
+/// `"must be between 1 and 64 characters"` bound but still got rejected
+/// with the identical error on every retry (confirmed live, request body
+/// included in the error each time) — the real, undocumented constraint is
+/// evidently narrower than the message states, most likely "looks like a
+/// real hash", so match the exact shape a real client sends rather than
+/// something merely within the documented bound. `key` has no such
+/// constraint (up to 512 chars) and stays the full descriptive string;
+/// only `version` needs this.
 fn short_cache_version(key: &str) -> String {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in key.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(key.as_bytes());
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A stable cache key for the engine-state archive — scoped to the
@@ -1098,17 +1097,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn short_cache_version_is_deterministic_and_within_the_64_char_cap() {
+    fn short_cache_version_is_a_deterministic_64_char_hex_sha256() {
         // Both Cache Service generations reject a `version` outside 1-64
-        // chars (confirmed live: a 400 with "version invalid length for
-        // cache entry version: must be between 1 and 64 characters" — the
-        // bug this function exists to fix). `engine_cache_key()`'s output
-        // easily exceeds that on its own; this hash must not.
+        // chars, and — confirmed live, three separate retries with the
+        // exact sent body echoed each time — a much-shorter-but-still-in-
+        // bound 16-char hash got rejected with the identical error anyway.
+        // `actions/toolkit`'s own client always sends a real SHA-256 hex
+        // digest for this field; match that exact shape.
         let key = "paws-dagger-engine-state-dagger v0.21.8 (registry.dagger.io/engine:v0.21.8) linux/amd64";
         assert!(key.len() > 64, "fixture key should itself exceed 64 chars");
         let version = short_cache_version(key);
-        assert!(!version.is_empty());
-        assert!(version.len() <= 64);
+        assert_eq!(version.len(), 64);
+        assert!(
+            version.chars().all(|c| c.is_ascii_hexdigit()),
+            "must be lowercase hex: {version}"
+        );
         assert_eq!(
             version,
             short_cache_version(key),
