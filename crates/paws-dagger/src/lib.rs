@@ -507,18 +507,13 @@ impl ActionsCacheClientV2 {
             // length for cache entry version: must be between 1 and 64
             // characters", ...}` — the bug that caught) — surface `msg` when
             // present, falling back to the raw body for anything else.
-            let msg = serde_json::from_str::<serde_json::Value>(&text)
-                .ok()
-                .and_then(|v| v.get("msg").and_then(|m| m.as_str()).map(String::from));
-            // Temporary: also echo the exact request body sent, to confirm
-            // whether `version` genuinely reached the receiver as the
-            // expected short hash — this error persisted unchanged across
-            // the fix that was supposed to shorten it, which needs
-            // explaining before guessing further.
-            anyhow::bail!(
-                "Cache Service v2 {method} failed: {status}: {} (sent: {body})",
-                msg.unwrap_or(text)
-            );
+            // Temporary: full raw body (includes Twirp's `meta`, not just
+            // `msg`) plus the exact request body sent — the version-length
+            // fix didn't change this error at all even though the sent
+            // `version` is confirmed only 16 chars, so the `meta` field
+            // (which the previous msg-only extraction discarded) might
+            // show what's actually being validated.
+            anyhow::bail!("Cache Service v2 {method} failed: {status}: {text} (sent: {body})");
         }
         serde_json::from_str(&text)
             .with_context(|| format!("failed to parse Cache Service v2 {method} response"))
