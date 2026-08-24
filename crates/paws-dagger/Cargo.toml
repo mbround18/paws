@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
 
 # Intentionally NOT depending on the `dagger-sdk` crate yet: Dagger's own
 # README marks the Rust SDK experimental / not for mission-critical use.

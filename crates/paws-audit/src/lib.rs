@@ -159,6 +159,7 @@ pub struct AuditSummary {
 pub enum ScannerName {
     Semgrep,
     Gitleaks,
+    CargoAudit,
 }
 
 impl ScannerName {
@@ -166,6 +167,7 @@ impl ScannerName {
         match self {
             ScannerName::Semgrep => "semgrep",
             ScannerName::Gitleaks => "gitleaks",
+            ScannerName::CargoAudit => "cargo-audit",
         }
     }
 }
@@ -327,9 +329,10 @@ pub fn detect_language_families(signals: &RepositorySignals) -> DetectionResult 
     }
 }
 
-const AUDIT_SCANNER_REGISTRY: &[(ScannerName, &[LanguageFamily], &str, &str)] = &[
+const AUDIT_SCANNER_REGISTRY: &[(ScannerName, ScannerFamily, &[LanguageFamily], &str, &str)] = &[
     (
         ScannerName::Semgrep,
+        ScannerFamily::CrossLanguage,
         &[
             LanguageFamily::Rust,
             LanguageFamily::Node,
@@ -342,6 +345,7 @@ const AUDIT_SCANNER_REGISTRY: &[(ScannerName, &[LanguageFamily], &str, &str)] = 
     ),
     (
         ScannerName::Gitleaks,
+        ScannerFamily::CrossLanguage,
         &[
             LanguageFamily::Rust,
             LanguageFamily::Node,
@@ -351,6 +355,13 @@ const AUDIT_SCANNER_REGISTRY: &[(ScannerName, &[LanguageFamily], &str, &str)] = 
         ],
         "gitleaks detect",
         "zricethezav/gitleaks:v8.24.2",
+    ),
+    (
+        ScannerName::CargoAudit,
+        ScannerFamily::Language(LanguageFamily::Rust),
+        &[LanguageFamily::Rust],
+        "cargo audit --json",
+        "rust:1-bookworm",
     ),
 ];
 
@@ -364,14 +375,14 @@ pub fn select_audit_scanners(
 
     AUDIT_SCANNER_REGISTRY
         .iter()
-        .map(|(name, applies_to, step_name, image)| {
+        .map(|(name, family, applies_to, step_name, image)| {
             let should_run = (*name != ScannerName::Gitleaks || include_gitleaks)
                 && applies_to
                     .iter()
                     .any(|family| detected_families.contains(family));
             ScannerConfig {
                 name: *name,
-                family: ScannerFamily::CrossLanguage,
+                family: *family,
                 applies_to: applies_to.to_vec(),
                 should_run,
                 step_name: step_name.to_string(),
@@ -388,6 +399,7 @@ fn scanner_output_path(name: ScannerName) -> &'static str {
     match name {
         ScannerName::Semgrep => "/tmp/semgrep.json",
         ScannerName::Gitleaks => "/tmp/gitleaks.json",
+        ScannerName::CargoAudit => "/tmp/cargo-audit.json",
     }
 }
 
@@ -411,6 +423,12 @@ fn scanner_script(name: ScannerName) -> &'static str {
             "set -eu\n\
              gitleaks detect --source=/src --report-format=json --report-path=/tmp/gitleaks.json --redact --exit-code=0\n\
              if [ ! -s /tmp/gitleaks.json ]; then printf '[]' > /tmp/gitleaks.json; fi"
+        }
+        ScannerName::CargoAudit => {
+            "set -eu\n\
+             cargo install cargo-audit --locked\n\
+             cargo audit --json > /tmp/cargo-audit.json\n\
+             if [ ! -s /tmp/cargo-audit.json ]; then printf '{\"vulnerabilities\":{\"list\":[]}}' > /tmp/cargo-audit.json; fi"
         }
     }
 }
@@ -899,11 +917,72 @@ fn parse_gitleaks_findings(raw_json: &str) -> (usize, Vec<TopFinding>) {
     (results.len(), top_findings)
 }
 
+/// `cargo audit --json`'s shape: `{"vulnerabilities":{"list":[{"advisory":{"id",
+/// "title","severity"?},"package":{"name","version"}}, ...]}}`. RustSec
+/// advisories rarely carry a plain `severity` string (CVSS scoring is optional
+/// metadata most advisories don't set) — a known-vulnerable dependency
+/// defaults to `High` rather than `normalize_severity`'s usual `Info` default,
+/// so a real advisory can't be silently buried under genuinely low-signal
+/// findings from other scanners in the same aggregated report (research.md R3).
+fn parse_cargo_audit_findings(raw_json: &str) -> (usize, Vec<TopFinding>) {
+    let parsed: serde_json::Value =
+        serde_json::from_str(raw_json).unwrap_or(serde_json::Value::Null);
+    let list = parsed
+        .get("vulnerabilities")
+        .and_then(|v| v.get("list"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut top_findings: Vec<TopFinding> = list
+        .iter()
+        .filter_map(|entry| {
+            let advisory = entry.get("advisory")?;
+            let package = entry.get("package");
+            let package_name = package
+                .and_then(|p| p.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown-crate");
+            let package_version = package
+                .and_then(|p| p.get("version"))
+                .and_then(|v| v.as_str());
+
+            Some(TopFinding {
+                rule: advisory
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("RUSTSEC")
+                    .to_string(),
+                severity: match advisory.get("severity").and_then(|v| v.as_str()) {
+                    Some(raw) => normalize_severity(Some(raw)),
+                    None => Severity::High,
+                },
+                path: match package_version {
+                    Some(version) => format!("{package_name}@{version}"),
+                    None => package_name.to_string(),
+                },
+                line: None,
+                message: advisory
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("cargo-audit finding")
+                    .to_string(),
+                scanner: "cargo-audit".to_string(),
+            })
+        })
+        .collect();
+    top_findings.sort_by(compare_top_findings);
+    top_findings.truncate(10);
+
+    (list.len(), top_findings)
+}
+
 /// Ported from `parseScannerFindings`.
 pub fn parse_scanner_findings(scanner: ScannerName, raw_json: &str) -> (usize, Vec<TopFinding>) {
     match scanner {
         ScannerName::Semgrep => parse_semgrep_findings(raw_json),
         ScannerName::Gitleaks => parse_gitleaks_findings(raw_json),
+        ScannerName::CargoAudit => parse_cargo_audit_findings(raw_json),
     }
 }
 
@@ -998,6 +1077,91 @@ mod tests {
         assert!(!gitleaks.should_run);
     }
 
+    #[test]
+    fn cargo_audit_should_run_gated_on_rust_family_detection() {
+        let with_rust = detect_language_families(&signals(&["Cargo.toml", "Cargo.lock"]));
+        let scanners = select_audit_scanners(&with_rust, true);
+        let cargo_audit = scanners
+            .iter()
+            .find(|s| s.name == ScannerName::CargoAudit)
+            .unwrap();
+        assert!(cargo_audit.should_run);
+        assert_eq!(
+            cargo_audit.family,
+            ScannerFamily::Language(LanguageFamily::Rust)
+        );
+
+        let without_rust = detect_language_families(&signals(&["package.json"]));
+        let scanners = select_audit_scanners(&without_rust, true);
+        let cargo_audit = scanners
+            .iter()
+            .find(|s| s.name == ScannerName::CargoAudit)
+            .unwrap();
+        assert!(!cargo_audit.should_run);
+    }
+
+    #[test]
+    fn parse_cargo_audit_findings_extracts_a_known_rustsec_advisory() {
+        let raw = r#"{
+            "vulnerabilities": {
+                "found": true,
+                "count": 1,
+                "list": [
+                    {
+                        "advisory": {
+                            "id": "RUSTSEC-2021-0001",
+                            "title": "Integer overflow in example-crate",
+                            "severity": "high"
+                        },
+                        "package": { "name": "example-crate", "version": "0.1.0" }
+                    }
+                ]
+            }
+        }"#;
+        let (findings_count, top_findings) = parse_scanner_findings(ScannerName::CargoAudit, raw);
+        assert_eq!(findings_count, 1);
+        assert_eq!(top_findings.len(), 1);
+        let finding = &top_findings[0];
+        assert_eq!(finding.rule, "RUSTSEC-2021-0001");
+        assert_eq!(finding.path, "example-crate@0.1.0");
+        assert_eq!(finding.severity, Severity::High);
+        assert_eq!(finding.message, "Integer overflow in example-crate");
+        assert_eq!(finding.scanner, "cargo-audit");
+    }
+
+    #[test]
+    fn parse_cargo_audit_findings_defaults_to_high_severity_when_advisory_omits_it() {
+        // Most real RustSec advisories carry no CVSS/severity field at all
+        // (research.md R3) — a known-vulnerable dependency must not be
+        // silently demoted to `normalize_severity`'s usual `Info` default.
+        let raw = r#"{"vulnerabilities":{"list":[{"advisory":{"id":"RUSTSEC-2022-9999","title":"t"},"package":{"name":"c","version":"1.0.0"}}]}}"#;
+        let (_, top_findings) = parse_scanner_findings(ScannerName::CargoAudit, raw);
+        assert_eq!(top_findings[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn parse_cargo_audit_findings_on_a_clean_report_produces_no_findings_and_does_not_affect_outcome()
+     {
+        let raw = r#"{"vulnerabilities":{"found":false,"count":0,"list":[]}}"#;
+        let (findings_count, top_findings) = parse_scanner_findings(ScannerName::CargoAudit, raw);
+        assert_eq!(findings_count, 0);
+        assert!(top_findings.is_empty());
+
+        let scanner_result = AuditScannerResult {
+            name: "cargo-audit".to_string(),
+            family: ScannerFamily::Language(LanguageFamily::Rust),
+            status: normalize_scanner_status(Some(0), findings_count),
+            findings_count,
+            duration_ms: 50,
+            failure_reason: None,
+            top_findings,
+        };
+        let detection = detect_language_families(&signals(&["Cargo.toml", "Cargo.lock"]));
+        let summary = aggregate_audit_results(&[scanner_result], &detection);
+        assert_eq!(summary.overall_status, AuditOverallStatus::Pass);
+        assert_eq!(summary.total_findings, 0);
+    }
+
     fn scanner(name: ScannerName) -> ScannerConfig {
         select_audit_scanners(&detect_language_families(&signals(&["Cargo.toml"])), true)
             .into_iter()
@@ -1047,7 +1211,11 @@ mod tests {
         // never going through --args at all (with-new-file + `sh <path>`
         // instead), but this pins the actual with-exec args token used stays
         // newline-free as a regression guard on that choice.
-        for name in [ScannerName::Semgrep, ScannerName::Gitleaks] {
+        for name in [
+            ScannerName::Semgrep,
+            ScannerName::Gitleaks,
+            ScannerName::CargoAudit,
+        ] {
             let args = scanner_json_pipeline_args("/host/src", &scanner(name));
             let exec_args_token = args
                 .iter()

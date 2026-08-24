@@ -220,7 +220,8 @@ pub enum Commands {
     Init(InitArgs),
     /// Run the audit/compliance scanner suite.
     Audit(AuditArgs),
-    /// Publish generated docs (e.g. rustdoc) to GitHub Pages.
+    /// Build rustdoc; optionally publish it with --provider (github-pages
+    /// implemented; cloudflare-pages/s3 recognized but not implemented yet).
     Docs(DocsArgs),
     /// Provision toolchains concurrently (rust, node, python, ...).
     Provision(ProvisionArgs),
@@ -672,7 +673,28 @@ pub struct InitArgs {}
 pub struct AuditArgs {}
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct DocsArgs {}
+pub struct DocsArgs {
+    /// Comma-delimited publish destination(s): "github-pages",
+    /// "cloudflare-pages", "s3". Omitted (the default): builds
+    /// target/doc locally only, nothing published — same as before this
+    /// flag existed. "cloudflare-pages"/"s3" are recognized but not
+    /// implemented yet (see docs/ROADMAP.md); "github-pages" publishes for
+    /// real, auto-selecting the Git Trees or Pages-deployment mechanism
+    /// from the repository's live Pages configuration.
+    #[arg(long, value_delimiter = ',')]
+    #[serde(default)]
+    pub provider: Vec<String>,
+    /// "owner/repo" to publish to. Falls back to $GITHUB_REPOSITORY. Only
+    /// used when --provider is given.
+    #[arg(long)]
+    #[serde(default)]
+    pub repository: Option<String>,
+    /// Branch to publish to (the "github-pages" provider only). Only used
+    /// when --provider includes "github-pages".
+    #[arg(long, default_value = "main")]
+    #[serde(default = "field_defaults::main_branch")]
+    pub branch: String,
+}
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct ProvisionArgs {
@@ -810,7 +832,22 @@ pub async fn execute(command: Commands) -> anyhow::Result<()> {
     }
 }
 
+/// Runs `paws ci`, bracketing the whole invocation's Dagger pipeline work
+/// with a single restore-before/save-after `CacheBackend` cycle (FR-006)
+/// rather than wrapping every individual `paws_dagger::core`/
+/// `core_streaming` call — a single `paws ci` run can call those many
+/// times (e.g. fmt/clippy/build/test each being their own pipeline step),
+/// and restoring/saving the shared Dagger engine container around each one
+/// individually would repeatedly stop/restart it, which is both wasteful
+/// and unsafe for adjacent calls within the same invocation.
 pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
+    let backend = paws_dagger::restore_cache_backend().await;
+    let result = run_ci_pipeline(args).await;
+    paws_dagger::save_cache_backend(&backend).await;
+    result
+}
+
+async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
     let CiArgs {
         toolchain,
         verbose,
@@ -1076,7 +1113,18 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Runs `paws docker`, bracketing the whole invocation with a single
+/// restore-before/save-after `CacheBackend` cycle — see [`run_ci`]'s doc
+/// comment for why this happens once per invocation rather than once per
+/// `paws_dagger::core`/`core_streaming` call.
 pub async fn run_docker(args: DockerArgs) -> anyhow::Result<()> {
+    let backend = paws_dagger::restore_cache_backend().await;
+    let result = run_docker_pipeline(args).await;
+    paws_dagger::save_cache_backend(&backend).await;
+    result
+}
+
+async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
     let DockerArgs {
         image,
         version,
@@ -1603,11 +1651,143 @@ pub async fn run_audit(_args: AuditArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn run_docs(_args: DocsArgs) -> anyhow::Result<()> {
+/// One requested `--provider` value's publish outcome — mirrors
+/// `paws-provision::ProvisionOutcome`'s shape (data-model.md), collected
+/// via the same `JoinSet` pattern so every provider's result (success or a
+/// specific failure) is reported independently and none is ever hidden by
+/// another's (FR-002a).
+struct PublishOutcome {
+    target: paws_docs::PublishTarget,
+    result: anyhow::Result<()>,
+    elapsed: std::time::Duration,
+}
+
+pub async fn run_docs(args: DocsArgs) -> anyhow::Result<()> {
+    let DocsArgs {
+        provider,
+        repository,
+        branch,
+    } = args;
+
     let workspace = std::env::current_dir()?;
     let docs_dir = paws_docs::build_docs(&workspace).await?;
     println!("docs: built at {}", docs_dir.display());
+
+    if provider.is_empty() {
+        return Ok(());
+    }
+
+    // Parse every --provider value before any publish work starts (Edge
+    // Cases) — one bad value must fail the whole command up front, not
+    // after some providers already ran.
+    let targets = provider
+        .iter()
+        .map(|value| value.parse::<paws_docs::PublishTarget>())
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let (owner, repo, token) = if let Some(repository) = repository {
+        let (owner, repo) = repository.split_once('/').ok_or_else(|| {
+            anyhow::anyhow!("--repository must be \"owner/repo\", got {repository}")
+        })?;
+        let token = paws_environment::resolve_github_token(owner, repo).await?;
+        (owner.to_string(), repo.to_string(), token)
+    } else {
+        let ctx = paws_environment::CiContext::detect()
+            .await
+            .context("paws docs --provider needs $GITHUB_REPOSITORY (or --repository)")?;
+        (ctx.owner, ctx.repo, ctx.token)
+    };
+    let client = std::sync::Arc::new(GitHubReleaseClient::new(owner, repo, token));
+    let mut outcomes = dispatch_publish_targets(client, docs_dir, branch, targets).await;
+    outcomes.sort_by_key(|o| o.target.as_str());
+
+    let mut any_failed = false;
+    for outcome in &outcomes {
+        match &outcome.result {
+            Ok(()) => println!(
+                "docs: {} succeeded ({:.1}s)",
+                outcome.target.as_str(),
+                outcome.elapsed.as_secs_f64()
+            ),
+            Err(err) => {
+                any_failed = true;
+                eprintln!("docs: {} failed: {err}", outcome.target.as_str());
+            }
+        }
+    }
+
+    if any_failed {
+        let failures: Vec<String> = outcomes
+            .iter()
+            .filter_map(|o| {
+                o.result
+                    .as_ref()
+                    .err()
+                    .map(|err| format!("{}: {err}", o.target.as_str()))
+            })
+            .collect();
+        anyhow::bail!("docs: --provider failed for: {}", failures.join("; "));
+    }
     Ok(())
+}
+
+/// Runs every named `--provider` target concurrently against the same
+/// already-built `docs_dir`, mirroring `paws-provision::provision_with_timing`'s
+/// exact `JoinSet` shape (research.md R8) — every outcome (success or a
+/// specific failure) is collected, none short-circuits the others
+/// (FR-002a). Extracted from [`run_docs`] so tests can drive it directly
+/// against an already-constructed (and, in tests, fixture-backed) client
+/// without needing real `$GITHUB_TOKEN`/network access just to reach this
+/// part of the pipeline.
+async fn dispatch_publish_targets(
+    client: std::sync::Arc<GitHubReleaseClient>,
+    docs_dir: std::path::PathBuf,
+    branch: String,
+    targets: Vec<paws_docs::PublishTarget>,
+) -> Vec<PublishOutcome> {
+    let docs_dir = std::sync::Arc::new(docs_dir);
+    let mut set = tokio::task::JoinSet::new();
+    let mut target_by_id = std::collections::HashMap::new();
+    for target in targets {
+        let client = client.clone();
+        let docs_dir = docs_dir.clone();
+        let branch = branch.clone();
+        let started_at = std::time::Instant::now();
+        let handle = set.spawn(async move {
+            let result = match target {
+                paws_docs::PublishTarget::GitHubPages => {
+                    paws_docs::publish_github_pages(&client, &branch, &docs_dir).await
+                }
+                paws_docs::PublishTarget::CloudflarePages | paws_docs::PublishTarget::S3 => {
+                    Err(paws_docs::not_implemented_error(target))
+                }
+            };
+            (result, started_at.elapsed())
+        });
+        target_by_id.insert(handle.id(), target);
+    }
+
+    let mut outcomes = Vec::new();
+    while let Some(joined) = set.join_next_with_id().await {
+        match joined {
+            Ok((id, (result, elapsed))) => {
+                outcomes.push(PublishOutcome {
+                    target: target_by_id[&id],
+                    result,
+                    elapsed,
+                });
+            }
+            Err(join_err) => {
+                let target = target_by_id[&join_err.id()];
+                outcomes.push(PublishOutcome {
+                    target,
+                    result: Err(anyhow::anyhow!(join_err)),
+                    elapsed: std::time::Duration::ZERO,
+                });
+            }
+        }
+    }
+    outcomes
 }
 
 pub async fn run_provision(args: ProvisionArgs) -> anyhow::Result<()> {
@@ -2367,6 +2547,189 @@ mod tests {
                 .contains("--coverage is only valid with --toolchain rust"),
             "unexpected error message: {err}"
         );
+    }
+
+    // T041: omitting --provider entirely reproduces today's exact
+    // local-build-only behavior (FR-002) — no credentials, no network.
+    #[tokio::test]
+    async fn omitting_provider_only_builds_docs_locally() {
+        let args = DocsArgs {
+            provider: vec![],
+            repository: None,
+            branch: field_defaults::main_branch(),
+        };
+        run_docs(args).await.unwrap();
+    }
+
+    // T043: an unrecognized --provider value fails distinctly from
+    // FR-004a's "not implemented yet" error, before any build/publish
+    // work is attempted.
+    #[tokio::test]
+    async fn unrecognized_provider_value_fails_distinctly_from_not_implemented() {
+        let args = DocsArgs {
+            provider: vec!["azure-static-web-apps".to_string()],
+            repository: Some("octo/repo".to_string()),
+            branch: field_defaults::main_branch(),
+        };
+        let err = run_docs(args).await.unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("invalid --provider value"),
+            "unexpected error: {message}"
+        );
+        assert!(!message.contains("not implemented yet"));
+    }
+
+    // T042: cloudflare-pages/s3 each fail immediately with the fixed
+    // FR-004a error, naming the specific provider, with zero network calls
+    // (dispatch_publish_targets is exercised directly, bypassing
+    // credential resolution entirely — these two targets never touch the
+    // client at all).
+    #[tokio::test]
+    async fn cloudflare_pages_and_s3_fail_with_the_not_implemented_error() {
+        let client = std::sync::Arc::new(GitHubReleaseClient::new(
+            "octo".into(),
+            "repo".into(),
+            "t".into(),
+        ));
+        let outcomes = dispatch_publish_targets(
+            client,
+            std::path::PathBuf::from("/nonexistent"),
+            "main".to_string(),
+            vec![
+                paws_docs::PublishTarget::CloudflarePages,
+                paws_docs::PublishTarget::S3,
+            ],
+        )
+        .await;
+        assert_eq!(outcomes.len(), 2);
+        for outcome in &outcomes {
+            let err = outcome.result.as_ref().unwrap_err().to_string();
+            assert!(
+                err.contains("not implemented yet"),
+                "unexpected error: {err}"
+            );
+            assert!(
+                err.contains(outcome.target.as_str()),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    /// Serves one canned `(status, body)` response per entry, in order, on
+    /// freshly-accepted connections — matches `paws-release`'s/`paws-docs`'s
+    /// own fixture-server test helpers.
+    async fn serve_fixture_responses(
+        listener: tokio::net::TcpListener,
+        responses: Vec<(u16, serde_json::Value)>,
+    ) -> Vec<String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut requests = Vec::new();
+        for (status, body) in responses {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await.unwrap();
+            requests.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+
+            let payload = body.to_string();
+            let status_line = match status {
+                200 => "200 OK",
+                404 => "404 Not Found",
+                other => panic!("unsupported fixture status {other}"),
+            };
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.ok();
+        }
+        requests
+    }
+
+    // T044/T045: `github-pages` (against a fixture standing in for a real,
+    // sufficiently-privileged token) succeeds while `s3` fails with the
+    // FR-004a error in the same run — both outcomes are reported
+    // independently (dispatch_publish_targets never short-circuits), and
+    // the caller (run_docs, exercised separately above) would exit
+    // non-zero without suppressing either.
+    #[tokio::test]
+    async fn github_pages_succeeds_and_s3_fails_independently_in_the_same_run() {
+        let dir =
+            std::env::temp_dir().join(format!("paws-cli-core-docs-fixture-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.html"), "<html>hi</html>").unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // publish_github_pages's exact sequence for one file + the
+        // manifest: get_pages_config (404 -> Git Trees) -> get_content
+        // (manifest, 404 -> not up to date) -> create_blob x2 (file +
+        // manifest) -> publish_tree's 5-request sequence.
+        let responses = vec![
+            (404, serde_json::Value::Null),
+            (404, serde_json::Value::Null),
+            (200, serde_json::json!({ "sha": "blob-index" })),
+            (200, serde_json::json!({ "sha": "blob-manifest" })),
+            (
+                200,
+                serde_json::json!({ "object": { "sha": "parent-commit-sha" } }),
+            ),
+            (
+                200,
+                serde_json::json!({ "tree": { "sha": "base-tree-sha" } }),
+            ),
+            (200, serde_json::json!({ "sha": "new-tree-sha" })),
+            (200, serde_json::json!({ "sha": "new-commit-sha" })),
+            (200, serde_json::json!({ "ref": "refs/heads/main" })),
+        ];
+        let server = tokio::spawn(serve_fixture_responses(listener, responses));
+
+        let client = std::sync::Arc::new(
+            GitHubReleaseClient::new("octo".into(), "repo".into(), "t".into())
+                .with_base_url_for_tests(format!("http://{addr}")),
+        );
+        let outcomes = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            dispatch_publish_targets(
+                client,
+                dir.clone(),
+                "main".to_string(),
+                vec![
+                    paws_docs::PublishTarget::GitHubPages,
+                    paws_docs::PublishTarget::S3,
+                ],
+            ),
+        )
+        .await
+        .expect("dispatch_publish_targets should not hang");
+
+        assert_eq!(outcomes.len(), 2);
+        let github_pages = outcomes
+            .iter()
+            .find(|o| o.target == paws_docs::PublishTarget::GitHubPages)
+            .unwrap();
+        assert!(
+            github_pages.result.is_ok(),
+            "{:?}",
+            github_pages.result.as_ref().err()
+        );
+        let s3 = outcomes
+            .iter()
+            .find(|o| o.target == paws_docs::PublishTarget::S3)
+            .unwrap();
+        assert!(s3.result.is_err());
+        assert!(
+            s3.result
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("not implemented yet")
+        );
+
+        server.await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

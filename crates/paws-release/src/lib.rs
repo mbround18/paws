@@ -402,6 +402,10 @@ pub struct GitHubReleaseClient {
     pub repo: String,
     pub token: String,
     client: reqwest::Client,
+    /// Points requests at a local fixture server instead of the real
+    /// GitHub API — always `None` outside of test/fixture use, see
+    /// [`with_base_url_for_tests`](Self::with_base_url_for_tests).
+    base_override: Option<String>,
 }
 
 impl GitHubReleaseClient {
@@ -411,10 +415,25 @@ impl GitHubReleaseClient {
             repo,
             token,
             client: reqwest::Client::new(),
+            base_override: None,
         }
     }
 
+    /// Points every request this client makes at `base_url` instead of
+    /// `https://api.github.com` — lets unit tests (in this crate or any
+    /// downstream crate exercising this client, e.g. `paws-docs`'s
+    /// `github-pages` provider tests) run the real request-building logic
+    /// against a local fixture HTTP server. Never call this outside a test.
+    #[doc(hidden)]
+    pub fn with_base_url_for_tests(mut self, base_url: String) -> Self {
+        self.base_override = Some(base_url);
+        self
+    }
+
     fn api_base(&self) -> String {
+        if let Some(base) = &self.base_override {
+            return format!("{base}/repos/{}/{}", self.owner, self.repo);
+        }
         format!("https://api.github.com/repos/{}/{}", self.owner, self.repo)
     }
 
@@ -701,6 +720,213 @@ impl GitHubReleaseClient {
         }
         Ok(())
     }
+
+    /// `GET /repos/{owner}/{repo}/pages` — `None` on a 404 (Pages not
+    /// configured at all yet), distinguishing that from a genuine API
+    /// failure the same way [`get_content`](Self::get_content) does for a
+    /// missing file (specs/005-close-remaining-cli research.md R4).
+    pub async fn get_pages_config(&self) -> Result<Option<PagesConfig>> {
+        let url = format!("{}/pages", self.api_base());
+        let response = self
+            .auth_headers(self.client.get(&url))
+            .send()
+            .await
+            .context("failed to query the repository's Pages configuration")?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "unexpected status querying Pages configuration: {}",
+                response.status()
+            );
+        }
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("failed to parse Pages configuration response")?;
+        let build_type = body
+            .get("build_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("legacy")
+            .to_string();
+        Ok(Some(PagesConfig { build_type }))
+    }
+
+    /// `POST /repos/{owner}/{repo}/git/blobs` — uploads one file's raw
+    /// content and returns its blob `sha`, which [`publish_tree`](Self::publish_tree)
+    /// then references. Deliberately not a commit on its own (creating a
+    /// blob alone doesn't touch the ref/history), so blob-creating many
+    /// files ahead of one `publish_tree` call never triggers N separate
+    /// push/webhook events (FR-003) the way N [`put_content`](Self::put_content)
+    /// calls would.
+    pub async fn create_blob(&self, content: &[u8]) -> Result<String> {
+        use base64::Engine;
+
+        let url = format!("{}/git/blobs", self.api_base());
+        let body = serde_json::json!({
+            "content": base64::engine::general_purpose::STANDARD.encode(content),
+            "encoding": "base64",
+        });
+        let response = self
+            .auth_headers(self.client.post(&url))
+            .json(&body)
+            .send()
+            .await
+            .context("failed to create a git blob")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("failed to create a git blob: {status}: {text}");
+        }
+        let parsed: serde_json::Value = response
+            .json()
+            .await
+            .context("failed to parse blob-create response")?;
+        parsed
+            .get("sha")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .context("blob-create response missing sha")
+    }
+
+    /// Publishes `files` (each already blob-created via [`create_blob`](Self::create_blob))
+    /// to `branch` in exactly one commit: `POST .../git/trees` (with
+    /// `base_tree` set to the branch's current tree, so untouched files
+    /// survive), `POST .../git/commits`, then `PATCH .../git/refs/heads/{branch}`
+    /// to fast-forward the branch onto it. This is the whole reason
+    /// [`create_blob`](Self::create_blob) exists separately from the Contents API's
+    /// [`put_content`](Self::put_content) — a multi-hundred-file docs tree
+    /// publishes as one commit/one ref-update, not one `put_content` call
+    /// (and one push event) per file (FR-003, research.md R4).
+    pub async fn publish_tree(
+        &self,
+        branch: &str,
+        files: &[(String, String)],
+        message: &str,
+    ) -> Result<()> {
+        let ref_url = format!("{}/git/refs/heads/{branch}", self.api_base());
+        let ref_response = self
+            .auth_headers(self.client.get(&ref_url))
+            .send()
+            .await
+            .context("failed to look up the target branch's current ref")?;
+        if !ref_response.status().is_success() {
+            let status = ref_response.status();
+            let text = ref_response.text().await.unwrap_or_default();
+            anyhow::bail!("failed to look up {branch}'s current ref: {status}: {text}");
+        }
+        let ref_body: serde_json::Value = ref_response
+            .json()
+            .await
+            .context("failed to parse ref-lookup response")?;
+        let parent_commit_sha = ref_body
+            .get("object")
+            .and_then(|o| o.get("sha"))
+            .and_then(|v| v.as_str())
+            .context("ref-lookup response missing object.sha")?
+            .to_string();
+
+        let commit_url = format!("{}/git/commits/{parent_commit_sha}", self.api_base());
+        let commit_response = self
+            .auth_headers(self.client.get(&commit_url))
+            .send()
+            .await
+            .context("failed to look up the target branch's current commit")?;
+        if !commit_response.status().is_success() {
+            let status = commit_response.status();
+            let text = commit_response.text().await.unwrap_or_default();
+            anyhow::bail!("failed to look up commit {parent_commit_sha}: {status}: {text}");
+        }
+        let commit_body: serde_json::Value = commit_response
+            .json()
+            .await
+            .context("failed to parse commit-lookup response")?;
+        let base_tree = commit_body
+            .get("tree")
+            .and_then(|t| t.get("sha"))
+            .and_then(|v| v.as_str())
+            .context("commit-lookup response missing tree.sha")?
+            .to_string();
+
+        let tree_url = format!("{}/git/trees", self.api_base());
+        let tree_entries: Vec<serde_json::Value> = files
+            .iter()
+            .map(|(path, sha)| {
+                serde_json::json!({
+                    "path": path,
+                    "mode": "100644",
+                    "type": "blob",
+                    "sha": sha,
+                })
+            })
+            .collect();
+        let tree_response = self
+            .auth_headers(self.client.post(&tree_url))
+            .json(&serde_json::json!({ "base_tree": base_tree, "tree": tree_entries }))
+            .send()
+            .await
+            .context("failed to create the publish tree")?;
+        if !tree_response.status().is_success() {
+            let status = tree_response.status();
+            let text = tree_response.text().await.unwrap_or_default();
+            anyhow::bail!("failed to create the publish tree: {status}: {text}");
+        }
+        let tree_body: serde_json::Value = tree_response
+            .json()
+            .await
+            .context("failed to parse tree-create response")?;
+        let new_tree_sha = tree_body
+            .get("sha")
+            .and_then(|v| v.as_str())
+            .context("tree-create response missing sha")?
+            .to_string();
+
+        let new_commit_url = format!("{}/git/commits", self.api_base());
+        let new_commit_response = self
+            .auth_headers(self.client.post(&new_commit_url))
+            .json(&serde_json::json!({
+                "message": message,
+                "tree": new_tree_sha,
+                "parents": [parent_commit_sha],
+            }))
+            .send()
+            .await
+            .context("failed to create the publish commit")?;
+        if !new_commit_response.status().is_success() {
+            let status = new_commit_response.status();
+            let text = new_commit_response.text().await.unwrap_or_default();
+            anyhow::bail!("failed to create the publish commit: {status}: {text}");
+        }
+        let new_commit_body: serde_json::Value = new_commit_response
+            .json()
+            .await
+            .context("failed to parse commit-create response")?;
+        let new_commit_sha = new_commit_body
+            .get("sha")
+            .and_then(|v| v.as_str())
+            .context("commit-create response missing sha")?
+            .to_string();
+
+        let update_ref_response = self
+            .auth_headers(self.client.patch(&ref_url))
+            .json(&serde_json::json!({ "sha": new_commit_sha }))
+            .send()
+            .await
+            .context("failed to fast-forward the target branch")?;
+        if !update_ref_response.status().is_success() {
+            let status = update_ref_response.status();
+            let text = update_ref_response.text().await.unwrap_or_default();
+            anyhow::bail!("failed to update {branch} to the new commit: {status}: {text}");
+        }
+        Ok(())
+    }
+}
+
+/// [`GitHubReleaseClient::get_pages_config`]'s result on a configured repo.
+pub struct PagesConfig {
+    pub build_type: String,
 }
 
 /// A file fetched via [`GitHubReleaseClient::get_content`].
@@ -872,5 +1098,128 @@ mod tests {
         );
 
         tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    /// Serves one canned JSON response per entry in `responses`, in order,
+    /// on freshly-accepted connections (each response closes the
+    /// connection so a keep-alive-capable client like `reqwest` can't
+    /// accidentally reuse a socket across two different fixture replies).
+    /// Returns every request's raw head+body text, in the order received,
+    /// for the caller to assert against.
+    async fn serve_fixture_responses(
+        listener: tokio::net::TcpListener,
+        responses: Vec<serde_json::Value>,
+    ) -> Vec<String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut requests = Vec::new();
+        for body in responses {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await.unwrap();
+            requests.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+
+            let payload = body.to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.ok();
+        }
+        requests
+    }
+
+    #[tokio::test]
+    async fn get_pages_config_parses_build_type_and_returns_none_on_404() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let body = r#"{"build_type":"workflow"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.ok();
+            request
+        });
+
+        let client =
+            GitHubReleaseClient::new("octo".to_string(), "repo".to_string(), "t".to_string())
+                .with_base_url_for_tests(format!("http://{addr}"));
+        let config = client.get_pages_config().await.unwrap();
+        assert_eq!(config.unwrap().build_type, "workflow");
+
+        let request = server.await.unwrap();
+        assert!(request.starts_with("GET /repos/octo/repo/pages"));
+
+        // Second server for the 404 case.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = socket.read(&mut buf).await.unwrap();
+            let response =
+                "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.ok();
+        });
+        let client =
+            GitHubReleaseClient::new("octo".to_string(), "repo".to_string(), "t".to_string())
+                .with_base_url_for_tests(format!("http://{addr}"));
+        let config = client.get_pages_config().await.unwrap();
+        assert!(config.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn publish_tree_constructs_the_correct_request_sequence_preserving_base_tree() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // publish_tree's exact sequence: GET ref -> GET commit -> POST tree
+        // -> POST commit -> PATCH ref.
+        let responses = vec![
+            serde_json::json!({ "object": { "sha": "parent-commit-sha" } }),
+            serde_json::json!({ "tree": { "sha": "base-tree-sha" } }),
+            serde_json::json!({ "sha": "new-tree-sha" }),
+            serde_json::json!({ "sha": "new-commit-sha" }),
+            serde_json::json!({ "ref": "refs/heads/gh-pages" }),
+        ];
+        let server = tokio::spawn(serve_fixture_responses(listener, responses));
+
+        let client =
+            GitHubReleaseClient::new("octo".to_string(), "repo".to_string(), "t".to_string())
+                .with_base_url_for_tests(format!("http://{addr}"));
+        client
+            .publish_tree(
+                "gh-pages",
+                &[("index.html".to_string(), "blob-sha-1".to_string())],
+                "docs: publish",
+            )
+            .await
+            .unwrap();
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[0].starts_with("GET /repos/octo/repo/git/refs/heads/gh-pages"));
+        assert!(requests[1].starts_with("GET /repos/octo/repo/git/commits/parent-commit-sha"));
+        assert!(requests[2].starts_with("POST /repos/octo/repo/git/trees"));
+        assert!(requests[2].contains("\"base_tree\":\"base-tree-sha\""));
+        assert!(requests[2].contains("\"sha\":\"blob-sha-1\""));
+        assert!(requests[3].starts_with("POST /repos/octo/repo/git/commits"));
+        assert!(requests[3].contains("\"tree\":\"new-tree-sha\""));
+        assert!(requests[3].contains("\"parents\":[\"parent-commit-sha\"]"));
+        assert!(requests[4].starts_with("PATCH /repos/octo/repo/git/refs/heads/gh-pages"));
+        assert!(requests[4].contains("\"sha\":\"new-commit-sha\""));
     }
 }

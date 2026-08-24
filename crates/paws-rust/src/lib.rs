@@ -157,7 +157,7 @@ pub fn dagger_pipeline_args(
     } else {
         push_exec(&["rustup", "component", "add", "rustfmt", "clippy"]);
         push_exec(&["cargo", "fmt", "--", "--check"]);
-        push_exec(&["cargo", "clippy"]);
+        push_exec(&["cargo", "clippy", "--", "-D", "warnings"]);
         push_exec(&["cargo", "build", "--verbose"]);
         push_exec(&["cargo", "test", "--verbose"]);
         if coverage {
@@ -194,6 +194,66 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Writes a minimal, standalone (own empty `[workspace]`) fixture crate
+    /// to `dir`, with `lib_contents` as its `src/lib.rs` — used by the
+    /// clippy-gate fixture tests below to exercise the real
+    /// `cargo clippy -- -D warnings` invocation directly (not just asserting
+    /// the string `dagger_pipeline_args` builds), matching how `paws-docs`'s
+    /// own tests shell out to a real `cargo` subcommand.
+    fn write_clippy_fixture(dir: &std::path::Path, lib_contents: &str) {
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[workspace]\n\n[package]\nname = \"clippy-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/lib.rs"), lib_contents).unwrap();
+    }
+
+    // T003 (US1): a real clippy warning fails `cargo clippy -- -D warnings`
+    // when invoked directly — proves the gate itself, independent of the
+    // dagger-pipeline string-assertion test above.
+    #[test]
+    fn a_real_clippy_warning_fails_with_d_warnings() {
+        let dir = temp_dir("clippy-warn");
+        write_clippy_fixture(
+            &dir,
+            "pub fn check(flag: bool) -> bool {\n    if flag == true { true } else { false }\n}\n",
+        );
+
+        let status = std::process::Command::new("cargo")
+            .args(["clippy", "--", "-D", "warnings"])
+            .current_dir(&dir)
+            .status()
+            .expect("failed to spawn cargo clippy");
+
+        assert!(
+            !status.success(),
+            "a crate with a real clippy warning (bool_comparison) must fail -D warnings"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // T005 (US1, SC-002): a clean, warning-free fixture continues to pass —
+    // zero false positives introduced by the -D warnings gate.
+    #[test]
+    fn a_clean_fixture_still_passes_with_d_warnings() {
+        let dir = temp_dir("clippy-clean");
+        write_clippy_fixture(&dir, "pub fn check(flag: bool) -> bool {\n    flag\n}\n");
+
+        let status = std::process::Command::new("cargo")
+            .args(["clippy", "--", "-D", "warnings"])
+            .current_dir(&dir)
+            .status()
+            .expect("failed to spawn cargo clippy");
+
+        assert!(
+            status.success(),
+            "a clean, warning-free crate must still pass -D warnings"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn pipeline_uses_the_rust_bookworm_image() {
         let args = dagger_pipeline_args("/host/src", false, false, None);
@@ -208,7 +268,7 @@ mod tests {
         let expected = [
             "--args=rustup,component,add,rustfmt,clippy",
             "--args=cargo,fmt,--,--check",
-            "--args=cargo,clippy",
+            "--args=cargo,clippy,--,-D,warnings",
             "--args=cargo,build,--verbose",
             "--args=cargo,test,--verbose",
         ];

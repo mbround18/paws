@@ -1193,6 +1193,7 @@ name = "paws-cli-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "paws-audit",
  "paws-changelog",
@@ -1235,6 +1236,8 @@ name = "paws-dagger"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "reqwest",
+ "serde_json",
  "tokio",
 ]
 
@@ -1253,6 +1256,9 @@ name = "paws-docs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "paws-release",
+ "serde_json",
  "tokio",
 ]
 

@@ -117,7 +117,14 @@ compose` runtime difference under this pipeline's root context that a real GitHu
   findings should block a build. Building this surfaced two real `dagger core --args` CSV-parsing
   bugs (embedded raw newlines get silently truncated; embedded literal double-quotes break the
   parser entirely) — fixed by writing scanner scripts via `with-new-file` instead of inlining them
-  into `--args`.
+  into `--args`. A third scanner, **`cargo-audit`** (2026-08-23, `specs/005-close-remaining-cli`),
+  joined the catalog — `ScannerName::CargoAudit`, gated on the `LanguageFamily::Rust` signal alone
+  (`ScannerFamily::Language(Rust)`, not `CrossLanguage` like Semgrep/Gitleaks), running
+  `cargo install cargo-audit --locked && cargo audit --json` against `rust:1-bookworm` and mapping
+  RustSec advisories (`vulnerabilities.list[]`) to `TopFinding`s the same shape every other
+  scanner's parser produces. Same report-don't-fail default as Semgrep/Gitleaks (only a genuine
+  scanner error, not a finding, fails the run) — confirmed by reading `run_audit`'s actual dispatch
+  loop, not assumed: it's fully generic over the scanner catalog, no per-scanner special-casing.
 - **`paws docker`**: any `docker-compose.yml`/`Dockerfile`-based project, regardless of source
   language — this one's already stack-agnostic, since it works from the compose file / Dockerfile
   contract rather than a language-specific build step. Registry auth
@@ -214,6 +221,40 @@ myco.jfrog.io=you`, token read from a derived `$MYCO_JFROG_IO_TOKEN`-style env v
   this repo's Python jobs (which don't fit `paws-python`'s fixed `uv sync && uv build && uv run
 pytest` pipeline shape — no package meant for `uv build`, several separately-scoped `pytest`
   invocations with per-suite JUnit summaries, not one blanket call) are still untouched.
+- **Dagger build cache** (2026-08-23, `specs/005-close-remaining-cli`): `paws docker`/`paws ci`
+  now detect and use a remote build cache via `paws_dagger::CacheBackend` — auto-selected (no CLI
+  flag), `DAGGER_CLOUD_TOKEN` winning if both signatures are present. **`GitHubActionsCache`**
+  (`$ACTIONS_CACHE_URL` + `$ACTIONS_RUNTIME_TOKEN`, the legacy Cache Service v1 REST API) is the
+  fully-implemented provider — real restore-before/save-after around the shared Dagger engine
+  container's persistent state (a Docker volume at `/var/lib/dagger`, confirmed for real via
+  `docker inspect` against a live engine, not assumed), and deliberately given equal-or-greater
+  implementation weight than `DaggerCloud`: it needs no external paid account, so it's what most
+  GitHub-Actions-only consumers actually depend on. **`DaggerCloud`** (`DAGGER_CLOUD_TOKEN`) needs
+  near-zero code beyond detection — the token already reaches the `dagger` subprocess via
+  inherited environment. Neither backend wraps `paws_dagger::core`/`core_streaming` themselves
+  (those stay byte-for-byte unchanged) — restore/save bracket a whole `paws docker`/`paws ci`
+  invocation once, via `restore_cache_backend`/`save_cache_backend`, since a single invocation can
+  call `core` many times (e.g. `paws ci`'s own fmt/clippy/build/test steps) and stopping/restoring
+  the shared engine around each one individually would be both wasteful and unsafe for adjacent
+  calls in the same process. `$ACTIONS_RESULTS_URL`-only environments (the newer Twirp/protobuf
+  results service) are a known, explicitly-out-of-scope follow-up — detected but not implemented,
+  falls through to no cache rather than a nonfunctional half-implementation.
+- **`paws docs --provider`** (2026-08-23, `specs/005-close-remaining-cli`): `paws docs` now
+  actually publishes, closing the gap where `--help` claimed GitHub Pages publishing that didn't
+  exist. `--provider github-pages` (comma-delimited, multi-provider capable) builds `target/doc`
+  once and publishes it in exactly one commit via the GitHub Git Trees API (`GitHubReleaseClient::
+  create_blob`/`publish_tree` — blob-create every file, one tree/commit/ref-update for the whole
+  set, never a per-file `put_content` loop), auto-selecting between that Git Trees path and the
+  Pages deployment/artifact API from the repo's live Pages configuration (`build_type: "legacy"`
+  vs `"workflow"`) — the deployment API path is gated on GitHub Actions' own runtime env vars
+  (`ACTIONS_RUNTIME_TOKEN`/`ACTIONS_RESULTS_URL`) since it only works inside a real Actions job,
+  and fails with those vars named explicitly rather than attempting a doomed call. Idempotent: a
+  content digest stashed at `.paws-docs-manifest` on the publish branch skips a no-op republish.
+  `--provider cloudflare-pages`/`--provider s3` are recognized (`PublishTarget::CloudflarePages`/
+  `::S3`) but intentionally not implemented yet — they fail immediately with an actionable "not
+  implemented — see docs/ROADMAP.md" error rather than a silent no-op or an "unrecognized value"
+  parse error, reserving the surface for a real future implementation. Tracked here as the explicit
+  follow-up this bullet exists to name.
 
 ## Status legend
 

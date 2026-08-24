@@ -39,3 +39,6 @@ schemars.workspace = true
 # declare it directly rather than centralizing a dependency only three
 # crates need.
 serde_yaml = "0.9"
+
+[dev-dependencies]
+base64.workspace = true
