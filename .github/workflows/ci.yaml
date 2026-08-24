@@ -85,6 +85,32 @@ jobs:
         working-directory: examples/python-fixture
         run: ../../target/debug/paws ci --toolchain python
 
+      # specs/004-rust-coverage/quickstart.md §4: proves cargo llvm-cov
+      # measures a real gap (examples/rust-coverage-fixture has one
+      # deliberately untested branch), not just running and reporting a
+      # fixed number. Asserts the TOTAL line's region-coverage percentage
+      # is genuinely between 0% and 100%.
+      - name: paws ci --toolchain rust --coverage (examples/rust-coverage-fixture)
+        working-directory: examples/rust-coverage-fixture
+        run: |
+          set -euo pipefail
+          output="$(../../target/debug/paws ci --toolchain rust --coverage)"
+          echo "$output"
+          total_line="$(echo "$output" | grep -E '^TOTAL' | head -1)"
+          if [ -z "$total_line" ]; then
+            echo "::error::no TOTAL line in cargo llvm-cov output"
+            exit 1
+          fi
+          # Columns: Filename Regions "Missed Regions" Cover Functions ...
+          # — "Missed Regions" is two whitespace-separated tokens, so the
+          # region Cover% is field 4, not field 3.
+          cover_pct="$(echo "$total_line" | awk '{print $4}' | tr -d '%')"
+          echo "region coverage: ${cover_pct}%"
+          awk -v pct="$cover_pct" 'BEGIN { exit !(pct > 0 && pct < 100) }' || {
+            echo "::error::expected coverage strictly between 0% and 100%, got ${cover_pct}%"
+            exit 1
+          }
+
   # Regenerates llms.txt (docs/ROADMAP.md's `paws llms generate`) and
   # commits it back to main via the Contents API — the same
   # get_content/put_content pattern `paws helm --publish` already uses for

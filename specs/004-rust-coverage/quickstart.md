@@ -36,12 +36,16 @@ existing out-of-`--toolchain go` rejection.
 ## 4) Incomplete-coverage fixture proves the tool is really measuring something
 
 Automated: `examples/rust-coverage-fixture/` has a deliberately untested branch, and
-`crates/paws-rust/tests/e2e_coverage.rs` builds `builders/rust/Dockerfile` and runs
-`cargo llvm-cov --workspace --summary-only` against it, asserting the reported coverage is
-genuinely below 100% (and above 0%) — not just running-and-reporting a fixed number.
+`.github/workflows/ci.yaml`'s `ci-e2e` job runs `paws ci --toolchain rust --coverage` against it,
+asserting the reported coverage is genuinely below 100% (and above 0%) — not just
+running-and-reporting a fixed number. This lives in the CI workflow rather than a Rust-level
+`#[test]`, because a test shelling out to `docker` directly (outside `paws-dagger`) would violate
+`scripts/check-dagger-callsites.sh`'s SC-004/ADR-0001 lint, which only excepts
+`crates/paws-docker/tests/`.
 
 ```bash
-cargo test -p paws-rust --test e2e_coverage
+cargo build -p paws-cli
+cd examples/rust-coverage-fixture && ../../target/debug/paws ci --toolchain rust --coverage
 ```
 
 ## 5) wasm project: `--coverage` is a no-op

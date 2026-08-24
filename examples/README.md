@@ -14,7 +14,9 @@ part of `paws` itself.
 - `rust-coverage-fixture/` — a crate with one deliberately untested branch (`classify`'s
   `"positive"` arm); the target for `paws ci --toolchain rust --coverage`'s "the tool measures a
   real gap, not a fixed number" acceptance scenario (`specs/004-rust-coverage/quickstart.md` §4),
-  exercised by `crates/paws-rust/tests/e2e_coverage.rs`.
+  exercised by `.github/workflows/ci.yaml`'s `ci-e2e` job (not a Rust-level `#[test]` — that would
+  need to shell out to `docker` directly outside `paws-dagger`, which `scripts/check-dagger-callsites.sh`'s
+  SC-004/ADR-0001 lint forbids everywhere except `crates/paws-docker/tests/`).
 - `node-fixture/` — a minimal pnpm-style project; the target for `paws ci --toolchain node`.
 - `node-server-fixture/` — a plain (`Framework::Plain`, no bundler/framework) Node backend server:
   `server.js` exports a real `node:http` server with a `/health` route, and `server.test.js` binds
