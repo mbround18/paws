@@ -89,7 +89,11 @@ Run the audit/compliance scanner suite
 
 ## paws docs
 
-Publish generated docs (e.g. rustdoc) to GitHub Pages
+Build rustdoc; optionally publish it with --provider (github-pages implemented; cloudflare-pages/s3 recognized but not implemented yet)
+
+- `--provider` — Comma-delimited publish destination(s): "github-pages", "cloudflare-pages", "s3". Omitted (the default): builds target/doc locally only, nothing published — same as before this flag existed. "cloudflare-pages"/"s3" are recognized but not implemented yet (see docs/ROADMAP.md); "github-pages" publishes for real, auto-selecting the Git Trees or Pages-deployment mechanism from the repository's live Pages configuration
+- `--repository` — "owner/repo" to publish to. Falls back to $GITHUB_REPOSITORY. Only used when --provider is given
+- `--branch` (default: `main`) — Branch to publish to (the "github-pages" provider only). Only used when --provider includes "github-pages"
 
 ## paws provision
 
