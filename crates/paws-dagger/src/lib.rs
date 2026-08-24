@@ -452,13 +452,24 @@ impl ActionsCacheClientV2 {
     /// like `actions/toolkit`'s own client — the receiver derives it from
     /// the bearer token's own claims.
     async fn call(&self, method: &str, body: serde_json::Value) -> Result<serde_json::Value> {
-        let url = format!(
-            "{}/twirp/github.actions.results.api.v1.CacheService/{method}",
-            self.base_url
-        );
+        // `$ACTIONS_RESULTS_URL` carries a run-scoped path (e.g. a GUID
+        // segment), not just a bare origin. `actions/toolkit`'s own client
+        // builds this URL as `new URL('/twirp/.../<method>', baseUrl)` — a
+        // *path-absolute* relative reference, which per the URL spec
+        // replaces the base's entire path (and query), keeping only its
+        // origin. A naive `format!("{base_url}/twirp/...")` string
+        // concatenation instead appends onto that existing path, producing
+        // a materially different (and wrong — confirmed live, every call
+        // came back `400 Bad Request`) URL. Replicate the origin-only join.
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .with_context(|| format!("invalid Actions Results URL: {}", self.base_url))?;
+        url.set_path(&format!(
+            "/twirp/github.actions.results.api.v1.CacheService/{method}"
+        ));
+        url.set_query(None);
         let response = self
             .client
-            .post(&url)
+            .post(url)
             .bearer_auth(&self.token)
             .json(&body)
             .send()
