@@ -154,19 +154,26 @@ jobs:
       - name: Install dagger CLI
         run: paws init
 
-      # Exposes $ACTIONS_RUNTIME_TOKEN/$ACTIONS_CACHE_URL to later `run:` (bash)
-      # steps in this job — GitHub Actions withholds them from a plain bash
-      # step's process environment; only a JS/Node-based action step can see
-      # them. Mirrors actions/paws-up's own step (that action isn't used in
-      # this job since it would download a release binary instead of using
-      # the one just built above).
+      # Exposes the runtime token plus both cache-service URL vars, and the
+      # v2 opt-in flag, to later `run:` (bash) steps in this job — GitHub
+      # Actions withholds all of these from a plain bash step's process
+      # environment; only a JS/Node-based action step can see them. Mirrors
+      # actions/paws-up's own step (that action isn't used in this job
+      # since it would download a release binary instead of using the one
+      # just built above).
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const token = process.env['ACTIONS_RUNTIME_TOKEN'];
-            const url = process.env['ACTIONS_CACHE_URL'];
-            if (token) core.exportVariable('ACTIONS_RUNTIME_TOKEN', token);
-            if (url) core.exportVariable('ACTIONS_CACHE_URL', url);
+            const vars = [
+              'ACTIONS_RUNTIME_TOKEN',
+              'ACTIONS_CACHE_URL',
+              'ACTIONS_RESULTS_URL',
+              'ACTIONS_CACHE_SERVICE_V2'
+            ];
+            for (const name of vars) {
+              const value = process.env[name];
+              if (value) core.exportVariable(name, value);
+            }
 
       - name: paws docker (cold run)
         id: run
@@ -217,13 +224,20 @@ jobs:
       - name: Install dagger CLI
         run: paws init
 
+      # See the cold job's step of the same name for why all four vars.
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const token = process.env['ACTIONS_RUNTIME_TOKEN'];
-            const url = process.env['ACTIONS_CACHE_URL'];
-            if (token) core.exportVariable('ACTIONS_RUNTIME_TOKEN', token);
-            if (url) core.exportVariable('ACTIONS_CACHE_URL', url);
+            const vars = [
+              'ACTIONS_RUNTIME_TOKEN',
+              'ACTIONS_CACHE_URL',
+              'ACTIONS_RESULTS_URL',
+              'ACTIONS_CACHE_SERVICE_V2'
+            ];
+            for (const name of vars) {
+              const value = process.env[name];
+              if (value) core.exportVariable(name, value);
+            }
 
       - name: paws docker (warm run, same unchanged Dockerfile)
         id: run

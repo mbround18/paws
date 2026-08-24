@@ -65,6 +65,25 @@ pub struct DaggerCall {
 /// it needs a paid Dagger Cloud account, while `GitHubActionsCache` needs
 /// no external account at all and is what most GitHub Actions-only
 /// consumers will actually depend on (research.md R7's explicit note).
+/// Which wire protocol a `GitHubActionsCache` backend speaks. GitHub runs
+/// two cache services in parallel: the legacy REST API (`V1`, JSON over
+/// `$ACTIONS_CACHE_URL`) and the newer Twirp/protobuf-over-JSON results
+/// service (`V2`, over `$ACTIONS_RESULTS_URL`). `actions/toolkit` itself
+/// only switches to `V2` when the runner also exports
+/// `$ACTIONS_CACHE_SERVICE_V2` (`packages/cache/src/internal/config.ts`,
+/// `getCacheServiceVersion`) — GHES never sets it and stays on `V1`
+/// forever. On github.com today the flag is set and the legacy `V1`
+/// endpoint rejects every call with `400 Bad Request` (confirmed live: see
+/// commit history around 2026-08-24's real-runner CI failures) — GitHub has
+/// been migrating consumers off it. `V2` is therefore the one that actually
+/// works there; `V1` is kept for GHES and any environment that genuinely
+/// only exposes the legacy vars.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheApiVersion {
+    V1,
+    V2,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheBackend {
     /// `$DAGGER_CLOUD_TOKEN` is set — Dagger's own native remote cache.
@@ -73,15 +92,18 @@ pub enum CacheBackend {
     /// calls anywhere in this crate), so the token already reaches the
     /// subprocess unmodified (research.md R6).
     DaggerCloud,
-    /// Running inside a real GitHub Actions job with the legacy Cache
-    /// Service v1 REST API available (`$ACTIONS_CACHE_URL` +
-    /// `$ACTIONS_RUNTIME_TOKEN`). Wraps the local Dagger engine's
+    /// Running inside a real GitHub Actions job with a Cache Service
+    /// available (`version` says which). Wraps the local Dagger engine's
     /// persistent state (a named Docker volume mounted at
     /// `/var/lib/dagger` inside the `dagger-engine-v<version>` container —
     /// confirmed for real via `docker inspect` against a live engine, not
     /// assumed) with a restore-before/save-after pair around the pipeline
     /// call.
-    GitHubActionsCache { base_url: String, token: String },
+    GitHubActionsCache {
+        base_url: String,
+        token: String,
+        version: CacheApiVersion,
+    },
     /// Neither signature present — today's behavior, unchanged (FR-007).
     None,
 }
@@ -90,13 +112,13 @@ impl CacheBackend {
     /// Detects which backend to use from the current process environment.
     /// `DAGGER_CLOUD_TOKEN` wins when both signatures are present (FR-005).
     ///
-    /// Deliberately checks `$ACTIONS_CACHE_URL` (the legacy Cache Service
-    /// v1 REST API, JSON-based) rather than `$ACTIONS_RESULTS_URL` (the
-    /// newer Twirp/protobuf-based results service) — the latter is a
-    /// materially different wire protocol this crate doesn't implement yet
-    /// (tracked in docs/ROADMAP.md); a runner that only sets
-    /// `$ACTIONS_RESULTS_URL` falls through to `None` rather than a
-    /// nonfunctional half-implementation.
+    /// Mirrors `actions/toolkit`'s own precedence
+    /// (`getCacheServiceVersion`/`getCacheServiceURL` in
+    /// `packages/cache/src/internal/config.ts`): `V2` only when both
+    /// `$ACTIONS_RESULTS_URL` and a truthy `$ACTIONS_CACHE_SERVICE_V2` are
+    /// present, else `V1` from `$ACTIONS_CACHE_URL` (falling back to
+    /// `$ACTIONS_RESULTS_URL` if that's the only URL var set, same as
+    /// upstream) when the runtime token is also present.
     pub fn detect() -> Self {
         if std::env::var("DAGGER_CLOUD_TOKEN").is_ok() {
             return CacheBackend::DaggerCloud;
@@ -107,15 +129,27 @@ impl CacheBackend {
         // treat that the same as absent, not as a valid (but useless)
         // signature, to avoid a false-positive `GitHubActionsCache` with
         // an unusable empty `base_url`/`token`.
-        if let (Some(base_url), Some(token)) = (
-            std::env::var("ACTIONS_CACHE_URL")
-                .ok()
-                .filter(|v| !v.is_empty()),
-            std::env::var("ACTIONS_RUNTIME_TOKEN")
-                .ok()
-                .filter(|v| !v.is_empty()),
-        ) {
-            return CacheBackend::GitHubActionsCache { base_url, token };
+        let non_empty = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+
+        let Some(token) = non_empty("ACTIONS_RUNTIME_TOKEN") else {
+            return CacheBackend::None;
+        };
+
+        if let Some(results_url) = non_empty("ACTIONS_RESULTS_URL")
+            && non_empty("ACTIONS_CACHE_SERVICE_V2").is_some()
+        {
+            return CacheBackend::GitHubActionsCache {
+                base_url: results_url,
+                token,
+                version: CacheApiVersion::V2,
+            };
+        }
+        if let Some(base_url) = non_empty("ACTIONS_CACHE_URL").or_else(|| non_empty("ACTIONS_RESULTS_URL")) {
+            return CacheBackend::GitHubActionsCache {
+                base_url,
+                token,
+                version: CacheApiVersion::V1,
+            };
         }
         CacheBackend::None
     }
@@ -384,6 +418,211 @@ impl ActionsCacheClient {
     }
 }
 
+/// Client for the GitHub Actions Cache Service **v2** (`$ACTIONS_RESULTS_URL`)
+/// — a Twirp RPC service (`github.actions.results.api.v1.CacheService`) that
+/// `actions/toolkit` itself talks to over its JSON transport (not raw
+/// protobuf — Twirp supports both; JSON avoids needing a protobuf codegen
+/// step here, and the server accepts either the proto field name or the
+/// lowerCamelCase form on requests per the proto3 JSON spec, so plain
+/// snake_case request bodies work). Reserve/upload/commit becomes
+/// create-entry (returns a signed Azure Blob SAS URL) / upload-to-blob /
+/// finalize-entry; the blob upload itself is a single `PUT` with
+/// `x-ms-blob-type: BlockBlob` (Azure's simple-PUT path, valid up to 5000
+/// MiB — comfortably above a Dagger engine-state archive) rather than the
+/// chunked block-list upload `actions/toolkit` uses for very large caches.
+struct ActionsCacheClientV2 {
+    base_url: String,
+    token: String,
+    client: reqwest::Client,
+}
+
+impl ActionsCacheClientV2 {
+    fn new(base_url: String, token: String) -> Self {
+        let base_url = base_url.trim_end_matches('/').to_string();
+        Self {
+            base_url,
+            token,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// `POST /twirp/github.actions.results.api.v1.CacheService/<method>`
+    /// with a JSON body, per Twirp's JSON transport. `metadata` (repository
+    /// id + scope) is deliberately omitted from every request body, exactly
+    /// like `actions/toolkit`'s own client — the receiver derives it from
+    /// the bearer token's own claims.
+    async fn call(&self, method: &str, body: serde_json::Value) -> Result<serde_json::Value> {
+        let url = format!(
+            "{}/twirp/github.actions.results.api.v1.CacheService/{method}",
+            self.base_url
+        );
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("failed to call Cache Service v2 {method}"))?;
+        let status = response.status();
+        let parsed: serde_json::Value = response
+            .json()
+            .await
+            .with_context(|| format!("failed to parse Cache Service v2 {method} response"))?;
+        if !status.is_success() {
+            let message = parsed
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            anyhow::bail!("Cache Service v2 {method} failed: {status}{}{message}", if message.is_empty() { "" } else { ": " });
+        }
+        Ok(parsed)
+    }
+
+    /// `GetCacheEntryDownloadURL` — `Ok(None)` on a cache miss (`ok: false`
+    /// in the response, not an HTTP error — Twirp still returns 200 for a
+    /// clean miss), else the signed Azure Blob download URL.
+    async fn find_entry(&self, key: &str) -> Result<Option<String>> {
+        let body = serde_json::json!({ "key": key, "restore_keys": [], "version": key });
+        let response = self.call("GetCacheEntryDownloadURL", body).await?;
+        if !response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Ok(None);
+        }
+        Ok(response
+            .get("signedDownloadUrl")
+            .and_then(|v| v.as_str())
+            .map(String::from))
+    }
+
+    async fn download(&self, signed_url: &str, dest: &std::path::Path) -> Result<()> {
+        let bytes = self
+            .client
+            .get(signed_url)
+            .send()
+            .await
+            .context("failed to download the cached engine-state archive")?
+            .bytes()
+            .await
+            .context("failed to read the cached engine-state archive body")?;
+        tokio::fs::write(dest, &bytes)
+            .await
+            .context("failed to write the downloaded cache archive to disk")?;
+        Ok(())
+    }
+
+    /// `CreateCacheEntry` — reserves the entry and returns the signed Azure
+    /// Blob upload URL the archive bytes get `PUT` to directly.
+    async fn create_entry(&self, key: &str) -> Result<String> {
+        let body = serde_json::json!({ "key": key, "version": key });
+        let response = self.call("CreateCacheEntry", body).await?;
+        if !response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let message = response
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("response was not ok");
+            anyhow::bail!("failed to reserve a Cache Service v2 entry: {message}");
+        }
+        response
+            .get("signedUploadUrl")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .context("Cache Service v2 CreateCacheEntry response missing signedUploadUrl")
+    }
+
+    /// Single-shot `PUT` of the whole archive to the signed Azure Blob URL
+    /// — `x-ms-blob-type: BlockBlob` is Azure's "create/overwrite this blob
+    /// in one request" mode (vs. `PutBlock`/`PutBlockList`'s chunked path).
+    async fn upload(&self, signed_upload_url: &str, data: &[u8]) -> Result<()> {
+        let response = self
+            .client
+            .put(signed_upload_url)
+            .header("x-ms-blob-type", "BlockBlob")
+            .header("Content-Type", "application/octet-stream")
+            .body(data.to_vec())
+            .send()
+            .await
+            .context("failed to upload the engine-state archive to Azure Blob storage")?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "failed to upload to Azure Blob storage: {}",
+                response.status()
+            );
+        }
+        Ok(())
+    }
+
+    /// `FinalizeCacheEntryUpload` — makes the just-uploaded blob visible to
+    /// future `GetCacheEntryDownloadURL` lookups.
+    async fn finalize(&self, key: &str, size: u64) -> Result<()> {
+        let body = serde_json::json!({ "key": key, "version": key, "size_bytes": size.to_string() });
+        let response = self.call("FinalizeCacheEntryUpload", body).await?;
+        if !response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let message = response
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("response was not ok");
+            anyhow::bail!("failed to finalize a Cache Service v2 entry: {message}");
+        }
+        Ok(())
+    }
+}
+
+/// Dispatches to whichever [`CacheApiVersion`] the detected backend uses —
+/// the volume archiving (stop engine / tar via a throwaway alpine
+/// container / restart engine) is identical either way; only the network
+/// calls that get bytes in and out of GitHub's cache storage differ.
+enum CacheTransport {
+    V1(ActionsCacheClient),
+    V2(ActionsCacheClientV2),
+}
+
+impl CacheTransport {
+    fn new(base_url: String, token: String, version: CacheApiVersion) -> Self {
+        match version {
+            CacheApiVersion::V1 => CacheTransport::V1(ActionsCacheClient::new(base_url, token)),
+            CacheApiVersion::V2 => CacheTransport::V2(ActionsCacheClientV2::new(base_url, token)),
+        }
+    }
+
+    /// `Ok(true)` and `dest` populated on a cache hit, `Ok(false)` on a
+    /// clean miss.
+    async fn find_and_download(&self, key: &str, dest: &std::path::Path) -> Result<bool> {
+        match self {
+            CacheTransport::V1(c) => {
+                let Some(location) = c.find_entry(key).await? else {
+                    return Ok(false);
+                };
+                c.download(&location, dest).await?;
+                Ok(true)
+            }
+            CacheTransport::V2(c) => {
+                let Some(url) = c.find_entry(key).await? else {
+                    return Ok(false);
+                };
+                c.download(&url, dest).await?;
+                Ok(true)
+            }
+        }
+    }
+
+    async fn upload(&self, key: &str, data: &[u8]) -> Result<()> {
+        match self {
+            CacheTransport::V1(c) => {
+                let cache_id = c.reserve(key, data.len() as u64).await?;
+                c.upload(cache_id, data).await?;
+                c.commit(cache_id, data.len() as u64).await?;
+                Ok(())
+            }
+            CacheTransport::V2(c) => {
+                let upload_url = c.create_entry(key).await?;
+                c.upload(&upload_url, data).await?;
+                c.finalize(key, data.len() as u64).await?;
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Restores the Dagger engine's persistent state from the Actions cache,
 /// if a cached entry exists, **before** the caller's real pipeline runs.
 /// Safe no-op on a cache miss. Stops the engine container while restoring
@@ -391,18 +630,16 @@ impl ActionsCacheClient {
 /// real `dagger core`/`dagger call` invocation auto-restarts it, the same
 /// `docker start dagger-engine-v...` sequence `dagger` already performs on
 /// every invocation when the container exists but isn't running.
-async fn restore_github_actions_cache(client: &ActionsCacheClient) -> Result<()> {
+async fn restore_github_actions_cache(client: &CacheTransport) -> Result<()> {
     let key = engine_cache_key().await?;
-    let Some(archive_location) = client.find_entry(&key).await? else {
+    let archive_path = std::env::temp_dir().join("paws-dagger-cache-restore.tar.gz");
+    if !client.find_and_download(&key, &archive_path).await? {
         eprintln!("cache: no existing github-actions cache entry for {key}, starting cold");
         return Ok(());
-    };
+    }
 
     let container = ensure_engine_started().await?;
     let volume = find_engine_volume(&container).await?;
-
-    let archive_path = std::env::temp_dir().join("paws-dagger-cache-restore.tar.gz");
-    client.download(&archive_location, &archive_path).await?;
 
     docker_output(&["stop", &container]).await?;
     let extract = docker_output(&[
@@ -430,7 +667,7 @@ async fn restore_github_actions_cache(client: &ActionsCacheClient) -> Result<()>
 /// container for a consistent snapshot, tars the volume via a throwaway
 /// helper container, uploads it, then restarts the engine so it's left
 /// running for whatever runs next.
-async fn save_github_actions_cache(client: &ActionsCacheClient) -> Result<()> {
+async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
     let Some(container) = find_engine_container().await? else {
         // The pipeline that just ran never actually started the engine
         // (e.g. it failed before any real dagger call) — nothing to save.
@@ -476,9 +713,7 @@ async fn save_github_actions_cache(client: &ActionsCacheClient) -> Result<()> {
         .context("failed to read the archived engine state back from disk")?;
     let _ = tokio::fs::remove_file(&archive_path).await;
 
-    let cache_id = client.reserve(&key, data.len() as u64).await?;
-    client.upload(cache_id, &data).await?;
-    client.commit(cache_id, data.len() as u64).await?;
+    client.upload(&key, &data).await?;
     eprintln!(
         "cache: saved github-actions cache entry {key} ({} bytes)",
         data.len()
@@ -507,8 +742,13 @@ async fn save_github_actions_cache(client: &ActionsCacheClient) -> Result<()> {
 pub async fn restore_cache_backend() -> CacheBackend {
     let backend = CacheBackend::detect();
     eprintln!("{}", backend.log_line());
-    if let CacheBackend::GitHubActionsCache { base_url, token } = &backend {
-        let client = ActionsCacheClient::new(base_url.clone(), token.clone());
+    if let CacheBackend::GitHubActionsCache {
+        base_url,
+        token,
+        version,
+    } = &backend
+    {
+        let client = CacheTransport::new(base_url.clone(), token.clone(), *version);
         if let Err(err) = restore_github_actions_cache(&client).await {
             eprintln!("cache: restore failed, continuing with a cold build: {err:#}");
         }
@@ -522,8 +762,13 @@ pub async fn restore_cache_backend() -> CacheBackend {
 /// caching whatever state exists is still useful even after a failed
 /// build. No-op for `CacheBackend::DaggerCloud`/`CacheBackend::None`.
 pub async fn save_cache_backend(backend: &CacheBackend) {
-    if let CacheBackend::GitHubActionsCache { base_url, token } = backend {
-        let client = ActionsCacheClient::new(base_url.clone(), token.clone());
+    if let CacheBackend::GitHubActionsCache {
+        base_url,
+        token,
+        version,
+    } = backend
+    {
+        let client = CacheTransport::new(base_url.clone(), token.clone(), *version);
         if let Err(err) = save_github_actions_cache(&client).await {
             eprintln!("cache: save failed (build result is unaffected): {err:#}");
         }
@@ -851,6 +1096,7 @@ mod tests {
         "ACTIONS_CACHE_URL",
         "ACTIONS_RUNTIME_TOKEN",
         "ACTIONS_RESULTS_URL",
+        "ACTIONS_CACHE_SERVICE_V2",
     ];
 
     /// SAFETY: guarded by `ENV_LOCK` above — no concurrent env access from
@@ -879,7 +1125,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detect_picks_github_actions_cache_when_only_that_signature_present() {
+    async fn detect_picks_github_actions_cache_v1_when_only_that_signature_present() {
         let _guard = ENV_LOCK.lock().await;
         unsafe {
             clear_cache_env();
@@ -887,9 +1133,64 @@ mod tests {
             std::env::set_var("ACTIONS_RUNTIME_TOKEN", "actions-runtime-token-value");
         }
         match CacheBackend::detect() {
-            CacheBackend::GitHubActionsCache { base_url, token } => {
+            CacheBackend::GitHubActionsCache {
+                base_url,
+                token,
+                version,
+            } => {
                 assert_eq!(base_url, "https://example.invalid/cache");
                 assert_eq!(token, "actions-runtime-token-value");
+                assert_eq!(version, CacheApiVersion::V1);
+            }
+            other => panic!("expected GitHubActionsCache, got {other:?}"),
+        }
+        unsafe {
+            clear_cache_env();
+        }
+    }
+
+    #[tokio::test]
+    async fn detect_picks_github_actions_cache_v2_when_results_url_and_flag_present() {
+        let _guard = ENV_LOCK.lock().await;
+        unsafe {
+            clear_cache_env();
+            std::env::set_var("ACTIONS_RESULTS_URL", "https://example.invalid/results");
+            std::env::set_var("ACTIONS_CACHE_SERVICE_V2", "true");
+            std::env::set_var("ACTIONS_RUNTIME_TOKEN", "actions-runtime-token-value");
+        }
+        match CacheBackend::detect() {
+            CacheBackend::GitHubActionsCache {
+                base_url, version, ..
+            } => {
+                assert_eq!(base_url, "https://example.invalid/results");
+                assert_eq!(version, CacheApiVersion::V2);
+            }
+            other => panic!("expected GitHubActionsCache, got {other:?}"),
+        }
+        unsafe {
+            clear_cache_env();
+        }
+    }
+
+    #[tokio::test]
+    async fn detect_prefers_v1_url_over_results_url_without_the_v2_flag() {
+        // Mirrors actions/toolkit's own getCacheServiceVersion: V2 requires
+        // the explicit opt-in flag even when $ACTIONS_RESULTS_URL is set —
+        // without it, stay on V1 (falling back to $ACTIONS_RESULTS_URL only
+        // if $ACTIONS_CACHE_URL itself is absent).
+        let _guard = ENV_LOCK.lock().await;
+        unsafe {
+            clear_cache_env();
+            std::env::set_var("ACTIONS_CACHE_URL", "https://example.invalid/cache");
+            std::env::set_var("ACTIONS_RESULTS_URL", "https://example.invalid/results");
+            std::env::set_var("ACTIONS_RUNTIME_TOKEN", "actions-runtime-token-value");
+        }
+        match CacheBackend::detect() {
+            CacheBackend::GitHubActionsCache {
+                base_url, version, ..
+            } => {
+                assert_eq!(base_url, "https://example.invalid/cache");
+                assert_eq!(version, CacheApiVersion::V1);
             }
             other => panic!("expected GitHubActionsCache, got {other:?}"),
         }
@@ -945,16 +1246,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detect_falls_through_to_none_when_only_actions_results_url_is_set() {
-        // FR-007/T014: `$ACTIONS_RESULTS_URL`-only environments (the newer
-        // Twirp/protobuf results service this crate doesn't implement) must
-        // not be mistaken for `$ACTIONS_CACHE_URL`'s legacy REST API.
+    async fn detect_falls_through_to_none_when_only_actions_results_url_is_set_and_no_token() {
+        // Without $ACTIONS_RUNTIME_TOKEN, no signature is usable regardless
+        // of which URL var is present.
         let _guard = ENV_LOCK.lock().await;
         unsafe {
             clear_cache_env();
             std::env::set_var("ACTIONS_RESULTS_URL", "https://example.invalid/results");
         }
         assert!(matches!(CacheBackend::detect(), CacheBackend::None));
+        unsafe {
+            clear_cache_env();
+        }
+    }
+
+    #[tokio::test]
+    async fn detect_uses_v1_against_results_url_when_only_that_url_and_a_token_are_set() {
+        // $ACTIONS_CACHE_SERVICE_V2 absent means no V2, but $ACTIONS_RESULTS_URL
+        // is still a usable V1 base URL when $ACTIONS_CACHE_URL itself isn't
+        // set — same fallback `actions/toolkit`'s own getCacheServiceURL uses.
+        let _guard = ENV_LOCK.lock().await;
+        unsafe {
+            clear_cache_env();
+            std::env::set_var("ACTIONS_RESULTS_URL", "https://example.invalid/results");
+            std::env::set_var("ACTIONS_RUNTIME_TOKEN", "actions-runtime-token-value");
+        }
+        match CacheBackend::detect() {
+            CacheBackend::GitHubActionsCache {
+                base_url, version, ..
+            } => {
+                assert_eq!(base_url, "https://example.invalid/results");
+                assert_eq!(version, CacheApiVersion::V1);
+            }
+            other => panic!("expected GitHubActionsCache, got {other:?}"),
+        }
         unsafe {
             clear_cache_env();
         }
@@ -970,6 +1295,7 @@ mod tests {
             CacheBackend::GitHubActionsCache {
                 base_url: "https://example.invalid".to_string(),
                 token: "t".to_string(),
+                version: CacheApiVersion::V1,
             }
             .log_line(),
             "cache: using github-actions"
@@ -1027,8 +1353,13 @@ mod tests {
     /// re-detecting from the environment, so this test can exercise a
     /// specific `CacheBackend` value directly.
     async fn restore_cache_backend_for_test(backend: &CacheBackend) -> CacheBackend {
-        if let CacheBackend::GitHubActionsCache { base_url, token } = backend {
-            let client = ActionsCacheClient::new(base_url.clone(), token.clone());
+        if let CacheBackend::GitHubActionsCache {
+            base_url,
+            token,
+            version,
+        } = backend
+        {
+            let client = CacheTransport::new(base_url.clone(), token.clone(), *version);
             let _ = restore_github_actions_cache(&client).await;
         }
         backend.clone()
