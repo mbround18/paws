@@ -2,16 +2,20 @@
 
 Dedicated builder images, one directory per target family, each a plain `Dockerfile`. Most of
 these are `paws release`'s own cross-compilation targets for building `paws` itself (see
-`crates/paws-release/src/lib.rs`); `tauri-linux/`/`tauri-android/`/`java/` are different — they're
-what `paws ci --toolchain tauri`/`tauri-android`/`java`/`kotlin` build _user_ projects against (see
-`crates/paws-tauri`/`crates/paws-java`/`crates/paws-kotlin`), embedded into the `paws` binary
-rather than read from this directory at runtime. `java/` exists for the same "needs multiple
-toolchains combined" reason the others do, just discovered for JVM version selection rather than
-a language combination: it installs JDK 21 *and* JDK 25 side by side, since neither a single
-`eclipse-temurin` pull nor a single JDK pin covers both an old Gradle <=8.10 project and a real
+`crates/paws-release/src/lib.rs`); `tauri-linux/`/`tauri-android/`/`java/`/`rust/` are different —
+they're what `paws ci --toolchain tauri`/`tauri-android`/`java`/`kotlin`/`rust --coverage` build
+_user_ projects against (see `crates/paws-tauri`/`crates/paws-java`/`crates/paws-kotlin`/
+`crates/paws-rust`), embedded into the `paws` binary rather than read from this directory at
+runtime. `java/` exists for the same "needs multiple toolchains combined" reason the others do,
+just discovered for JVM version selection rather than a language combination: it installs JDK 21
+*and* JDK 25 side by side, since neither a single `eclipse-temurin` pull nor a single JDK pin
+covers both an old Gradle <=8.10 project and a real
 `java.toolchain.languageVersion = JavaLanguageVersion.of(25)` declaration — see its own
 Dockerfile's header comment and `docs/ROADMAP.md`'s "Base image version policy" for the full
-finding.
+finding. `rust/` (see `specs/004-rust-coverage/spec.md`) is the first exception to Rust never
+needing a builder image otherwise — it's only used when `--coverage` is passed to
+`paws ci --toolchain rust`; the default (no `--coverage`) pipeline still pulls `rust:1-bookworm`
+directly, unaffected.
 
 Every builder image is labeled with standard OCI annotations (`org.opencontainers.image.*`),
 populated via `--build-args` at build time — see `../compose.yml`.

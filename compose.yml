@@ -241,3 +241,18 @@ services:
       tags:
         - ghcr.io/mbround18/paws-builders:java-${VERSION:-dev}
         - docker.io/mbround18/paws-builders:java-${VERSION:-dev}
+
+  rust:
+    build:
+      context: ./builders/rust
+      args:
+        BUILDER_VERSION: ${VERSION:-dev}
+        BUILDER_REVISION: ${REVISION:-unknown}
+        BUILDER_CREATED: ${CREATED:-unknown}
+      cache_from:
+        - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-rust
+      cache_to:
+        - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-rust,mode=max
+      tags:
+        - ghcr.io/mbround18/paws-builders:rust-${VERSION:-dev}
+        - docker.io/mbround18/paws-builders:rust-${VERSION:-dev}

@@ -443,6 +443,33 @@ actually need bumping over time (`DEFAULT_PYTHON_VERSION`, the shared Temurin pi
 including a real bug caught and fixed in the process — the Python regex, unanchored, also matched
 an unrelated test's deliberately-non-default `"3.11"` literal as a second false dependency.
 
+## Test coverage reporting (`paws ci --coverage`)
+
+Target: an opt-in `--coverage` flag on `paws ci` that runs each toolchain's native coverage tool
+inside the same Dagger pipeline `paws ci` already runs tests through, and prints a summary (with a
+machine-readable report exportable later for upload to a service like Codecov). Tracked here as a
+target list, same spirit as the stack-coverage tables above.
+
+| Toolchain | Coverage tool | Status |
+| --- | --- | --- |
+| Rust (`paws-rust`) | `cargo llvm-cov` | ✅ |
+| Node (`paws-node`) | `c8` / `istanbul` (package-manager-driven, like the existing build/test path) | 📋 |
+| Python (`paws-python`) | `coverage.py` (via `uv run coverage`) | 📋 |
+| Go (`paws-go`) | `go test -cover` (built into the Go toolchain, no extra install) | 📋 |
+| Java/Kotlin (`paws-java`/`paws-kotlin`) | JaCoCo (Maven/Gradle plugin) | 📋 |
+
+Rust (`specs/004-rust-coverage/`) was the deliberate starting point and landed first: a new
+`builders/rust` image, pre-baked with `cargo-llvm-cov`/`llvm-tools-preview` (the first Rust
+builder-image exception, per that spec's Clarifications — every other Rust `paws ci` run still
+pulls plain `rust:1-bookworm` directly). `paws ci --toolchain rust --coverage` runs the existing
+`fmt`/`clippy`/`build`/`test` sequence completely unchanged, then appends a `cargo llvm-cov
+--workspace --summary-only` step — tests execute twice under `--coverage` (once for the pass/fail
+gate, once for the coverage report), a deliberate tradeoff to keep the existing `cargo test` step
+untouched. On a wasm project, `--coverage` is a silent no-op (the wasm pipeline already can't run
+`cargo test` on the host, so there's nothing to measure). This proved out the CLI contract
+(`--coverage` flag shape, `--toolchain`-only gating, report format) the remaining languages, each
+with their own tool and output format, will follow next.
+
 ## MCP + llms.txt
 
 `paws mcp setup` writes/merges an MCP client config (`.mcp.json` for Claude Code by default, or

@@ -23,6 +23,7 @@ members = [
     "crates/paws-flatpak",
     "crates/paws-helm",
     "crates/paws-mcp",
+    "crates/paws-changelog",
 ]
 
 [workspace.package]
@@ -42,3 +43,4 @@ base64 = "0.22"
 schemars = "1"
 rmcp = { version = "3.1", features = ["server", "transport-io", "macros"] }
 gag = "1"
+async-trait = "0.1"

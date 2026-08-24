@@ -133,9 +133,7 @@ impl PackageManager {
     /// LTS concept to track in the first place.
     pub fn base_image(&self) -> &'static str {
         match self {
-            PackageManager::Npm | PackageManager::Yarn | PackageManager::Pnpm => {
-                "node:lts-trixie"
-            }
+            PackageManager::Npm | PackageManager::Yarn | PackageManager::Pnpm => "node:lts-trixie",
             PackageManager::Bun => "oven/bun:1-debian",
         }
     }

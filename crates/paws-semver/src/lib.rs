@@ -303,6 +303,14 @@ pub async fn resolve_last_tag(
                     return None;
                 }
                 let version_part = &tag[candidate_prefix.len()..];
+                // An optional leading "v" survives past the configured
+                // prefix regardless of what that prefix is — the same
+                // double-strip `compute_new_version`'s own tag-ref
+                // shortcut already does below, so a monorepo prefix like
+                // "chart-name-" matches both "chart-name-1.2.0" and
+                // "chart-name-v1.2.0" without the caller having to know
+                // which convention a given tag series used.
+                let version_part = version_part.strip_prefix('v').unwrap_or(version_part);
                 semver::Version::parse(version_part)
                     .ok()
                     .map(|v| (tag.clone(), v))
@@ -552,6 +560,55 @@ mod tests {
         let version = compute_new_version(&tags, &request).await.unwrap();
         // Highest tag is v1.1.0; prefix inferred as "v"; default patch increment.
         assert_eq!(version, "v1.1.1");
+    }
+
+    #[tokio::test]
+    async fn resolve_last_tag_matches_a_prefixed_tag_with_an_embedded_v() {
+        // A monorepo-style prefix like "chart-a-" is a literal string
+        // match, independent of whether the tag series also carries the
+        // "v" convention after it — "chart-a-v1.2.0" must resolve exactly
+        // like "chart-a-1.2.0" would.
+        let tags = FixtureTagSource(vec![
+            "chart-a-v1.0.0".to_string(),
+            "chart-a-v1.2.0".to_string(),
+            "chart-b-v9.0.0".to_string(),
+        ]);
+        let last_tag = resolve_last_tag(&tags, Some("chart-a-".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(last_tag.tag, "chart-a-v1.2.0");
+        assert_eq!(last_tag.prefix, "chart-a-");
+    }
+
+    #[tokio::test]
+    async fn resolve_last_tag_matches_a_prefixed_tag_without_a_v() {
+        let tags = FixtureTagSource(vec![
+            "chart-a-1.0.0".to_string(),
+            "chart-a-1.2.0".to_string(),
+            "chart-b-9.0.0".to_string(),
+        ]);
+        let last_tag = resolve_last_tag(&tags, Some("chart-a-".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(last_tag.tag, "chart-a-1.2.0");
+        assert_eq!(last_tag.prefix, "chart-a-");
+    }
+
+    #[tokio::test]
+    async fn resolve_last_tag_picks_the_highest_version_across_mixed_v_and_no_v_tags() {
+        // A tag series that changed convention mid-history (some tags with
+        // "v", some without) must still compare by parsed version, not by
+        // string, and pick the true highest regardless of which form it
+        // used.
+        let tags = FixtureTagSource(vec![
+            "chart-a-1.0.0".to_string(),
+            "chart-a-v2.0.0".to_string(),
+            "chart-a-1.5.0".to_string(),
+        ]);
+        let last_tag = resolve_last_tag(&tags, Some("chart-a-".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(last_tag.tag, "chart-a-v2.0.0");
     }
 
     #[tokio::test]

@@ -12,9 +12,37 @@
 //! default on that image (`cargo fmt --version` fails with "'cargo-fmt' is
 //! not installed for the toolchain" until that component is added).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
 
 pub const BASE_IMAGE: &str = "rust:1-bookworm";
+
+/// The `builders/rust` Dockerfile (`rust:1-bookworm` + `cargo-llvm-cov` +
+/// `llvm-tools-preview`), embedded at compile time from
+/// `builders/rust/Dockerfile`. Only used when `--coverage` is set — see
+/// [`dagger_pipeline_args`]'s doc comment. `paws ci` runs from inside
+/// whatever *target* repo it's checking, not from inside `paws`'s own
+/// source tree, so a repo-relative `builders/rust` path would resolve
+/// against the wrong directory once `paws` is used as a general-purpose
+/// tool (same reasoning `paws-tauri`'s/`paws-java`'s own embedded
+/// Dockerfiles document) — embedding + materializing to a temp dir (see
+/// [`write_builder_dockerfile`]) makes this correct regardless of where
+/// `paws` is invoked from.
+const RUST_COVERAGE_DOCKERFILE: &str = include_str!("../../../builders/rust/Dockerfile");
+
+/// Writes the embedded `builders/rust` Dockerfile to a temp directory and
+/// returns that directory's path, suitable for [`dagger_pipeline_args`]'s
+/// `builder_dir` argument — mirrors `paws-tauri`'s/`paws-java`'s own
+/// same-named function.
+pub fn write_builder_dockerfile() -> Result<PathBuf> {
+    let dir = std::env::temp_dir().join("paws-builders").join("rust");
+    std::fs::create_dir_all(&dir)
+        .context("failed to create temp dir for the rust builder Dockerfile")?;
+    std::fs::write(dir.join("Dockerfile"), RUST_COVERAGE_DOCKERFILE)
+        .context("failed to write the rust builder Dockerfile")?;
+    Ok(dir)
+}
 
 /// The target `wasm-pack`/`wasm-bindgen` crates build for — used both to
 /// detect a wasm project and to pass `--target` to clippy/build.
@@ -55,17 +83,57 @@ pub fn is_wasm_project(dir: &Path) -> bool {
 /// test` — a `cdylib` compiled for wasm32 can't run on the host, and
 /// exercising it needs `wasm-bindgen-test-runner` plus a JS engine, which
 /// is out of scope for this generic gate.
-pub fn dagger_pipeline_args(source_dir: &str, is_wasm: bool) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "container".into(),
-        "from".into(),
-        format!("--address={BASE_IMAGE}"),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={source_dir}"),
-        "with-workdir".into(),
-        "--path=/src".into(),
-    ];
+///
+/// `coverage` (default `false`) is `paws ci --toolchain rust --coverage`'s
+/// opt-in (specs/004-rust-coverage/spec.md): when set on a non-wasm
+/// project, the opening chain builds `builders/rust` (via
+/// `builder_dir`, from [`write_builder_dockerfile`]) instead of pulling
+/// `BASE_IMAGE` directly, and one extra step —
+/// `cargo llvm-cov --workspace --summary-only` — is appended *after* the
+/// existing `cargo test --verbose` step, which is otherwise completely
+/// unchanged (spec's Clarifications: tests execute once for the pass/fail
+/// gate via `cargo test`, then again via `cargo llvm-cov` purely for the
+/// coverage report). `builder_dir` is required (and only used) when
+/// `coverage` is true; pass `None` when it's false. On a wasm project,
+/// `coverage` is a silent no-op (research.md R5 in that spec) — the wasm
+/// pipeline already can't run `cargo test` on the host, so there's nothing
+/// for `cargo llvm-cov` to measure; the wasm sequence runs exactly as it
+/// does without `--coverage`, no extra step, no error.
+///
+/// Omitting `coverage` (`false`, `builder_dir: None`) reproduces this
+/// function's exact pre-`--coverage` output — a regression test pins this.
+pub fn dagger_pipeline_args(
+    source_dir: &str,
+    is_wasm: bool,
+    coverage: bool,
+    builder_dir: Option<&str>,
+) -> Vec<String> {
+    let mut args: Vec<String> = if coverage && !is_wasm {
+        let builder_dir = builder_dir
+            .expect("builder_dir must be Some(..) when coverage is true (see doc comment)");
+        vec![
+            "host".into(),
+            "directory".into(),
+            format!("--path={builder_dir}"),
+            "docker-build".into(),
+            "with-mounted-directory".into(),
+            "--path=/src".into(),
+            format!("--source={source_dir}"),
+            "with-workdir".into(),
+            "--path=/src".into(),
+        ]
+    } else {
+        vec![
+            "container".into(),
+            "from".into(),
+            format!("--address={BASE_IMAGE}"),
+            "with-mounted-directory".into(),
+            "--path=/src".into(),
+            format!("--source={source_dir}"),
+            "with-workdir".into(),
+            "--path=/src".into(),
+        ]
+    };
 
     let mut push_exec = |command_args: &[&str]| {
         args.push("with-exec".into());
@@ -92,6 +160,9 @@ pub fn dagger_pipeline_args(source_dir: &str, is_wasm: bool) -> Vec<String> {
         push_exec(&["cargo", "clippy"]);
         push_exec(&["cargo", "build", "--verbose"]);
         push_exec(&["cargo", "test", "--verbose"]);
+        if coverage {
+            push_exec(&["cargo", "llvm-cov", "--workspace", "--summary-only"]);
+        }
     }
 
     args.push("stdout".into());
@@ -125,7 +196,7 @@ mod tests {
 
     #[test]
     fn pipeline_uses_the_rust_bookworm_image() {
-        let args = dagger_pipeline_args("/host/src", false);
+        let args = dagger_pipeline_args("/host/src", false, false, None);
         assert_eq!(args[0], "container");
         assert_eq!(args[1], "from");
         assert_eq!(args[2], "--address=rust:1-bookworm");
@@ -133,7 +204,7 @@ mod tests {
 
     #[test]
     fn pipeline_runs_the_full_fmt_clippy_build_test_sequence_in_order() {
-        let args = dagger_pipeline_args("/host/src", false);
+        let args = dagger_pipeline_args("/host/src", false, false, None);
         let expected = [
             "--args=rustup,component,add,rustfmt,clippy",
             "--args=cargo,fmt,--,--check",
@@ -150,6 +221,57 @@ mod tests {
             "steps must run in order: {positions:?}"
         );
         assert_eq!(args.last(), Some(&"stdout".to_string()));
+    }
+
+    // T004 (SC-equivalent byte-identical-default guarantee): already covered
+    // by `pipeline_uses_the_rust_bookworm_image`/
+    // `pipeline_runs_the_full_fmt_clippy_build_test_sequence_in_order` above,
+    // now exercising the extended 4-arg signature with `coverage`/
+    // `builder_dir` defaulted off — both passed unmodified after T003's
+    // signature extension, confirming byte-identical default output.
+
+    #[test]
+    fn coverage_appends_a_cargo_llvm_cov_step_after_cargo_test() {
+        let args = dagger_pipeline_args("/host/src", false, true, Some("/tmp/builder"));
+        let test_pos = args
+            .iter()
+            .position(|a| a == "--args=cargo,test,--verbose")
+            .unwrap();
+        let coverage_pos = args
+            .iter()
+            .position(|a| a == "--args=cargo,llvm-cov,--workspace,--summary-only")
+            .unwrap();
+        assert!(
+            test_pos < coverage_pos,
+            "cargo llvm-cov must run after cargo test, not replace or precede it"
+        );
+        // cargo test's own step is untouched — same literal args as the
+        // non-coverage path.
+        assert!(args.contains(&"--args=cargo,test,--verbose".to_string()));
+    }
+
+    #[test]
+    fn coverage_swaps_the_opening_chain_to_docker_build_against_the_builder_dir() {
+        let args = dagger_pipeline_args("/host/src", false, true, Some("/tmp/builder"));
+        assert_eq!(args[0], "host");
+        assert_eq!(args[1], "directory");
+        assert_eq!(args[2], "--path=/tmp/builder");
+        assert_eq!(args[3], "docker-build");
+        assert!(!args.iter().any(|a| a == "--address=rust:1-bookworm"));
+    }
+
+    #[test]
+    fn coverage_is_a_noop_on_a_wasm_project() {
+        let with_coverage = dagger_pipeline_args("/host/src", true, true, Some("/tmp/builder"));
+        let without_coverage = dagger_pipeline_args("/host/src", true, false, None);
+        assert_eq!(
+            with_coverage, without_coverage,
+            "--coverage must not change the wasm pipeline's output at all"
+        );
+        assert!(
+            !with_coverage.iter().any(|a| a.contains("llvm-cov")),
+            "no coverage step should appear on a wasm project"
+        );
     }
 
     #[test]
@@ -176,7 +298,7 @@ mod tests {
 
     #[test]
     fn wasm_pipeline_adds_the_target_gates_clippy_and_skips_cargo_test() {
-        let args = dagger_pipeline_args("/host/src", true);
+        let args = dagger_pipeline_args("/host/src", true, false, None);
         let expected = [
             "--args=rustup,target,add,wasm32-unknown-unknown",
             "--args=rustup,component,add,rustfmt,clippy",

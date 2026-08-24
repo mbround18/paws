@@ -31,6 +31,7 @@ provider-specific scripting.
 | `paws ci` | Build, lint, and test a Node, Rust, Python, Tauri, or Flatpak project |
 | `paws semver` | Compute the next version from PR labels, branch name, or an explicit bump; `--push` tags and pushes it |
 | `paws docker` | Build/tag/publish a container image to docker.io, ghcr.io, and (natively) any other registry |
+| `paws changelog` | Generate a `CHANGELOG.md` entry from commit/PR history between two refs; `--commit` writes it back to the repo |
 | `paws audit` | Run a security/compliance scanner suite and summarize the findings |
 | `paws provision` | Install multiple toolchains (Rust, Node, Python, ...) concurrently, not one at a time |
 | `paws docs` | Build workspace documentation |

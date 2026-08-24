@@ -80,6 +80,7 @@ jobs:
           - tauri-android
           - flatpak
           - java
+          - rust
     env:
       VERSION: ${{ inputs.tag || github.ref_name }}
       REVISION: ${{ github.sha }}

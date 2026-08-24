@@ -70,6 +70,9 @@ mod field_defaults {
     pub fn paws_workflow_path() -> String {
         ".github/workflows/paws.yml".to_string()
     }
+    pub fn changelog_path() -> String {
+        paws_core::DEFAULT_CHANGELOG_PATH.to_string()
+    }
 }
 
 /// Detects which of the ecosystems `paws-provision` knows about are needed in
@@ -246,6 +249,11 @@ pub enum Commands {
     /// Publish a package to its registry (`--target rust-crate` for
     /// crates.io today).
     Publish(PublishArgs),
+    /// Generate a `CHANGELOG.md` entry from commit/PR history between two
+    /// refs — a `paws`-native replacement for `mbround18/auto` (and
+    /// similar changelog actions), standalone so it can be run on its own
+    /// (e.g. to preview an entry) or chained after `paws semver --push`.
+    Changelog(ChangelogArgs),
 }
 
 #[derive(Subcommand)]
@@ -391,6 +399,16 @@ pub struct CiArgs {
     #[arg(long, value_delimiter = ',')]
     #[serde(default)]
     pub targets: Vec<String>,
+    /// Also run `cargo llvm-cov` after the normal test step and print a
+    /// coverage summary — only valid with `--toolchain rust`. Builds
+    /// against a dedicated `builders/rust` image (pre-installed
+    /// `cargo-llvm-cov`) instead of pulling `rust:1-bookworm` directly;
+    /// the default (flag omitted) pipeline is unaffected. A no-op on a
+    /// wasm project (`cargo test` is already skipped there for the same
+    /// reason coverage can't be measured).
+    #[arg(long)]
+    #[serde(default)]
+    pub coverage: bool,
 }
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
@@ -486,6 +504,43 @@ pub struct DockerArgs {
     #[arg(long)]
     #[serde(default)]
     pub silent: bool,
+    /// Also publish `major` and `major.minor` rollup tags (e.g. `:3` and
+    /// `:3.2` alongside `:v3.2.1`) for release-quality version tags — the
+    /// pattern consumers pinning to a major version for stability need.
+    /// Gated identically to `--with-latest`: only on a real (non-prerelease)
+    /// version tag build. Off by default; omitting this flag produces
+    /// byte-identical output to before this flag existed. This is a
+    /// `paws`-native tag scheme, not a byte-for-byte port of
+    /// `crazy-max/ghaction-docker-meta`'s semver tag output.
+    #[arg(long)]
+    #[serde(default)]
+    pub tag_rollup: bool,
+    /// Also include a `sha-<sha>` tag unconditionally, alongside whatever
+    /// other tags this build already produces — not only as the fallback
+    /// primary tag when no version/ref-based tag applies (that fallback
+    /// behavior is unaffected by this flag). Only produces a tag when
+    /// `--version` is itself sha-shaped.
+    #[arg(long)]
+    #[serde(default)]
+    pub tag_sha: bool,
+    /// On a branch-push build (not a tag, not a PR, not a scheduled run),
+    /// also tag with the branch name (`/` and other non-tag-safe
+    /// characters replaced with `-`).
+    #[arg(long)]
+    #[serde(default)]
+    pub tag_branch: bool,
+    /// On a `pull_request`-triggered build, also tag with `pr-<number>`,
+    /// where the number is parsed from `$GITHUB_REF`
+    /// (`refs/pull/<number>/merge`) — no separate PR-number input needed.
+    #[arg(long)]
+    #[serde(default)]
+    pub tag_pr: bool,
+    /// On a `schedule`-triggered build, also tag with the literal tag
+    /// `schedule` (a stable, overwritable pointer, like `:latest` —  not a
+    /// timestamped/nightly-dated tag).
+    #[arg(long)]
+    #[serde(default)]
+    pub tag_schedule: bool,
 }
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
@@ -513,6 +568,44 @@ pub struct PublishArgs {
     #[arg(long)]
     #[serde(default)]
     pub silent: bool,
+}
+
+#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct ChangelogArgs {
+    /// The version this changelog entry is for, e.g. "v1.3.0".
+    #[arg(long)]
+    pub version: String,
+    /// Overrides the auto-resolved previous ref/tag that starts the commit
+    /// range. Falls back to the same prefix-aware last-tag resolution
+    /// `paws semver` already implements (see --prefix).
+    #[arg(long)]
+    #[serde(default)]
+    pub previous_ref: Option<String>,
+    /// Prefix used to filter/resolve the previous tag, e.g. "chart-name-"
+    /// — same meaning as `paws semver --prefix`, only used when
+    /// --previous-ref is omitted.
+    #[arg(long)]
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// Path to the target CHANGELOG.md, relative to the current directory.
+    #[arg(long, default_value = "CHANGELOG.md")]
+    #[serde(default = "field_defaults::changelog_path")]
+    pub output: String,
+    /// Also commit the updated CHANGELOG.md back to --branch via the
+    /// GitHub Contents API, with a commit message carrying a `[skip ci]`
+    /// loop-avoidance marker. Off by default — without this flag, only the
+    /// local file is written (and the rendered entry printed to stdout).
+    #[arg(long)]
+    #[serde(default)]
+    pub commit: bool,
+    /// "owner/repo" to operate against. Falls back to $GITHUB_REPOSITORY.
+    #[arg(long)]
+    #[serde(default)]
+    pub repository: Option<String>,
+    /// Branch to commit to. Only used with --commit.
+    #[arg(long, default_value = "main")]
+    #[serde(default = "field_defaults::main_branch")]
+    pub branch: String,
 }
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
@@ -708,6 +801,7 @@ pub async fn execute(command: Commands) -> anyhow::Result<()> {
         Commands::Workflow(WorkflowCommand::Generate(args)) => run_workflow_generate(args).await,
         Commands::Auth(AuthCommand::GithubApp(args)) => run_auth_github_app(args).await,
         Commands::Publish(args) => run_publish(args).await,
+        Commands::Changelog(args) => run_changelog(args).await,
         Commands::Mcp(McpCommand::Setup(args)) => mcp_setup::run_mcp_setup(args).await,
         Commands::Mcp(McpCommand::Serve(_)) => anyhow::bail!(
             "`paws mcp serve` must be invoked through the `paws` binary directly, not through \
@@ -722,10 +816,14 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
         verbose,
         silent,
         targets,
+        coverage,
     } = args;
 
     if !targets.is_empty() && toolchain.as_deref() != Some("go") {
         anyhow::bail!("--targets is only valid with --toolchain go");
+    }
+    if coverage && toolchain.as_deref() != Some("rust") {
+        anyhow::bail!("--coverage is only valid with --toolchain rust");
     }
 
     // FR-015: provisioning must go through the same concurrent path as
@@ -844,15 +942,34 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
             }
             let is_wasm = paws_rust::is_wasm_project(&dir);
             println!(
-                "ci: rust project{} ({})",
+                "ci: rust project{}{} ({})",
                 if is_wasm {
                     " (wasm32-unknown-unknown)"
                 } else {
                     ""
                 },
+                if coverage && !is_wasm {
+                    " + coverage"
+                } else {
+                    ""
+                },
                 dir.display()
             );
-            let args = paws_rust::dagger_pipeline_args(&dir.to_string_lossy(), is_wasm);
+            let builder_dir = if coverage && !is_wasm {
+                Some(
+                    paws_rust::write_builder_dockerfile()
+                        .context("failed to materialize the rust builder Dockerfile")?,
+                )
+            } else {
+                None
+            };
+            let builder_dir_str = builder_dir.as_ref().map(|d| d.to_string_lossy());
+            let args = paws_rust::dagger_pipeline_args(
+                &dir.to_string_lossy(),
+                is_wasm,
+                coverage,
+                builder_dir_str.as_deref(),
+            );
             run_dagger_core(&args, silent).await?;
             println!("ci: rust build/test succeeded");
         }
@@ -977,6 +1094,11 @@ pub async fn run_docker(args: DockerArgs) -> anyhow::Result<()> {
         ghcr_username,
         registry_username,
         silent,
+        tag_rollup,
+        tag_sha,
+        tag_branch,
+        tag_pr,
+        tag_schedule,
     } = args;
 
     let image = image
@@ -1003,6 +1125,11 @@ pub async fn run_docker(args: DockerArgs) -> anyhow::Result<()> {
             with_latest,
             target: target.clone(),
             prepend_target,
+            tag_rollup,
+            tag_sha,
+            tag_branch,
+            tag_pr,
+            tag_schedule,
         },
         &DockerGithubContext {
             workspace: workspace.clone(),
@@ -1316,6 +1443,58 @@ pub async fn run_semver(args: SemverArgs) -> anyhow::Result<()> {
             .await
             .with_context(|| format!("failed to push tag/release {version}"))?;
         eprintln!("pushed tag {version} and created its release");
+    }
+
+    Ok(())
+}
+
+pub async fn run_changelog(args: ChangelogArgs) -> anyhow::Result<()> {
+    let ChangelogArgs {
+        version,
+        previous_ref,
+        prefix,
+        output,
+        commit,
+        repository,
+        branch,
+    } = args;
+
+    let (owner, repo, token) = if let Some(repository) = repository {
+        let (owner, repo) = repository.split_once('/').ok_or_else(|| {
+            anyhow::anyhow!("--repository must be \"owner/repo\", got {repository}")
+        })?;
+        let token = paws_environment::resolve_github_token(owner, repo).await?;
+        (owner.to_string(), repo.to_string(), token)
+    } else {
+        let ctx = paws_environment::CiContext::detect()
+            .await
+            .context("paws changelog needs $GITHUB_REPOSITORY (or --repository)")?;
+        (ctx.owner, ctx.repo, ctx.token)
+    };
+
+    let tag_source = GitHubGraphQlTagSource {
+        owner: owner.clone(),
+        repo: repo.clone(),
+        token: token.clone(),
+    };
+    let previous_ref =
+        paws_changelog::resolve_previous_ref(&tag_source, previous_ref, prefix).await?;
+
+    let provider =
+        paws_changelog::GitHubHistoryProvider::new(owner.clone(), repo.clone(), token.clone());
+    let date = paws_changelog::today_iso_date();
+    let entry =
+        paws_changelog::build_entry(&provider, &version, &date, &previous_ref, &version).await?;
+
+    let rendered = paws_changelog::append_to_file(std::path::Path::new(&output), &entry).await?;
+    println!("{rendered}");
+
+    if commit {
+        let client = paws_release::GitHubReleaseClient::new(owner, repo, token);
+        paws_changelog::commit_back(&client, &output, &branch)
+            .await
+            .with_context(|| format!("failed to commit {output}@{branch}"))?;
+        eprintln!("changelog: committed {output}@{branch}");
     }
 
     Ok(())
@@ -2149,6 +2328,45 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    // T009: `--coverage` outside `--toolchain rust` fails fast, before any
+    // Dagger/Docker interaction — the gating check runs before
+    // `paws_dagger::ensure_available()`, so this needs no real toolchain
+    // present to test, mirroring `--targets`'s existing out-of-`--toolchain
+    // go` rejection shape.
+    #[tokio::test]
+    async fn coverage_is_rejected_outside_toolchain_rust() {
+        let args = CiArgs {
+            toolchain: Some("node".to_string()),
+            verbose: false,
+            silent: true,
+            targets: vec![],
+            coverage: true,
+        };
+        let err = run_ci(args).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--coverage is only valid with --toolchain rust"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn coverage_with_no_toolchain_at_all_is_also_rejected() {
+        let args = CiArgs {
+            toolchain: None,
+            verbose: false,
+            silent: true,
+            targets: vec![],
+            coverage: true,
+        };
+        let err = run_ci(args).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--coverage is only valid with --toolchain rust"),
+            "unexpected error message: {err}"
+        );
     }
 
     #[test]

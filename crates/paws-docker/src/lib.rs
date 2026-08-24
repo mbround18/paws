@@ -205,6 +205,15 @@ pub struct DockerFactsInput {
     pub with_latest: bool,
     pub target: Option<String>,
     pub prepend_target: bool,
+    /// Opt-in tag-matrix flags (User Stories 1 and 3), flat like
+    /// `with_latest`/`prepend_target` above — all default `false` via
+    /// `Default`, so existing callers using `..Default::default()` see no
+    /// behavior change (FR-005).
+    pub tag_rollup: bool,
+    pub tag_sha: bool,
+    pub tag_branch: bool,
+    pub tag_pr: bool,
+    pub tag_schedule: bool,
 }
 
 /// Inputs mirroring `DockerParityGithubContext`, minus `eventPath` — callers
@@ -248,6 +257,116 @@ fn is_prerelease_version(version: &str) -> bool {
         .any(|marker| version.contains(marker))
 }
 
+/// Extracts `(major, "major.minor")` rollup components from a release
+/// version via an actual semver parse (FR-016) — not string-splitting, so a
+/// version that doesn't decompose cleanly (build metadata, non-3-part
+/// versions, anything `semver::Version::parse` rejects) produces no rollup
+/// tags rather than a malformed one. Build-metadata-suffixed versions
+/// (`1.2.3+abc`) parse successfully under strict semver rules but are
+/// rejected here anyway — spec's Risks section (v3.2.1+abc) explicitly
+/// wants no rollup for those, since a build-tagged version shouldn't move
+/// the major/minor pointer.
+fn rollup_components(version: &str) -> Option<(String, String)> {
+    let trimmed = version.strip_prefix('v').unwrap_or(version);
+    let parsed = semver::Version::parse(trimmed).ok()?;
+    if !parsed.build.is_empty() {
+        return None;
+    }
+    Some((
+        parsed.major.to_string(),
+        format!("{}.{}", parsed.major, parsed.minor),
+    ))
+}
+
+/// Parses a GitHub Actions PR-event `git_ref` (`refs/pull/{number}/merge`)
+/// down to the PR number, so `--tag-pr` (FR-014) needs no new required CLI
+/// input — `paws-docker` already receives `git_ref` (research.md R5).
+fn parse_pr_number(git_ref: &str) -> Option<u64> {
+    git_ref
+        .strip_prefix("refs/pull/")
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
+/// Parses a branch-push `git_ref` (`refs/heads/{branch}`) down to the
+/// branch name, for `--tag-branch` (FR-014) — same "derive from the
+/// existing git_ref field" approach as [`parse_pr_number`].
+fn parse_branch_name(git_ref: &str) -> Option<&str> {
+    git_ref.strip_prefix("refs/heads/")
+}
+
+/// Docker tag components only allow `[A-Za-z0-9_.-]` — a branch name like
+/// `feature/foo` needs its `/` (and anything else outside that set)
+/// replaced before it's usable as a tag, matching the slugging every
+/// branch-tag GitHub Action does for the same reason.
+fn sanitize_tag_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Every tag type a [`generate_tag_matrix`] call can produce, before the
+/// target-prefix and registry-mirroring steps are applied uniformly to all
+/// of them (see that function's doc comment). Internal — `generate_tags`'s
+/// public signature/output stay byte-identical to before this feature
+/// (FR-005); this is the restructuring named in spec.md's Affected
+/// Contracts and plan.md's Design Decision 1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TagKind {
+    /// Today's sole output: a "v"-prefixed version or a "sha-"-prefixed
+    /// git sha, already resolved to its bare tag value (no target prefix
+    /// yet — that's applied uniformly below).
+    Version(String),
+    Latest,
+    RollupMajor(String),
+    RollupMinor(String),
+    Sha(String),
+    BranchRef(String),
+    PrRef(u64),
+    Schedule,
+}
+
+impl TagKind {
+    /// The bare tag value this kind renders to, before the target prefix
+    /// is applied.
+    fn bare_value(&self) -> String {
+        match self {
+            TagKind::Version(v) => v.clone(),
+            TagKind::Latest => "latest".to_string(),
+            TagKind::RollupMajor(m) => m.clone(),
+            TagKind::RollupMinor(m) => m.clone(),
+            TagKind::Sha(s) => format!("sha-{s}"),
+            TagKind::BranchRef(b) => sanitize_tag_component(b),
+            TagKind::PrRef(n) => format!("pr-{n}"),
+            // Literal string, not a timestamp/nightly-date suffix — kept as
+            // a stable, overwritable pointer like `latest` rather than an
+            // ever-growing tag list (plan.md Design Decision 7).
+            TagKind::Schedule => "schedule".to_string(),
+        }
+    }
+}
+
+/// Everything [`generate_tag_matrix`] needs beyond the base
+/// image/version/registries/target inputs [`generate_tags`] already takes —
+/// every field opt-in and `false` by default, so omitting all of them
+/// reproduces [`generate_tags`]'s exact output (FR-005).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TagMatrixOptions {
+    pub with_latest: bool,
+    pub tag_rollup: bool,
+    pub tag_sha: bool,
+    pub tag_branch: bool,
+    pub tag_pr: bool,
+    pub tag_schedule: bool,
+}
+
 fn strip_registry(image: &str) -> String {
     if !image.contains('/') {
         return image.to_string();
@@ -277,7 +396,11 @@ fn is_git_sha(version: &str) -> bool {
     (7..=40).contains(&version.len()) && version.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Ported from `generateTags`.
+/// Ported from `generateTags`. Kept as a thin wrapper over
+/// [`generate_tag_matrix`] with every new opt-in option off — existing
+/// callers (and this crate's own pre-feature tests) see byte-identical
+/// output (FR-005, SC-001); see that function's doc comment for the
+/// restructuring this wraps.
 pub fn generate_tags(
     image: &str,
     version: &str,
@@ -287,6 +410,46 @@ pub fn generate_tags(
     target: &str,
     prepend_target: bool,
 ) -> Vec<String> {
+    generate_tag_matrix(
+        image,
+        version,
+        registries,
+        git_ref,
+        "",
+        target,
+        prepend_target,
+        &TagMatrixOptions {
+            with_latest,
+            ..Default::default()
+        },
+    )
+}
+
+/// Full opt-in tag matrix (spec.md User Stories 1 and 3): builds every
+/// applicable [`TagKind`] first, then runs the *one* target-prefix +
+/// registry-mirroring pass over the resulting tag strings — the same
+/// mirroring [`generate_tags`] always applied to just `version`/`latest`,
+/// now shared by every tag type (FR-003, FR-014; no separate mirroring
+/// implementation per spec's Risks section). `event_name` is required here
+/// (unlike [`generate_tags`]) because branch-push and `schedule` triggers
+/// can share the same `git_ref` shape (`refs/heads/<default-branch>`) and
+/// are only distinguishable by event name.
+// One more flat parameter than `generate_tags` (which already sat at
+// clippy's 7-arg threshold) — `event_name` is required alongside `git_ref`
+// (see doc comment above) and `options` bundles every opt-in flag, so a
+// params-struct wrapper here would just relocate the same flat fields
+// without adding clarity, unlike genuinely grouped data.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_tag_matrix(
+    image: &str,
+    version: &str,
+    registries: &[String],
+    git_ref: &str,
+    event_name: &str,
+    target: &str,
+    prepend_target: bool,
+    options: &TagMatrixOptions,
+) -> Vec<String> {
     let registries: Vec<&String> = registries.iter().filter(|r| !r.is_empty()).collect();
     let target_prefix = if prepend_target && !target.is_empty() {
         format!("{target}-")
@@ -294,18 +457,58 @@ pub fn generate_tags(
         String::new()
     };
 
-    let version_tag = if version.starts_with('v') {
-        format!("{target_prefix}{version}")
+    let version_value = if version.starts_with('v') {
+        version.to_string()
     } else if is_git_sha(version) {
-        format!("{target_prefix}sha-{version}")
+        format!("sha-{version}")
     } else {
-        format!("{target_prefix}v{version}")
+        format!("v{version}")
     };
-
-    let mut base_tags = vec![format!("{image}:{version_tag}")];
     let is_release_version = git_ref.starts_with("refs/tags/") && !is_prerelease_version(version);
-    if with_latest && is_release_version {
-        base_tags.push(format!("{image}:{target_prefix}latest"));
+
+    let mut kinds = vec![TagKind::Version(version_value)];
+    if options.with_latest && is_release_version {
+        kinds.push(TagKind::Latest);
+    }
+    if options.tag_rollup
+        && is_release_version
+        && let Some((major, minor)) = rollup_components(version)
+    {
+        // Minor before major, matching spec.md's stated order (Acceptance
+        // Scenario 1: "{image}:v3.2.1, {image}:3.2, and {image}:3").
+        kinds.push(TagKind::RollupMinor(minor));
+        kinds.push(TagKind::RollupMajor(major));
+    }
+    if options.tag_sha && is_git_sha(version) {
+        kinds.push(TagKind::Sha(version.to_string()));
+    }
+    if options.tag_branch
+        && event_name != "schedule"
+        && event_name != "pull_request"
+        && let Some(branch) = parse_branch_name(git_ref)
+    {
+        kinds.push(TagKind::BranchRef(branch.to_string()));
+    }
+    if options.tag_pr
+        && event_name == "pull_request"
+        && let Some(number) = parse_pr_number(git_ref)
+    {
+        kinds.push(TagKind::PrRef(number));
+    }
+    if options.tag_schedule && event_name == "schedule" {
+        kinds.push(TagKind::Schedule);
+    }
+
+    // Dedup on the final "image:tag" string, preserving first-occurrence
+    // order — two independently-gated TagKinds can render the same string
+    // (e.g. an already-sha-versioned build with --tag-sha also set), and
+    // Acceptance Scenario 5 requires no duplicates in that case.
+    let mut base_tags = Vec::new();
+    for kind in kinds {
+        let tag = format!("{image}:{target_prefix}{}", kind.bare_value());
+        if !base_tags.contains(&tag) {
+            base_tags.push(tag);
+        }
     }
 
     let image_without_registry = strip_registry(image);
@@ -405,14 +608,22 @@ pub fn resolve_docker_facts(input: &DockerFactsInput, github: &GithubContext) ->
         &github.pr_labels,
     );
 
-    let tags = generate_tags(
+    let tags = generate_tag_matrix(
         &input.image,
         &input.version,
         &input.registries,
-        input.with_latest,
         &github.git_ref,
+        &github.event_name,
         &target,
         input.prepend_target,
+        &TagMatrixOptions {
+            with_latest: input.with_latest,
+            tag_rollup: input.tag_rollup,
+            tag_sha: input.tag_sha,
+            tag_branch: input.tag_branch,
+            tag_pr: input.tag_pr,
+            tag_schedule: input.tag_schedule,
+        },
     );
 
     DockerFacts {
@@ -764,6 +975,387 @@ mod tests {
             false,
         );
         assert_eq!(tags, vec!["app:v1.2.3-rc.1".to_string()]);
+    }
+
+    // T005 (SC-001): fixed-snapshot regression covering the exact same
+    // fixture shapes as the pre-feature `generate_tags` tests above, pinned
+    // to their pre-restructuring output — a byte-identical guardrail
+    // independent of those tests happening to still exist/pass.
+    #[test]
+    fn generate_tags_default_output_is_byte_identical_to_pre_feature_snapshot() {
+        assert_eq!(
+            generate_tags(
+                "ghcr.io/example/app",
+                "1.2.3",
+                &["docker.io/mirror".to_string()],
+                true,
+                "refs/tags/v1.2.3",
+                "",
+                false,
+            ),
+            vec![
+                "ghcr.io/example/app:v1.2.3".to_string(),
+                "docker.io/mirror/example/app:v1.2.3".to_string(),
+                "ghcr.io/example/app:latest".to_string(),
+                "docker.io/mirror/example/app:latest".to_string(),
+            ]
+        );
+        assert_eq!(
+            generate_tags("app", "e4a17f4", &[], true, "refs/heads/main", "", false),
+            vec!["app:sha-e4a17f4".to_string()]
+        );
+        assert_eq!(
+            generate_tags(
+                "app",
+                "1.2.3-rc.1",
+                &[],
+                true,
+                "refs/tags/v1.2.3-rc.1",
+                "",
+                false,
+            ),
+            vec!["app:v1.2.3-rc.1".to_string()]
+        );
+    }
+
+    // --- User Story 1: rollup tags (T007-T013) ---
+
+    #[test]
+    fn tag_rollup_produces_major_and_minor_on_a_release_version() {
+        let tags = generate_tag_matrix(
+            "image",
+            "v3.2.1",
+            &[],
+            "refs/tags/v3.2.1",
+            "push",
+            "",
+            false,
+            &TagMatrixOptions {
+                tag_rollup: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            tags,
+            vec![
+                "image:v3.2.1".to_string(),
+                "image:3.2".to_string(),
+                "image:3".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn tag_rollup_omitted_is_byte_identical_to_generate_tags() {
+        let with_matrix = generate_tag_matrix(
+            "image",
+            "v3.2.1",
+            &[],
+            "refs/tags/v3.2.1",
+            "push",
+            "",
+            false,
+            &TagMatrixOptions::default(),
+        );
+        let baseline = generate_tags("image", "v3.2.1", &[], false, "refs/tags/v3.2.1", "", false);
+        assert_eq!(with_matrix, baseline);
+        assert_eq!(with_matrix, vec!["image:v3.2.1".to_string()]);
+    }
+
+    #[test]
+    fn tag_rollup_produces_nothing_for_a_prerelease_version() {
+        let tags = generate_tag_matrix(
+            "image",
+            "v3.2.1-rc.1",
+            &[],
+            "refs/tags/v3.2.1-rc.1",
+            "push",
+            "",
+            false,
+            &TagMatrixOptions {
+                tag_rollup: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(tags, vec!["image:v3.2.1-rc.1".to_string()]);
+    }
+
+    #[test]
+    fn tag_rollup_produces_nothing_for_build_metadata_or_bare_sha() {
+        let build_metadata = generate_tag_matrix(
+            "image",
+            "v3.2.1+abc",
+            &[],
+            "refs/tags/v3.2.1+abc",
+            "push",
+            "",
+            false,
+            &TagMatrixOptions {
+                tag_rollup: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(build_metadata, vec!["image:v3.2.1+abc".to_string()]);
+
+        let bare_sha = generate_tag_matrix(
+            "image",
+            "e4a17f4",
+            &[],
+            "refs/tags/e4a17f4",
+            "push",
+            "",
+            false,
+            &TagMatrixOptions {
+                tag_rollup: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(bare_sha, vec!["image:sha-e4a17f4".to_string()]);
+    }
+
+    #[test]
+    fn tag_rollup_and_with_latest_together_produce_no_duplicates() {
+        let tags = generate_tag_matrix(
+            "image",
+            "v3.2.1",
+            &[],
+            "refs/tags/v3.2.1",
+            "push",
+            "",
+            false,
+            &TagMatrixOptions {
+                with_latest: true,
+                tag_rollup: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            tags,
+            vec![
+                "image:v3.2.1".to_string(),
+                "image:latest".to_string(),
+                "image:3.2".to_string(),
+                "image:3".to_string(),
+            ]
+        );
+        let unique: std::collections::HashSet<_> = tags.iter().collect();
+        assert_eq!(unique.len(), tags.len());
+    }
+
+    #[test]
+    fn tag_rollup_respects_target_prefix() {
+        let tags = generate_tag_matrix(
+            "image",
+            "v3.2.1",
+            &[],
+            "refs/tags/v3.2.1",
+            "push",
+            "odin",
+            true,
+            &TagMatrixOptions {
+                tag_rollup: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            tags,
+            vec![
+                "image:odin-v3.2.1".to_string(),
+                "image:odin-3.2".to_string(),
+                "image:odin-3".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn tag_rollup_mirrors_across_every_registry() {
+        let tags = generate_tag_matrix(
+            "image",
+            "v3.2.1",
+            &["docker.io/mirror".to_string(), "quay.io".to_string()],
+            "refs/tags/v3.2.1",
+            "push",
+            "",
+            false,
+            &TagMatrixOptions {
+                tag_rollup: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            tags,
+            vec![
+                "image:v3.2.1".to_string(),
+                "docker.io/mirror/image:v3.2.1".to_string(),
+                "quay.io/image:v3.2.1".to_string(),
+                "image:3.2".to_string(),
+                "docker.io/mirror/image:3.2".to_string(),
+                "quay.io/image:3.2".to_string(),
+                "image:3".to_string(),
+                "docker.io/mirror/image:3".to_string(),
+                "quay.io/image:3".to_string(),
+            ]
+        );
+    }
+
+    // --- User Story 3: full tag matrix (T016-T020) ---
+
+    #[test]
+    fn tag_branch_produces_a_branch_derived_tag_on_a_branch_push() {
+        let tags = generate_tag_matrix(
+            "image",
+            "e4a17f4",
+            &["docker.io/mirror".to_string()],
+            "refs/heads/some-branch",
+            "push",
+            "",
+            false,
+            &TagMatrixOptions {
+                tag_branch: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            tags,
+            vec![
+                "image:sha-e4a17f4".to_string(),
+                "docker.io/mirror/image:sha-e4a17f4".to_string(),
+                "image:some-branch".to_string(),
+                "docker.io/mirror/image:some-branch".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn tag_branch_sanitizes_slashes_in_the_branch_name() {
+        let tags = generate_tag_matrix(
+            "image",
+            "e4a17f4",
+            &[],
+            "refs/heads/feature/foo",
+            "push",
+            "",
+            false,
+            &TagMatrixOptions {
+                tag_branch: true,
+                ..Default::default()
+            },
+        );
+        assert!(tags.contains(&"image:feature-foo".to_string()));
+    }
+
+    #[test]
+    fn tag_pr_produces_a_pr_number_tag_on_a_pull_request_build() {
+        let tags = generate_tag_matrix(
+            "image",
+            "e4a17f4",
+            &["docker.io/mirror".to_string()],
+            "refs/pull/42/merge",
+            "pull_request",
+            "",
+            false,
+            &TagMatrixOptions {
+                tag_pr: true,
+                ..Default::default()
+            },
+        );
+        assert!(tags.contains(&"image:pr-42".to_string()));
+        assert!(tags.contains(&"docker.io/mirror/image:pr-42".to_string()));
+    }
+
+    #[test]
+    fn tag_schedule_produces_the_schedule_tag_on_a_scheduled_build() {
+        let tags = generate_tag_matrix(
+            "image",
+            "e4a17f4",
+            &["docker.io/mirror".to_string()],
+            "refs/heads/main",
+            "schedule",
+            "",
+            false,
+            &TagMatrixOptions {
+                tag_schedule: true,
+                ..Default::default()
+            },
+        );
+        assert!(tags.contains(&"image:schedule".to_string()));
+        assert!(tags.contains(&"docker.io/mirror/image:schedule".to_string()));
+        // schedule's git_ref shape (refs/heads/<default-branch>) must not
+        // also produce a branch-ref tag when --tag-branch isn't set.
+        assert!(!tags.iter().any(|t| t == "image:main"));
+    }
+
+    #[test]
+    fn tag_sha_is_unconditional_not_only_a_fallback() {
+        // A real version tag is present (not a bare sha primary tag), but
+        // --tag-sha still adds the sha- tag alongside it (FR-015) — unlike
+        // today's is_git_sha fallback, which only kicks in when there's no
+        // other version to tag with.
+        let tags = generate_tag_matrix(
+            "image",
+            "v3.2.1",
+            &[],
+            "refs/tags/v3.2.1",
+            "push",
+            "",
+            false,
+            &TagMatrixOptions {
+                tag_sha: true,
+                ..Default::default()
+            },
+        );
+        // v3.2.1 isn't itself a sha, so is_git_sha(version) is false and no
+        // sha tag is produced — confirms --tag-sha is gated on the version
+        // actually being sha-shaped, not "always append a literal sha tag".
+        assert_eq!(tags, vec!["image:v3.2.1".to_string()]);
+
+        let sha_build = generate_tag_matrix(
+            "image",
+            "e4a17f4",
+            &[],
+            "refs/heads/main",
+            "push",
+            "",
+            false,
+            &TagMatrixOptions {
+                tag_sha: true,
+                ..Default::default()
+            },
+        );
+        // Version already resolved to "sha-e4a17f4" via the existing
+        // is_git_sha fallback; --tag-sha's own Sha kind renders the same
+        // string, deduped to one tag rather than two identical entries.
+        assert_eq!(sha_build, vec!["image:sha-e4a17f4".to_string()]);
+    }
+
+    #[test]
+    fn full_matrix_combination_produces_no_duplicates_or_cross_type_interference() {
+        let tags = generate_tag_matrix(
+            "image",
+            "v3.2.1",
+            &[],
+            "refs/tags/v3.2.1",
+            "push",
+            "",
+            false,
+            &TagMatrixOptions {
+                with_latest: true,
+                tag_rollup: true,
+                tag_sha: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            tags,
+            vec![
+                "image:v3.2.1".to_string(),
+                "image:latest".to_string(),
+                "image:3.2".to_string(),
+                "image:3".to_string(),
+            ]
+        );
+        let unique: std::collections::HashSet<_> = tags.iter().collect();
+        assert_eq!(unique.len(), tags.len());
     }
 
     #[test]

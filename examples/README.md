@@ -11,6 +11,10 @@ part of `paws` itself.
 
 - `rust-fixture/` — a minimal crate that builds and tests cleanly; the "clean" half of
   `paws ci --toolchain rust`'s acceptance scenario.
+- `rust-coverage-fixture/` — a crate with one deliberately untested branch (`classify`'s
+  `"positive"` arm); the target for `paws ci --toolchain rust --coverage`'s "the tool measures a
+  real gap, not a fixed number" acceptance scenario (`specs/004-rust-coverage/quickstart.md` §4),
+  exercised by `crates/paws-rust/tests/e2e_coverage.rs`.
 - `node-fixture/` — a minimal pnpm-style project; the target for `paws ci --toolchain node`.
 - `node-server-fixture/` — a plain (`Framework::Plain`, no bundler/framework) Node backend server:
   `server.js` exports a real `node:http` server with a `/health` route, and `server.test.js` binds
