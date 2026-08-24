@@ -516,18 +516,11 @@ impl ActionsCacheClientV2 {
             .with_context(|| format!("failed to read Cache Service v2 {method} response body"))?;
         if !status.is_success() {
             // The receiver's error body is a Twirp-standard
-            // `{"code": "...", "msg": "...", "meta": {...}}` (confirmed
-            // live: `{"code":"invalid_argument","msg":"version invalid
-            // length for cache entry version: must be between 1 and 64
-            // characters", ...}` — the bug that caught) — surface `msg` when
-            // present, falling back to the raw body for anything else.
-            // Temporary: full raw body (includes Twirp's `meta`, not just
-            // `msg`) plus the exact request body sent — the version-length
-            // fix didn't change this error at all even though the sent
-            // `version` is confirmed only 16 chars, so the `meta` field
-            // (which the previous msg-only extraction discarded) might
-            // show what's actually being validated.
-            anyhow::bail!("Cache Service v2 {method} failed: {status}: {text} (sent: {body})");
+            // `{"code": "...", "msg": "...", "meta": {...}}` — surface the
+            // raw body (not just `msg`) so `meta` (e.g. `already_exists`'s
+            // conflicting key/version) is visible too, since restore/save
+            // callers only log this, never parse it.
+            anyhow::bail!("Cache Service v2 {method} failed: {status}: {text}");
         }
         serde_json::from_str(&text)
             .with_context(|| format!("failed to parse Cache Service v2 {method} response"))
