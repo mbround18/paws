@@ -101,9 +101,19 @@ impl CacheBackend {
         if std::env::var("DAGGER_CLOUD_TOKEN").is_ok() {
             return CacheBackend::DaggerCloud;
         }
-        if let (Ok(base_url), Ok(token)) = (
-            std::env::var("ACTIONS_CACHE_URL"),
-            std::env::var("ACTIONS_RUNTIME_TOKEN"),
+        // `006-paws-doesn-expose`: a workflow step that exposes these vars
+        // (e.g. `paws-up`'s `actions/github-script` step) may legitimately
+        // export an empty string rather than omitting the var entirely —
+        // treat that the same as absent, not as a valid (but useless)
+        // signature, to avoid a false-positive `GitHubActionsCache` with
+        // an unusable empty `base_url`/`token`.
+        if let (Some(base_url), Some(token)) = (
+            std::env::var("ACTIONS_CACHE_URL")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            std::env::var("ACTIONS_RUNTIME_TOKEN")
+                .ok()
+                .filter(|v| !v.is_empty()),
         ) {
             return CacheBackend::GitHubActionsCache { base_url, token };
         }
@@ -884,6 +894,43 @@ mod tests {
             clear_cache_env();
         }
         assert!(matches!(CacheBackend::detect(), CacheBackend::None));
+    }
+
+    #[tokio::test]
+    async fn detect_falls_through_to_none_when_both_signature_vars_are_empty_strings() {
+        // FR-007/006-paws-doesn-expose: a step exporting the vars as `""`
+        // (e.g. `paws-up`'s runner-vars step in a context without real
+        // cache-service access) must not be mistaken for a real signature.
+        let _guard = ENV_LOCK.lock().await;
+        unsafe {
+            clear_cache_env();
+            std::env::set_var("ACTIONS_CACHE_URL", "");
+            std::env::set_var("ACTIONS_RUNTIME_TOKEN", "");
+        }
+        assert!(matches!(CacheBackend::detect(), CacheBackend::None));
+        unsafe {
+            clear_cache_env();
+        }
+    }
+
+    #[tokio::test]
+    async fn detect_falls_through_to_none_when_one_signature_var_is_an_empty_string() {
+        let _guard = ENV_LOCK.lock().await;
+        unsafe {
+            clear_cache_env();
+            std::env::set_var("ACTIONS_CACHE_URL", "https://example.invalid/cache");
+            std::env::set_var("ACTIONS_RUNTIME_TOKEN", "");
+        }
+        assert!(matches!(CacheBackend::detect(), CacheBackend::None));
+        unsafe {
+            clear_cache_env();
+            std::env::set_var("ACTIONS_CACHE_URL", "");
+            std::env::set_var("ACTIONS_RUNTIME_TOKEN", "actions-runtime-token-value");
+        }
+        assert!(matches!(CacheBackend::detect(), CacheBackend::None));
+        unsafe {
+            clear_cache_env();
+        }
     }
 
     #[tokio::test]

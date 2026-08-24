@@ -5,6 +5,10 @@ description: >-
   and installs the dagger CLI via `paws init` (most paws subcommands need
   it). Composite (not Docker-based) so paws's own Dagger calls talk to the
   runner's real Docker daemon directly, with no Docker-in-Docker nesting.
+  Also exposes the GitHub Actions cache runtime vars (via a pinned
+  `actions/github-script` step) so `paws docker`/`paws ci`'s Dagger build
+  cache can actually activate - the one non-`paws` action dependency this
+  composite carries.
 branding:
   icon: "download"
   color: "green"
@@ -156,6 +160,26 @@ runs:
         # actually runs, not just that the download succeeded" standard the
         # release pipeline itself holds every binary to.
         "$install_dir/$exe_name" --version
+
+    # Exposes $ACTIONS_RUNTIME_TOKEN/$ACTIONS_CACHE_URL to every later step in this
+    # job via $GITHUB_ENV. GitHub Actions withholds these two vars from a plain
+    # `run:` (bash) step's process environment - they only reach a JS/Node-based
+    # action step, which runs in-process inside the runner's own worker and can
+    # see its real internal environment. Without this step,
+    # `paws_dagger::CacheBackend::detect()` can never select `GitHubActionsCache`;
+    # it always falls through to `None` (a full rebuild, never a broken build -
+    # see paws's 006-paws-doesn-expose spec). If `actions/github-script` (or this
+    # step) ever breaks, the only observed effect is the cache backend silently
+    # staying `None` - nothing else in `paws-up` depends on it. Pinned to a commit
+    # SHA, not a floating tag, since it's the one dependency here that touches a
+    # sensitive runner-issued credential.
+    - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      with:
+        script: |
+          const token = process.env['ACTIONS_RUNTIME_TOKEN'];
+          const url = process.env['ACTIONS_CACHE_URL'];
+          if (token) core.exportVariable('ACTIONS_RUNTIME_TOKEN', token);
+          if (url) core.exportVariable('ACTIONS_CACHE_URL', url);
 
     - if: ${{ inputs.install-dagger == 'true' }}
       shell: bash

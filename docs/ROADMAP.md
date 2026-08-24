@@ -239,6 +239,13 @@ pytest` pipeline shape — no package meant for `uv build`, several separately-s
   calls in the same process. `$ACTIONS_RESULTS_URL`-only environments (the newer Twirp/protobuf
   results service) are a known, explicitly-out-of-scope follow-up — detected but not implemented,
   falls through to no cache rather than a nonfunctional half-implementation.
+  **Update (`specs/006-paws-doesn-expose`)**: `005` shipped `GitHubActionsCache`'s detection and
+  restore/save logic, but `$ACTIONS_CACHE_URL`/`$ACTIONS_RUNTIME_TOKEN` never actually reached a
+  `paws-up`-provisioned job's process environment — GitHub Actions withholds both from a plain
+  bash `run:` step, so `CacheBackend::detect()` always resolved `None` in practice. `paws-up`
+  (`actions/paws-up/action.yml`) now runs a pinned `actions/github-script` step before `paws
+  init` that exports both vars to `$GITHUB_ENV` when present, closing the gap with no new
+  consumer-facing setup step required.
 - **`paws docs --provider`** (2026-08-23, `specs/005-close-remaining-cli`): `paws docs` now
   actually publishes, closing the gap where `--help` claimed GitHub Pages publishing that didn't
   exist. `--provider github-pages` (comma-delimited, multi-provider capable) builds `target/doc`
