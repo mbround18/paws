@@ -510,8 +510,13 @@ impl ActionsCacheClientV2 {
             let msg = serde_json::from_str::<serde_json::Value>(&text)
                 .ok()
                 .and_then(|v| v.get("msg").and_then(|m| m.as_str()).map(String::from));
+            // Temporary: also echo the exact request body sent, to confirm
+            // whether `version` genuinely reached the receiver as the
+            // expected short hash — this error persisted unchanged across
+            // the fix that was supposed to shorten it, which needs
+            // explaining before guessing further.
             anyhow::bail!(
-                "Cache Service v2 {method} failed: {status}: {}",
+                "Cache Service v2 {method} failed: {status}: {} (sent: {body})",
                 msg.unwrap_or(text)
             );
         }
