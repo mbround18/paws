@@ -132,8 +132,41 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: paws up (installs dagger via this branch's own paws-up)
-        uses: ./actions/paws-up
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry/build
+        uses: Swatinem/rust-cache@v2
+
+      # Builds the `paws` binary under test from *this branch's own source*,
+      # not a published release — actions/paws-up (used elsewhere for real
+      # consumers) always installs the latest release, which lags whatever
+      # cache-backend fix this very commit is trying to validate. Using a
+      # release binary here would make this job structurally unable to
+      # catch a regression (or confirm a fix) until *after* a release was
+      # already cut from it.
+      - name: Build paws
+        run: cargo build -p paws-cli
+
+      - name: Put target/debug on PATH
+        run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
+
+      - name: Install dagger CLI
+        run: paws init
+
+      # Exposes $ACTIONS_RUNTIME_TOKEN/$ACTIONS_CACHE_URL to later `run:` (bash)
+      # steps in this job — GitHub Actions withholds them from a plain bash
+      # step's process environment; only a JS/Node-based action step can see
+      # them. Mirrors actions/paws-up's own step (that action isn't used in
+      # this job since it would download a release binary instead of using
+      # the one just built above).
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const token = process.env['ACTIONS_RUNTIME_TOKEN'];
+            const url = process.env['ACTIONS_CACHE_URL'];
+            if (token) core.exportVariable('ACTIONS_RUNTIME_TOKEN', token);
+            if (url) core.exportVariable('ACTIONS_CACHE_URL', url);
 
       - name: paws docker (cold run)
         id: run
@@ -161,8 +194,30 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: paws up (installs dagger via this branch's own paws-up)
-        uses: ./actions/paws-up
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry/build
+        uses: Swatinem/rust-cache@v2
+
+      # Same rationale as the cold job above: build from source, not a
+      # published release, so this validates the fix actually on this branch.
+      - name: Build paws
+        run: cargo build -p paws-cli
+
+      - name: Put target/debug on PATH
+        run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
+
+      - name: Install dagger CLI
+        run: paws init
+
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const token = process.env['ACTIONS_RUNTIME_TOKEN'];
+            const url = process.env['ACTIONS_CACHE_URL'];
+            if (token) core.exportVariable('ACTIONS_RUNTIME_TOKEN', token);
+            if (url) core.exportVariable('ACTIONS_CACHE_URL', url);
 
       - name: paws docker (warm run, same unchanged Dockerfile)
         id: run
