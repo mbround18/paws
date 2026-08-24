@@ -34,6 +34,7 @@ Build and test a language target (node, rust, python, tauri, tauri-android, ...)
 - `--verbose` — Print per-ecosystem provisioning start/elapsed timing to stderr
 - `--silent` — Suppress dagger's live build progress; only print output once the pipeline finishes (or on failure). Default is streamed live
 - `--targets` — Cross-compile to these GOOS/GOARCH pairs instead of the native build, e.g. "linux/amd64,darwin/arm64,windows/amd64" — only valid with `--toolchain go`. Binaries land in `dist/` under the project root; `go test` is skipped for every target (none of them can run in this build container, native or not)
+- `--coverage` — Also run `cargo llvm-cov` after the normal test step and print a coverage summary — only valid with `--toolchain rust`. Builds against a dedicated `builders/rust` image (pre-installed `cargo-llvm-cov`) instead of pulling `rust:1-bookworm` directly; the default (flag omitted) pipeline is unaffected. A no-op on a wasm project (`cargo test` is already skipped there for the same reason coverage can't be measured)
 
 ## paws docker
 
@@ -55,6 +56,11 @@ Build and gate a container image the same way `docker-facts` + `docker-release` 
 - `--ghcr-username` — GHCR username to authenticate publishing with. Falls back to $GHCR_USERNAME. Required (here or via env) to actually push to ghcr.io
 - `--registry-username` — Username(s) for registries in --registries other than docker.io/ghcr.io (Artifactory, a private registry, etc.), as "<registry>=<username>" pairs, comma-separated — e.g. "myco.jfrog.io=deploy-bot". These are built and published natively through Dagger (`Container.withRegistryAuth`), not via the docker.io/ghcr.io-only `dockerRelease` call. The matching token/password is read from an env var derived from the registry: uppercased, every non-alphanumeric character replaced with `_`, suffixed `_TOKEN` — e.g. "myco.jfrog.io" reads $MYCO_JFROG_IO_TOKEN
 - `--silent` — Suppress dagger's live build/publish progress; only print output once each pipeline finishes (or on failure). Default is streamed live
+- `--tag-rollup` — Also publish `major` and `major.minor` rollup tags (e.g. `:3` and `:3.2` alongside `:v3.2.1`) for release-quality version tags — the pattern consumers pinning to a major version for stability need. Gated identically to `--with-latest`: only on a real (non-prerelease) version tag build. Off by default; omitting this flag produces byte-identical output to before this flag existed. This is a `paws`-native tag scheme, not a byte-for-byte port of `crazy-max/ghaction-docker-meta`'s semver tag output
+- `--tag-sha` — Also include a `sha-<sha>` tag unconditionally, alongside whatever other tags this build already produces — not only as the fallback primary tag when no version/ref-based tag applies (that fallback behavior is unaffected by this flag). Only produces a tag when `--version` is itself sha-shaped
+- `--tag-branch` — On a branch-push build (not a tag, not a PR, not a scheduled run), also tag with the branch name (`/` and other non-tag-safe characters replaced with `-`)
+- `--tag-pr` — On a `pull_request`-triggered build, also tag with `pr-<number>`, where the number is parsed from `$GITHUB_REF` (`refs/pull/<number>/merge`) — no separate PR-number input needed
+- `--tag-schedule` — On a `schedule`-triggered build, also tag with the literal tag `schedule` (a stable, overwritable pointer, like `:latest` —  not a timestamped/nightly-dated tag)
 
 ## paws semver
 
@@ -180,6 +186,18 @@ Publish a package to its registry (`--target rust-crate` for crates.io today)
 - `--registry` — Registry to publish to. Defaults to crates.io
 - `--dry-run` — Build/test/package only — skip the actual publish step. Useful for verifying a package is publish-ready without a registry token
 - `--silent` — Suppress dagger's live build progress; only print output once the pipeline finishes (or on failure). Default is streamed live
+
+## paws changelog
+
+Generate a `CHANGELOG.md` entry from commit/PR history between two refs — a `paws`-native replacement for `mbround18/auto` (and similar changelog actions), standalone so it can be run on its own (e.g. to preview an entry) or chained after `paws semver --push`
+
+- `--version` — The version this changelog entry is for, e.g. "v1.3.0"
+- `--previous-ref` — Overrides the auto-resolved previous ref/tag that starts the commit range. Falls back to the same prefix-aware last-tag resolution `paws semver` already implements (see --prefix)
+- `--prefix` — Prefix used to filter/resolve the previous tag, e.g. "chart-name-" — same meaning as `paws semver --prefix`, only used when --previous-ref is omitted
+- `--output` (default: `CHANGELOG.md`) — Path to the target CHANGELOG.md, relative to the current directory
+- `--commit` — Also commit the updated CHANGELOG.md back to --branch via the GitHub Contents API, with a commit message carrying a `[skip ci]` loop-avoidance marker. Off by default — without this flag, only the local file is written (and the rendered entry printed to stdout)
+- `--repository` — "owner/repo" to operate against. Falls back to $GITHUB_REPOSITORY
+- `--branch` (default: `main`) — Branch to commit to. Only used with --commit
 
 ## GitHub Actions
 
