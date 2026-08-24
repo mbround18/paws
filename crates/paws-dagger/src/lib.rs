@@ -72,12 +72,15 @@ pub struct DaggerCall {
 /// only switches to `V2` when the runner also exports
 /// `$ACTIONS_CACHE_SERVICE_V2` (`packages/cache/src/internal/config.ts`,
 /// `getCacheServiceVersion`) — GHES never sets it and stays on `V1`
-/// forever. On github.com today the flag is set and the legacy `V1`
-/// endpoint rejects every call with `400 Bad Request` (confirmed live: see
-/// commit history around 2026-08-24's real-runner CI failures) — GitHub has
-/// been migrating consumers off it. `V2` is therefore the one that actually
-/// works there; `V1` is kept for GHES and any environment that genuinely
-/// only exposes the legacy vars.
+/// forever. `V2` is the one confirmed working end to end on a real
+/// github.com runner (a real save, then a real restore of that exact
+/// archive — 2026-08-24); `V1`'s own real-runner calls also failed during
+/// that same investigation, but every failure found (a wrong request URL,
+/// an oversized `version` field, a response field-name mismatch) was a bug
+/// in this client, not a github.com-side rejection of `V1` itself — so
+/// treat `V1` as "not yet re-verified since those fixes," not as
+/// confirmed-dead. Kept for GHES (where it's the only option) and any
+/// environment that genuinely only exposes the legacy vars.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheApiVersion {
     V1,

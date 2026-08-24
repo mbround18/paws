@@ -173,12 +173,13 @@ runs:
     # spec). `ACTIONS_CACHE_SERVICE_V2` decides whether `detect()` targets
     # the newer Cache Service v2 (Twirp/JSON over `ACTIONS_RESULTS_URL`) or
     # the legacy v1 REST API (`ACTIONS_CACHE_URL`) - github.com sets the
-    # flag today and v1 rejects every call with 400 there, so exposing only
-    # the legacy vars would silently make caching nonfunctional even though
-    # `GitHubActionsCache` gets selected. If `actions/github-script` (or
-    # this step) ever breaks, the only observed effect is the cache backend
-    # silently staying `None` - nothing else in `paws-up` depends on it.
-    # Pinned to a commit SHA, not a floating tag, since it's the one
+    # flag today, and `paws_dagger`'s v2 client is the one confirmed working
+    # end to end on a real runner (a real save, then a real restore of that
+    # exact archive); exposing only the legacy vars would leave `detect()`
+    # falling back to the untested v1 path instead. If `actions/github-script`
+    # (or this step) ever breaks, the only observed effect is the cache
+    # backend silently staying `None` - nothing else in `paws-up` depends on
+    # it. Pinned to a commit SHA, not a floating tag, since it's the one
     # dependency here that touches a sensitive runner-issued credential.
     - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       with:
