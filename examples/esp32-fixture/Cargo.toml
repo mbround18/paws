@@ -1,0 +1,28 @@
+[workspace]
+
+[package]
+name = "esp32-fixture"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+rust-version = "1.82"
+description = "Minimal esp-idf-svc \"blink\" project — the paws ci --toolchain esp32 fixture (see docs/ROADMAP.md's Embedded section)."
+
+[[bin]]
+name = "esp32-fixture"
+harness = false # no built-in test harness on the embedded target — see specs/007-esp32-toolchain
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[dependencies]
+log = "0.4"
+anyhow = "1"
+esp-idf-svc = { version = "0.52", features = ["critical-section"] }
+
+[build-dependencies]
+embuild = "0.33"

@@ -1212,6 +1212,7 @@ dependencies = [
  "paws-docker",
  "paws-docs",
  "paws-environment",
+ "paws-esp32",
  "paws-flatpak",
  "paws-go",
  "paws-helm",
@@ -1284,6 +1285,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "paws-esp32"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "paws-release",
 ]
 
 [[package]]

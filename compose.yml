@@ -256,3 +256,19 @@ services:
       tags:
         - ghcr.io/mbround18/paws-builders:rust-${VERSION:-dev}
         - docker.io/mbround18/paws-builders:rust-${VERSION:-dev}
+
+  esp32:
+    build:
+      context: ./builders/esp32
+      args:
+        BUILDER_VERSION: ${VERSION:-dev}
+        BUILDER_REVISION: ${REVISION:-unknown}
+        BUILDER_CREATED: ${CREATED:-unknown}
+        ESPUP_VERSION: ${ESPUP_VERSION:-0.15.1}
+      cache_from:
+        - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-esp32
+      cache_to:
+        - type=registry,ref=ghcr.io/mbround18/paws-builders:cache-esp32,mode=max
+      tags:
+        - ghcr.io/mbround18/paws-builders:esp32-${VERSION:-dev}
+        - docker.io/mbround18/paws-builders:esp32-${VERSION:-dev}

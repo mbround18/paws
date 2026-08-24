@@ -2,11 +2,12 @@
 
 Dedicated builder images, one directory per target family, each a plain `Dockerfile`. Most of
 these are `paws release`'s own cross-compilation targets for building `paws` itself (see
-`crates/paws-release/src/lib.rs`); `tauri-linux/`/`tauri-android/`/`java/`/`rust/` are different —
-they're what `paws ci --toolchain tauri`/`tauri-android`/`java`/`kotlin`/`rust --coverage` build
-_user_ projects against (see `crates/paws-tauri`/`crates/paws-java`/`crates/paws-kotlin`/
-`crates/paws-rust`), embedded into the `paws` binary rather than read from this directory at
-runtime. `java/` exists for the same "needs multiple toolchains combined" reason the others do,
+`crates/paws-release/src/lib.rs`); `tauri-linux/`/`tauri-android/`/`java/`/`rust/`/`esp32/` are
+different — they're what `paws ci --toolchain tauri`/`tauri-android`/`java`/`kotlin`/
+`rust --coverage`/`esp32` build _user_ projects against (see
+`crates/paws-tauri`/`crates/paws-java`/`crates/paws-kotlin`/`crates/paws-rust`/`crates/paws-esp32`),
+embedded into the `paws` binary rather than read from this directory at runtime. `java/` exists for
+the same "needs multiple toolchains combined" reason the others do,
 just discovered for JVM version selection rather than a language combination: it installs JDK 21
 *and* JDK 25 side by side, since neither a single `eclipse-temurin` pull nor a single JDK pin
 covers both an old Gradle <=8.10 project and a real
@@ -129,3 +130,14 @@ ci --toolchain tauri-android`; see `crates/paws-tauri`. There's no `tauri-ios/` 
 
   Verified for real, end to end, against a genuine app (`mbround18/oled-wallpaper`'s actual
   Flatpak manifest, a heavy wgpu/winit GUI app), not a synthetic fixture.
+- `esp32/` — `rust:1-bookworm` + `espup` (the official ESP Rust toolchain installer — Xtensa-
+  patched `rustc` + the `riscv32im*-esp-espidf` targets, "shell to the real installer" per
+  `docs/ROADMAP.md`'s "How a new stack gets added") + `libclang`/`clang` (`LIBCLANG_PATH` set as a
+  Dockerfile `ENV`, since `esp-idf-sys`'s `bindgen` step needs it and a container can just install
+  it at a known path rather than relying on runtime auto-detection) + `python3`/pip (ESP-IDF's own
+  `embuild`-driven CMake/component build shells out to Python) + `espflash` (`cargo install
+  espflash`, used for *packaging* artifacts — `espflash save-image` — not `espflash flash`, which
+  needs a real USB-attached board no CI runner has). Used by `paws ci --toolchain esp32`; see
+  `crates/paws-esp32` and `specs/007-esp32-toolchain`. Joins the `tauri-android`/`flatpak`/`java`
+  "needs multiple toolchains combined, no single public image provides it" category — plain
+  `rust:1-bookworm` has none of espup's Xtensa toolchain, libclang, or Python.

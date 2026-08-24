@@ -20,6 +20,7 @@ members = [
     "crates/paws-go",
     "crates/paws-java",
     "crates/paws-kotlin",
+    "crates/paws-esp32",
     "crates/paws-publish",
     "crates/paws-flatpak",
     "crates/paws-helm",

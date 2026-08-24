@@ -19,6 +19,7 @@ pub enum Ecosystem {
     Node,
     Python,
     Go,
+    Esp32,
 }
 
 impl Ecosystem {
@@ -28,6 +29,7 @@ impl Ecosystem {
             Ecosystem::Node => "node",
             Ecosystem::Python => "python",
             Ecosystem::Go => "go",
+            Ecosystem::Esp32 => "esp32",
         }
     }
 }
@@ -41,6 +43,7 @@ impl std::str::FromStr for Ecosystem {
             "node" => Ok(Ecosystem::Node),
             "python" => Ok(Ecosystem::Python),
             "go" => Ok(Ecosystem::Go),
+            "esp32" => Ok(Ecosystem::Esp32),
             other => anyhow::bail!("unsupported ecosystem: {other}"),
         }
     }
@@ -230,6 +233,18 @@ pub async fn install_go() -> Result<()> {
     run_command(&go_bin, &["download"]).await
 }
 
+/// Real, idempotent installer for the ESP32 (ESP-IDF/`embuild`) Rust
+/// toolchain via `espup` (Design Decision 6, specs/007-esp32-toolchain) —
+/// the official ESP Rust toolchain installer (Xtensa-patched `rustc` +
+/// `riscv32im*-esp-espidf` targets), same "shell to the real installer,
+/// don't reimplement it" precedent `install_rust`/`install_go` already
+/// follow for `rustup`/`golang.org/dl`. Unlike those, this assumes `espup`
+/// itself is already on PATH (installed via `cargo install espup` — the
+/// same bootstrap assumption `install_go` makes about a base `go` binary).
+pub async fn install_esp32() -> Result<()> {
+    run_command("espup", &["install"]).await
+}
+
 /// Builds a real installer closure for `ecosystem`, matching it to the
 /// concrete `install_*` function above.
 pub fn real_installer(ecosystem: Ecosystem) -> Box<dyn Installer> {
@@ -238,6 +253,7 @@ pub fn real_installer(ecosystem: Ecosystem) -> Box<dyn Installer> {
         Ecosystem::Node => Box::new(install_node),
         Ecosystem::Python => Box::new(install_python),
         Ecosystem::Go => Box::new(install_go),
+        Ecosystem::Esp32 => Box::new(install_esp32),
     }
 }
 
@@ -398,5 +414,36 @@ mod tests {
         install_go()
             .await
             .expect("a second install_go call should be a no-op success, not an error");
+    }
+
+    #[test]
+    fn ecosystem_esp32_round_trips_through_as_str_and_from_str() {
+        assert_eq!(Ecosystem::Esp32.as_str(), "esp32");
+        assert_eq!(
+            "esp32".parse::<Ecosystem>().unwrap(),
+            Ecosystem::Esp32,
+            "Ecosystem::FromStr must recognize \"esp32\""
+        );
+    }
+
+    #[tokio::test]
+    async fn install_esp32_shells_out_to_espup_install_and_fails_clearly_without_it() {
+        // Not asserting success here — `espup` won't be on PATH in most
+        // sandboxes/CI runners for this repo itself (it's only expected to
+        // be present inside `builders/esp32`, per Design Decision 6: "shell
+        // to the real installer", not reimplement it). What this pins down
+        // is that a missing `espup` fails with a clear, actionable error
+        // naming the missing binary, rather than panicking or hanging.
+        if tool_on_path("espup") {
+            install_esp32()
+                .await
+                .expect("install_esp32 should succeed when espup is genuinely on PATH");
+            return;
+        }
+        let err = install_esp32().await.unwrap_err();
+        assert!(
+            err.to_string().contains("espup"),
+            "error should name the missing `espup` binary: {err}"
+        );
     }
 }

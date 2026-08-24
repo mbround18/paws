@@ -417,6 +417,21 @@ pub struct CiArgs {
     #[arg(long)]
     #[serde(default)]
     pub coverage: bool,
+    /// After a successful build, upload the built bootloader
+    /// (`bootloader.bin`) and firmware ELF as assets on the GitHub Release
+    /// matching the current tag ($GITHUB_REF_NAME) — only valid with
+    /// `--toolchain esp32` (mirrors `--coverage`'s existing `--toolchain
+    /// rust`-only gating). Needs $GITHUB_TOKEN/$GH_TOKEN and
+    /// $GITHUB_REPOSITORY set — no new env var name, reusing the same
+    /// convention every other GitHub-Release-touching `paws` subcommand
+    /// already reads (`paws semver --push`, `paws helm --publish`). A
+    /// missing token/tag fails with a clear, actionable error rather than a
+    /// bare API 401. Default (flag omitted): no GitHub API interaction at
+    /// all, same "additive flag changes nothing by default" shape as
+    /// `--coverage`.
+    #[arg(long)]
+    #[serde(default)]
+    pub publish_artifacts: bool,
 }
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
@@ -872,6 +887,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
         silent,
         targets,
         coverage,
+        publish_artifacts,
     } = args;
 
     if !targets.is_empty() && toolchain.as_deref() != Some("go") {
@@ -879,6 +895,9 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
     }
     if coverage && toolchain.as_deref() != Some("rust") {
         anyhow::bail!("--coverage is only valid with --toolchain rust");
+    }
+    if publish_artifacts && toolchain.as_deref() != Some("esp32") {
+        anyhow::bail!("--publish-artifacts is only valid with --toolchain esp32");
     }
 
     // FR-015: provisioning must go through the same concurrent path as
@@ -1123,8 +1142,129 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             run_dagger_core(&args, silent).await?;
             println!("ci: flatpak build succeeded");
         }
+        Some("esp32") => {
+            let dir = std::env::current_dir()?;
+            if !paws_esp32::is_esp32_project(&dir) {
+                anyhow::bail!(
+                    "--toolchain esp32 given, but no esp-idf-sys/esp-idf-svc dependency or \
+                     *-espidf .cargo/config.toml target found in {}",
+                    dir.display()
+                );
+            }
+
+            // ha-kiosk's own firmware/ crate is deliberately NOT a
+            // workspace member of its own build (a heavy, differently-
+            // toolchained embedded target pinned to its own
+            // rust-toolchain.toml — see that repo's root Cargo.toml) but
+            // does sit as a sibling directory next to a real workspace
+            // (firmware-core/, flasher/) — so the search for a
+            // host-testable sibling (Design Decision 3) starts one level
+            // up from the ESP32 project itself, not inside it. Reuses
+            // `paws_publish::find_workspace_root` (same as the `rust-crate`
+            // publish path below) rather than a bare `dir.parent()` guess —
+            // it actually verifies an ancestor declares `[workspace]`
+            // instead of assuming the parent directory is one.
+            let workspace_root = paws_publish::find_workspace_root(&dir);
+            let host_test_dir = workspace_root
+                .as_deref()
+                .and_then(paws_esp32::find_host_testable_sibling);
+
+            let (mount_dir, project_subpath, host_test_subpath) =
+                match (&workspace_root, &host_test_dir) {
+                    (Some(root), Some(sibling)) => {
+                        // `strip_prefix`, not `.file_name()` — a workspace
+                        // member declared with a nested path (e.g.
+                        // `members = ["crates/firmware-core"]`) has to keep
+                        // its full path relative to `root`, or the
+                        // container's `with-workdir` points at a directory
+                        // that doesn't exist.
+                        let project_subpath = dir
+                            .strip_prefix(root)
+                            .unwrap_or(&dir)
+                            .to_string_lossy()
+                            .into_owned();
+                        let sibling_subpath = sibling
+                            .strip_prefix(root)
+                            .unwrap_or(sibling)
+                            .to_string_lossy()
+                            .into_owned();
+                        (root.clone(), project_subpath, Some(sibling_subpath))
+                    }
+                    _ => (dir.clone(), ".".to_string(), None),
+                };
+
+            println!(
+                "ci: esp32 project{} ({})",
+                if host_test_subpath.is_some() {
+                    " + host-testable sibling test"
+                } else {
+                    ""
+                },
+                dir.display()
+            );
+            let builder_dir = paws_esp32::write_builder_dockerfile()
+                .context("failed to materialize the esp32 builder Dockerfile")?;
+            let args = paws_esp32::dagger_pipeline_args(
+                &mount_dir.to_string_lossy(),
+                &project_subpath,
+                &builder_dir.to_string_lossy(),
+                host_test_subpath.as_deref(),
+            );
+            run_dagger_core(&args, silent).await?;
+            println!("ci: esp32 build/test succeeded");
+
+            if publish_artifacts {
+                let repository = std::env::var("GITHUB_REPOSITORY")
+                    .context("--publish-artifacts requires $GITHUB_REPOSITORY to be set")?;
+                let (owner, repo) = repository.split_once('/').ok_or_else(|| {
+                    anyhow::anyhow!("$GITHUB_REPOSITORY must be \"owner/repo\", got {repository}")
+                })?;
+                let token = std::env::var("GITHUB_TOKEN")
+                    .or_else(|_| std::env::var("GH_TOKEN"))
+                    .context("--publish-artifacts requires $GITHUB_TOKEN or $GH_TOKEN to be set")?;
+                let tag = std::env::var("GITHUB_REF_NAME").context(
+                    "--publish-artifacts requires $GITHUB_REF_NAME to be set (the tag to \
+                     publish assets to)",
+                )?;
+
+                let triple = paws_esp32::target_triple(&dir)?;
+                let binary_name = paws_esp32::binary_name(&dir)?;
+                let release_dir = dir.join("target").join(&triple).join("release");
+
+                // The build in `dagger_pipeline_args` above ran entirely
+                // inside the ephemeral Dagger container — `cargo build
+                // --release` never wrote anything to this host's
+                // `release_dir`. Re-run the same build (Dagger's own
+                // content-addressed caching makes the fmt/clippy/build
+                // steps effectively free the second time) as a separate
+                // `dagger core` chain whose terminal call actually exports
+                // that directory back to the host (see
+                // `dagger_export_pipeline_args`'s doc comment for why this
+                // can't just be appended onto the pipeline above).
+                tokio::fs::create_dir_all(&release_dir)
+                    .await
+                    .with_context(|| {
+                        format!("failed to create {} for the esp32 export", release_dir.display())
+                    })?;
+                let export_args = paws_esp32::dagger_export_pipeline_args(
+                    &mount_dir.to_string_lossy(),
+                    &project_subpath,
+                    &builder_dir.to_string_lossy(),
+                    &triple,
+                    &release_dir.to_string_lossy(),
+                );
+                run_dagger_core(&export_args, silent).await?;
+
+                let client = GitHubReleaseClient::new(owner.to_string(), repo.to_string(), token);
+                let release_id = client.get_or_create_release(&tag, false).await?;
+                paws_esp32::publish_artifacts(&client, release_id, &release_dir, &binary_name)
+                    .await
+                    .context("failed to publish esp32 build artifacts")?;
+                println!("ci: esp32 artifacts published to the {tag} release");
+            }
+        }
         Some(other) => anyhow::bail!(
-            "unsupported --toolchain '{other}'; expected 'node', 'rust', 'python', 'go', 'java', 'kotlin', 'tauri', 'tauri-android', or 'flatpak'"
+            "unsupported --toolchain '{other}'; expected 'node', 'rust', 'python', 'go', 'java', 'kotlin', 'tauri', 'tauri-android', 'flatpak', or 'esp32'"
         ),
         None => anyhow::bail!("--toolchain is required (e.g. --toolchain node)"),
     }
@@ -2551,6 +2691,7 @@ mod tests {
             silent: true,
             targets: vec![],
             coverage: true,
+            publish_artifacts: false,
         };
         let err = run_ci(args).await.unwrap_err();
         assert!(
@@ -2568,11 +2709,51 @@ mod tests {
             silent: true,
             targets: vec![],
             coverage: true,
+            publish_artifacts: false,
         };
         let err = run_ci(args).await.unwrap_err();
         assert!(
             err.to_string()
                 .contains("--coverage is only valid with --toolchain rust"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    // Workstream 5: --publish-artifacts is rejected outside --toolchain
+    // esp32, before any Dagger/Docker/GitHub interaction — same gating
+    // shape as --coverage's existing --toolchain rust-only rejection above.
+    #[tokio::test]
+    async fn publish_artifacts_is_rejected_outside_toolchain_esp32() {
+        let args = CiArgs {
+            toolchain: Some("rust".to_string()),
+            verbose: false,
+            silent: true,
+            targets: vec![],
+            coverage: false,
+            publish_artifacts: true,
+        };
+        let err = run_ci(args).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--publish-artifacts is only valid with --toolchain esp32"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_artifacts_with_no_toolchain_at_all_is_also_rejected() {
+        let args = CiArgs {
+            toolchain: None,
+            verbose: false,
+            silent: true,
+            targets: vec![],
+            coverage: false,
+            publish_artifacts: true,
+        };
+        let err = run_ci(args).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--publish-artifacts is only valid with --toolchain esp32"),
             "unexpected error message: {err}"
         );
     }

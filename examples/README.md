@@ -159,3 +159,11 @@ pytest`, run against `astral/uv:python3.12-trixie-slim` through Dagger.
   `playwright.config.ts`) and its dedicated `npx playwright install --with-deps && npx playwright
 test` pipeline, run against the plain Node base image through Dagger — verified for real, end
   to end, all 6 example tests (chromium/webkit/firefox) passing with no `xvfb` involved.
+- `esp32-fixture/` — a minimal `esp-idf-svc` "blink" project (`Cargo.toml` depending on
+  `esp-idf-svc`, `.cargo/config.toml` targeting `riscv32imc-esp-espidf`, `rust-toolchain.toml`,
+  `sdkconfig.defaults`, `build.rs`); the target for `paws ci --toolchain esp32`. Exercises
+  `crates/paws-esp32`'s detection (`is_esp32_project`) and its `fmt`/`clippy`/`build`/conditional-
+  test chain, run against `builders/esp32` (`espup`-installed Xtensa/RISC-V toolchain + libclang +
+  Python + espflash) through Dagger — see the fixture's own README for why it isn't expected to
+  compile against a real ESP-IDF toolchain in this repo's own dev/CI sandbox specifically (no ESP
+  toolchain installed there), only once run through `builders/esp32`, which has one.

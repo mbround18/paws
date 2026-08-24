@@ -9,7 +9,8 @@ see [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) for how a new stack actually gets ad
 Confirmed directly against the code, not from memory:
 
 - **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node`, `python`, `go`,
-  `java`, `kotlin`, `tauri`, `tauri-android`, `flatpak` (`crates/paws-cli-core/src/lib.rs`). `java`
+  `java`, `kotlin`, `tauri`, `tauri-android`, `flatpak`, `esp32` (`crates/paws-cli-core/src/lib.rs`)
+  — see "Embedded (ESP32 / no_std targets)" below for `esp32`'s full write-up. `java`
   (2026-08-22, `crates/paws-java`) is a new native implementation too — `gh-reusable` only ever
   had `setupJava` (container setup picking a JDK distribution/image, no build/test steps). Detects
   Maven (`pom.xml`) vs Gradle (`build.gradle`/`build.gradle.kts`) and **requires** the project's
@@ -81,8 +82,10 @@ compose` runtime difference under this pipeline's root context that a real GitHu
   `mbround18/oled-wallpaper`'s actual manifest — a real, heavy wgpu/winit GUI app, not a
   synthetic fixture; a full bundle/release flow should keep using its own existing pipeline for
   now (see `builders/README.md` for the full story).
-- **`paws provision`** (concurrent toolchain installers): `rust`, `node`, `python`, `go`
-  (`paws_provision::Ecosystem`). `go` (2026-08-22) is real, not detection-only: `install_go` runs
+- **`paws provision`** (concurrent toolchain installers): `rust`, `node`, `python`, `go`, `esp32`
+  (`paws_provision::Ecosystem`) — `esp32`'s `install_esp32` shells to `espup install` (Design
+  Decision 6, `specs/007-esp32-toolchain`), same "shell to the real installer" precedent as every
+  other ecosystem below. `go` (2026-08-22) is real, not detection-only: `install_go` runs
   `go install golang.org/dl/goX.Y.Z@latest` then that version's own `download` subcommand — Go's
   own official mechanism for fetching an additional pinned toolchain version, the same shape as
   `install_rust`/`install_node`/`install_python` shelling out to `rustup`/`corepack`/`uv`
@@ -414,6 +417,47 @@ exports a populated build directory correctly, not just single files. Verified f
 end, against `examples/go-fixture` with `--targets linux/amd64,darwin/arm64,windows/amd64`: `file`
 confirms genuine ELF/Mach-O/PE32+ binaries came out, respectively, not just three files with
 plausible names. `--targets` is rejected outside `--toolchain go` with a clear error.
+
+## Embedded (ESP32 / no_std targets)
+
+| Stack Permutation           | Primary Languages | Package Manager(s) | Core Toolchain / Frameworks                          | Output Type                              | Status |
+| ---------------------------- | ------------------ | ------------------- | ------------------------------------------------------ | ------------------------------------------ | ------ |
+| ESP32 (ESP-IDF, `esp-idf-svc`) | Rust               | cargo + `embuild`   | `espup`-installed Xtensa/RISC-V toolchain, ESP-IDF, CMake/Python | Flashable firmware ELF + bootloader binary | ✅     |
+| ESP32 (bare-metal `esp-hal`, `no_std`) | Rust      | cargo               | `esp-hal`, no ESP-IDF/Python/CMake                      | Flashable firmware binary                  | 📋     |
+
+This gets its own section, not a row in "Other language ecosystems"'s table above — that table's
+Output Type column doesn't fit "flashable firmware binary + bootloader", the same reasoning that
+already gave Tauri/Android its own callout there rather than a table row.
+
+`paws ci --toolchain esp32` (`crates/paws-esp32`, `specs/007-esp32-toolchain`) is new, native
+capability — no `gh-reusable` ESP32/embedded function exists to port for parity, same as
+`paws-go`/`paws-kotlin`. Detects a project the same marker-file way `paws-rust`'s
+`is_wasm_project` does: a `Cargo.toml` dependency on `esp-idf-sys`/`esp-idf-svc`, or a
+`.cargo/config.toml` `build.target` set to an `*-espidf` triple
+(`xtensa-esp32*-espidf`/`riscv32im*-esp-espidf`). Runs `cargo fmt --check`, `cargo clippy -- -D
+warnings`, `cargo build --release` — the real `embuild`-driven ESP-IDF cross-compile — against a
+dedicated `builders/esp32` image (`rust:1-bookworm` + `espup install` + `libclang`/`clang` +
+`python3`+pip + `espflash`, joining the `tauri-android`/`flatpak`/`java` "needs multiple
+toolchains combined" builder-image category). Deliberately `fmt → clippy → build → conditional
+test`, not `paws-rust`'s default `fmt → clippy → test → build` — the embedded target itself has no
+`cargo test` story at all (a real `[[bin]] harness = false` skips even *compiling* `#[cfg(test)]`
+code for that target, confirmed against this feature's own driver, `mbround18/ha-kiosk`'s
+`firmware/` crate), so `build` — the one step that has to succeed for this toolchain to mean
+anything — never sits behind a test step that might not even exist for a given project. When a
+host-testable sibling workspace member exists (a `Cargo.toml` with no `esp-idf-sys`/`esp-idf-svc`
+dependency and no `*-espidf` target override — not a hardcoded name like `firmware-core`, a
+generic structural check), `cargo test` runs against *that* crate instead of the embedded target.
+
+A new opt-in `--publish-artifacts` flag (gated to `--toolchain esp32` only, mirroring
+`--coverage`'s existing `--toolchain rust`-only gating) uploads the built bootloader
+(`bootloader.bin`) and firmware ELF as assets on the GitHub Release matching the current tag,
+reusing `paws-release`'s existing `GitHubReleaseClient::get_or_create_release`/`upload_asset_with`
+rather than a second GitHub-API client — the first `paws-release` type reused outside
+`paws-release` itself. Needs the same `$GITHUB_TOKEN`/`$GH_TOKEN` + `$GITHUB_REPOSITORY` every
+other GitHub-Release-touching `paws` subcommand already reads, no new env var name. Verified for
+real against `examples/esp32-fixture` (a minimal `esp-idf-svc` "blink" project); the bare-metal
+`esp-hal`/`no_std` row is a plausible fast-follow, not bundled into this first cut — a different
+(simpler — no ESP-IDF/Python/CMake) toolchain shape.
 
 ## Other language ecosystems
 

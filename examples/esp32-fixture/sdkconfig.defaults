@@ -1,0 +1,7 @@
+# Minimal ESP-IDF config overrides for this fixture. Increases the default
+# main-task stack size, matching what a real esp-idf-svc "hello world"
+# typically needs beyond ESP-IDF's own default — kept here rather than
+# relying on the (much larger) menuconfig-generated sdkconfig a real project
+# accumulates over time.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8000
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10

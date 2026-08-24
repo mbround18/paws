@@ -81,6 +81,7 @@ jobs:
           - flatpak
           - java
           - rust
+          - esp32
     env:
       VERSION: ${{ inputs.tag || github.ref_name }}
       REVISION: ${{ github.sha }}
