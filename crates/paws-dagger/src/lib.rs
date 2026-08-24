@@ -440,6 +440,17 @@ async fn save_github_actions_cache(client: &ActionsCacheClient) -> Result<()> {
     let key = engine_cache_key().await?;
 
     let archive_path = std::env::temp_dir().join("paws-dagger-cache-save.tar.gz");
+    // A bind mount onto a host path that doesn't exist yet gets created as
+    // a *directory* by Docker (it can't infer file-vs-dir from a `-v` flag
+    // alone) — confirmed for real on a live GitHub-hosted runner (006's own
+    // FR-004 validation), where this produced `tar: can't open
+    // '/backup.tar.gz': Is a directory` on every save. Pre-creating the
+    // file avoids that; [`restore_github_actions_cache`] doesn't need the
+    // same fix because `client.download` already writes a real file there
+    // first.
+    tokio::fs::File::create(&archive_path)
+        .await
+        .context("failed to create the temp archive file for the Actions cache save")?;
     docker_output(&["stop", &container]).await?;
     let tar_result = docker_output(&[
         "run",

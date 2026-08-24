@@ -245,7 +245,14 @@ pytest` pipeline shape — no package meant for `uv build`, several separately-s
   bash `run:` step, so `CacheBackend::detect()` always resolved `None` in practice. `paws-up`
   (`actions/paws-up/action.yml`) now runs a pinned `actions/github-script` step before `paws
   init` that exports both vars to `$GITHUB_ENV` when present, closing the gap with no new
-  consumer-facing setup step required.
+  consumer-facing setup step required. This exposure fix is what let `GitHubActionsCache`'s
+  restore/save logic run against a real Actions cache service for the first time ever
+  (`005`'s own tests only ever injected the vars directly); doing so surfaced one real bug in
+  the save path — `save_github_actions_cache` mounted a not-yet-existing host path into the
+  helper container, which Docker creates as a directory rather than a file, breaking every save
+  with `tar: can't open '/backup.tar.gz': Is a directory` (harmlessly — `005`'s "broken cache
+  backend is never worse than no cache backend" guarantee held; only the save silently no-opped).
+  Fixed in the same change by pre-creating the file.
 - **`paws docs --provider`** (2026-08-23, `specs/005-close-remaining-cli`): `paws docs` now
   actually publishes, closing the gap where `--help` claimed GitHub Pages publishing that didn't
   exist. `--provider github-pages` (comma-delimited, multi-provider capable) builds `target/doc`

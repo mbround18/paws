@@ -141,7 +141,11 @@ jobs:
         run: |
           set -euo pipefail
           start=$(date +%s)
-          output="$(paws docker --image ghcr.io/example/paws-cache-e2e-fixture --dockerfile Dockerfile --default-branch __none__)"
+          # 2>&1: CacheBackend::log_line() and its restore/save status lines
+          # go to stderr, not stdout — a plain `$(cmd)` capture would miss
+          # them entirely and always fail the grep below regardless of
+          # whether the cache backend actually activated.
+          output="$(paws docker --image ghcr.io/example/paws-cache-e2e-fixture --dockerfile Dockerfile --default-branch __none__ 2>&1)"
           end=$(date +%s)
           echo "$output"
           echo "duration=$((end - start))" >> "$GITHUB_OUTPUT"
@@ -166,7 +170,11 @@ jobs:
         run: |
           set -euo pipefail
           start=$(date +%s)
-          output="$(paws docker --image ghcr.io/example/paws-cache-e2e-fixture --dockerfile Dockerfile --default-branch __none__)"
+          # 2>&1: CacheBackend::log_line() and its restore/save status lines
+          # go to stderr, not stdout — a plain `$(cmd)` capture would miss
+          # them entirely and always fail the grep below regardless of
+          # whether the cache backend actually activated.
+          output="$(paws docker --image ghcr.io/example/paws-cache-e2e-fixture --dockerfile Dockerfile --default-branch __none__ 2>&1)"
           end=$(date +%s)
           echo "$output"
           echo "duration=$((end - start))" >> "$GITHUB_OUTPUT"
