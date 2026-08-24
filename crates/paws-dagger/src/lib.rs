@@ -257,6 +257,24 @@ async fn find_engine_volume(container: &str) -> Result<String> {
     Ok(volume)
 }
 
+/// FNV-1a 64-bit hash, hex-encoded (16 chars) — no crate dependency needed
+/// for a short, fully deterministic fingerprint (same input -> same output
+/// across every process, unlike `std`'s randomized-seed `HashMap` hasher,
+/// which would break restore/save ever matching across separate CI job
+/// runs). Both Cache Service generations cap their `version` field at 64
+/// characters (confirmed live: `"version invalid length for cache entry
+/// version: must be between 1 and 64 characters"` from a real 400) — `key`
+/// has no such constraint (up to 512) and stays the full descriptive
+/// string; only `version` needs this.
+fn short_cache_version(key: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
 /// A stable cache key for the engine-state archive — scoped to the
 /// `dagger` CLI's own version (a cache built by one engine version isn't
 /// guaranteed compatible with another) plus a fixed prefix so it's easy to
@@ -298,11 +316,12 @@ impl ActionsCacheClient {
         )
     }
 
-    /// `GET _apis/artifactcache/cache?keys=<key>&version=<key>` — `None` on
-    /// a cache miss (204/404), else the signed archive download URL.
+    /// `GET _apis/artifactcache/cache?keys=<key>&version=<hash>` — `None`
+    /// on a cache miss (204/404), else the signed archive download URL.
     async fn find_entry(&self, key: &str) -> Result<Option<String>> {
+        let version = short_cache_version(key);
         let url = format!(
-            "{}/_apis/artifactcache/cache?keys={key}&version={key}",
+            "{}/_apis/artifactcache/cache?keys={key}&version={version}",
             self.base_url
         );
         let response = self
@@ -355,7 +374,8 @@ impl ActionsCacheClient {
     /// this first cut).
     async fn reserve(&self, key: &str, size: u64) -> Result<u64> {
         let url = format!("{}/_apis/artifactcache/caches", self.base_url);
-        let body = serde_json::json!({ "key": key, "version": key, "cacheSize": size });
+        let body =
+            serde_json::json!({ "key": key, "version": short_cache_version(key), "cacheSize": size });
         let response = self
             .auth_headers(self.client.post(&url))
             .json(&body)
@@ -476,20 +496,23 @@ impl ActionsCacheClientV2 {
             .await
             .with_context(|| format!("failed to call Cache Service v2 {method}"))?;
         let status = response.status();
-        let request_url = response.url().clone();
         let text = response
             .text()
             .await
             .with_context(|| format!("failed to read Cache Service v2 {method} response body"))?;
         if !status.is_success() {
-            // Temporary diagnostic: the receiver's exact error body has
-            // never been observed yet (only a bare 400 with no message
-            // came through the old message-only error), so surface it
-            // verbatim rather than guessing further — narrow this back
-            // down to a short message once the real cause is confirmed.
+            // The receiver's error body is a Twirp-standard
+            // `{"code": "...", "msg": "...", "meta": {...}}` (confirmed
+            // live: `{"code":"invalid_argument","msg":"version invalid
+            // length for cache entry version: must be between 1 and 64
+            // characters", ...}` — the bug that caught) — surface `msg` when
+            // present, falling back to the raw body for anything else.
+            let msg = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("msg").and_then(|m| m.as_str()).map(String::from));
             anyhow::bail!(
-                "Cache Service v2 {method} failed: {status} (url: {request_url}) — body: {}",
-                text.chars().take(500).collect::<String>()
+                "Cache Service v2 {method} failed: {status}: {}",
+                msg.unwrap_or(text)
             );
         }
         serde_json::from_str(&text)
@@ -500,7 +523,7 @@ impl ActionsCacheClientV2 {
     /// in the response, not an HTTP error — Twirp still returns 200 for a
     /// clean miss), else the signed Azure Blob download URL.
     async fn find_entry(&self, key: &str) -> Result<Option<String>> {
-        let body = serde_json::json!({ "key": key, "restore_keys": [], "version": key });
+        let body = serde_json::json!({ "key": key, "restore_keys": [], "version": short_cache_version(key) });
         let response = self.call("GetCacheEntryDownloadURL", body).await?;
         if !response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
             return Ok(None);
@@ -530,7 +553,7 @@ impl ActionsCacheClientV2 {
     /// `CreateCacheEntry` — reserves the entry and returns the signed Azure
     /// Blob upload URL the archive bytes get `PUT` to directly.
     async fn create_entry(&self, key: &str) -> Result<String> {
-        let body = serde_json::json!({ "key": key, "version": key });
+        let body = serde_json::json!({ "key": key, "version": short_cache_version(key) });
         let response = self.call("CreateCacheEntry", body).await?;
         if !response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
             let message = response
@@ -571,7 +594,7 @@ impl ActionsCacheClientV2 {
     /// `FinalizeCacheEntryUpload` — makes the just-uploaded blob visible to
     /// future `GetCacheEntryDownloadURL` lookups.
     async fn finalize(&self, key: &str, size: u64) -> Result<()> {
-        let body = serde_json::json!({ "key": key, "version": key, "size_bytes": size.to_string() });
+        let body = serde_json::json!({ "key": key, "version": short_cache_version(key), "size_bytes": size.to_string() });
         let response = self.call("FinalizeCacheEntryUpload", body).await?;
         if !response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
             let message = response
@@ -1075,6 +1098,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn short_cache_version_is_deterministic_and_within_the_64_char_cap() {
+        // Both Cache Service generations reject a `version` outside 1-64
+        // chars (confirmed live: a 400 with "version invalid length for
+        // cache entry version: must be between 1 and 64 characters" — the
+        // bug this function exists to fix). `engine_cache_key()`'s output
+        // easily exceeds that on its own; this hash must not.
+        let key = "paws-dagger-engine-state-dagger v0.21.8 (registry.dagger.io/engine:v0.21.8) linux/amd64";
+        assert!(key.len() > 64, "fixture key should itself exceed 64 chars");
+        let version = short_cache_version(key);
+        assert!(!version.is_empty());
+        assert!(version.len() <= 64);
+        assert_eq!(
+            version,
+            short_cache_version(key),
+            "must be deterministic across calls (and, by construction, across processes) so a \
+             restore in one job run matches a save from another"
+        );
+        assert_ne!(
+            short_cache_version("a different key"),
+            version,
+            "different keys should not collide for two clearly different inputs"
+        );
+    }
+
+    #[test]
     fn classifies_real_observed_registry_errors_as_transient() {
         // The exact wording seen on a real CI run (mbround18/paws#5,
         // pulling rust:1-bookworm mid-transfer).
@@ -1421,10 +1469,10 @@ mod tests {
         );
 
         let request = server.await.unwrap();
-        assert!(
-            request
-                .starts_with("GET /_apis/artifactcache/cache?keys=fixture-key&version=fixture-key")
-        );
+        assert!(request.starts_with(&format!(
+            "GET /_apis/artifactcache/cache?keys=fixture-key&version={}",
+            short_cache_version("fixture-key")
+        )));
         assert!(
             request.contains("authorization: bearer fixture-token")
                 || request
