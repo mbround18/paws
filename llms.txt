@@ -209,7 +209,7 @@ paws also ships composite GitHub Actions for wiring into a *consumer* repo's own
 
 ### paws-up
 
-Downloads a paws release binary for the current runner, puts it on PATH, and installs the dagger CLI via `paws init` (most paws subcommands need it). Composite (not Docker-based) so paws's own Dagger calls talk to the runner's real Docker daemon directly, with no Docker-in-Docker nesting.
+Downloads a paws release binary for the current runner, puts it on PATH, and installs the dagger CLI via `paws init` (most paws subcommands need it). Composite (not Docker-based) so paws's own Dagger calls talk to the runner's real Docker daemon directly, with no Docker-in-Docker nesting. Also exposes the GitHub Actions cache runtime vars (via a pinned `actions/github-script` step) so `paws docker`/`paws ci`'s Dagger build cache can actually activate - the one non-`paws` action dependency this composite carries.
 
 ```yaml
 - uses: mbround18/paws/actions/paws-up@main
