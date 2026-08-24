@@ -285,7 +285,7 @@ async fn engine_cache_key() -> Result<String> {
         .await
         .context("failed to spawn `dagger version` for the cache key")?;
     let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(format!("paws-dagger-engine-state-{version}"))
+    Ok(format!("paws-dagger-engine-state-v2-{version}"))
 }
 
 /// Minimal client for the GitHub Actions Cache Service **v1 REST API**
