@@ -34,8 +34,14 @@ ENV ANDROID_SDK_ROOT=${ANDROID_HOME}
 ENV NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}
 ENV PATH="${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}"
 
+# `docker-clean` (in every Debian/Ubuntu base image) deletes the .deb archives
+# after each apt run, which would leave the cache mount below permanently
+# empty -- see builders/README.md for the measurement.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' \
+        > /etc/apt/apt.conf.d/keep-cache && \
     apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         curl ca-certificates unzip openjdk-17-jdk-headless && \

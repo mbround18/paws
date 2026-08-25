@@ -22,8 +22,14 @@ ARG OSXCROSS_COMMIT=27d21e4977c9751d01199c7a226a6faf494c3dd9
 # for aarch64-apple-darwin support).
 ARG MACOS_SDK_VERSION=14.0
 
+# `docker-clean` (in every Debian/Ubuntu base image) deletes the .deb archives
+# after each apt run, which would leave the cache mount below permanently
+# empty -- see builders/README.md for the measurement.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' \
+        > /etc/apt/apt.conf.d/keep-cache && \
     apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates clang cmake git patch libxml2-dev libssl-dev \
@@ -57,8 +63,14 @@ ENV PATH="/opt/osxcross/target/bin:${PATH}"
 
 # osxcross's compiler wrappers shell out to a real `clang` — needed here too,
 # not just in the osxcross-builder stage that built the wrappers themselves.
+# `docker-clean` (in every Debian/Ubuntu base image) deletes the .deb archives
+# after each apt run, which would leave the cache mount below permanently
+# empty -- see builders/README.md for the measurement.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' \
+        > /etc/apt/apt.conf.d/keep-cache && \
     apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends clang
 

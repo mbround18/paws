@@ -79,6 +79,28 @@ default `docker` driver doesn't support the registry cache exporter (confirmed d
 against it silently exports nothing) — which is why `release.yaml`'s `build-builders` job runs
 `docker/setup-buildx-action` before `docker compose build`.
 
+Every apt-based builder here opens its `apt-get` layer by deleting
+`/etc/apt/apt.conf.d/docker-clean` and setting `Keep-Downloaded-Packages "true"`. That isn't
+boilerplate: every Debian/Ubuntu base image ships `docker-clean`, whose `DPkg::Post-Invoke` hook
+runs `rm -f /var/cache/apt/archives/*.deb` after *every* apt invocation — so a
+`--mount=type=cache,target=/var/cache/apt` without this caches a directory apt empties on its way
+out, and the mount does nothing at all. Confirmed by reading the file straight out of
+`rust:1-bookworm`, then measured on the heaviest apt layer here (`tauri-linux`'s GTK/WebKit set):
+a rebuild of that layer re-downloaded **266 packages** before the change and **0** after. Wall
+clock only moved 19.0s → 17.9s on a fast local connection, since dpkg's unpack/configure work
+dominates once the bytes are local — the saving is the download itself, so it scales with how slow
+or rate-limited the network is, not with package count alone.
+
+Scope matters here: BuildKit never exports `type=cache` mounts to a registry cache exporter, so
+this does nothing for CI's ephemeral runners, which start every run with empty mounts regardless.
+It pays off for local iteration on a Dockerfile and for any rebuild on a machine that still has
+the mount. The mounts are keyed by target path (BuildKit's default `id`), so every builder here
+shares one archive/list directory regardless of base distro — a Debian builder and the Ubuntu-based
+`flatpak/` one really do land their `.deb`s in the same place, observed directly. That's safe (apt
+resolves what it needs by filename and hash and ignores list files for sources it isn't
+configured with) and it's why one builder's download can warm another's. Surviving between CI runs is what `compose.yml`'s `cache_from`/`cache_to` is for, above
+— the two mechanisms cover different halves of the problem and neither substitutes for the other.
+
 - `linux-gnu/` — `x86_64-unknown-linux-gnu` (native) + `aarch64-unknown-linux-gnu` (via
   `gcc-aarch64-linux-gnu`).
 - `linux-musl-x86_64/`, `linux-musl-aarch64/` — separate images (musl cross toolchains are
