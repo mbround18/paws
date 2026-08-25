@@ -124,6 +124,23 @@ jobs:
   # split resolves a real `java.toolchain.languageVersion` requirement.
   ci-e2e-languages:
     name: paws ci ${{ matrix.toolchain }} (${{ matrix.fixture }})
+    # Pull requests only, deliberately — unlike `ci-e2e` above, which stays
+    # on every trigger. These nine legs each install real dependencies from
+    # rubygems/packagist/nuget.org/hex.pm at run time, so an outage at any
+    # one of those would block an unrelated release that has nothing to do
+    # with that language. Measured before scoping this: they are *not* a
+    # release-latency problem (all nine run in parallel, 0-1m each, against
+    # a 2-minute CI gate whose critical path is `paws ci end-to-end
+    # (dagger)` at 2m) — this is purely about not coupling releases to four
+    # more third-party registries.
+    #
+    # `github.event_name` inside a reusable workflow reports the *caller's*
+    # triggering event, so this one condition covers all three non-PR
+    # paths: a push to main, a `v*` tag push, and release.yaml's
+    # workflow_dispatch. Every change reaches main through a PR, where
+    # these already ran against the identical SHA (the merge is a
+    # fast-forward), so nothing goes unverified.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

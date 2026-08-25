@@ -244,7 +244,16 @@ package` with `--package` — against every chart it finds, via `builders/helm/D
   Java/Kotlin one. Matrixed rather than appended to `ci-e2e`'s step list because each leg is
   independent and individually slow (a cold Gradle or .NET run is minutes of image pull plus
   dependency resolution), so the job's wall clock is the slowest leg instead of their sum.
-  `fail-fast: false` — one language's regression shouldn't hide another's.
+  `fail-fast: false` — one language's regression shouldn't hide another's. Gated to
+  `pull_request` only (`if: github.event_name == 'pull_request'`), unlike `ci-e2e` above, which
+  runs on every trigger including the release gate: these nine legs pull real dependencies from
+  rubygems/packagist/nuget.org/hex.pm at run time, and a release shouldn't be blocked by an
+  outage at a registry it doesn't otherwise depend on. Not a latency decision — measured, the
+  nine legs run in parallel at 0-1m each inside a 2-minute CI gate whose critical path is
+  `paws ci end-to-end (dagger)` regardless. Inside a reusable workflow `github.event_name` is the
+  *caller's* event, so that one condition covers pushes to main, `v*` tag pushes, and
+  release.yaml's dispatch alike; every change reaches main via a PR where these already ran on
+  the identical SHA (merges are fast-forwards), so nothing lands unverified.
 
 `main` is protected by a ruleset requiring the `build, test, lint` check before merge (no force
 push, no deletion). The repo owner can always bypass it (break-glass); Renovate's GitHub App can
