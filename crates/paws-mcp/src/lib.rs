@@ -87,7 +87,7 @@ impl Default for PawsMcpServer {
 #[tool_router]
 impl PawsMcpServer {
     #[tool(
-        description = "Build and test a language target (node, rust, python, tauri, tauri-android, flatpak)."
+        description = "Build and test a language target (node, rust, python, go, java, kotlin, ruby, php, dotnet, elixir, tauri, tauri-android, flatpak, esp32)."
     )]
     async fn ci(&self, Parameters(args): Parameters<CiArgs>) -> Result<String, McpError> {
         let (outcome, captured) = capture_output(|| paws_cli_core::run_ci(args)).await;

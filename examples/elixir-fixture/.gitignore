@@ -1,0 +1,5 @@
+# The repo-root .gitignore carries a Python-packaging `lib/` rule, which
+# would otherwise swallow this fixture's actual source directory.
+!/lib/
+_build/
+deps/

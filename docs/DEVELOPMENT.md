@@ -164,6 +164,19 @@ pytest` against `astral/uv:python<version>-trixie-slim`, a plain `container from
   (`pyproject.toml`) — that's what `gh-reusable` actually supports, no poetry/pipenv/pip path
   exists there to port. `--frozen` is only passed when `uv.lock` is committed, the same
   lockfile-optional-install fix `paws-node` needed for `npm ci`.
+- `crates/paws-ruby`, `crates/paws-php`, `crates/paws-dotnet`, `crates/paws-elixir` — the
+  Ruby/PHP/.NET/Elixir toolchains behind `paws ci --toolchain ruby`/`php`/`dotnet`/`elixir`. Each
+  is a detect-then-build-an-argument-list crate in the same shape as `paws-python`/`paws-go` (no
+  `dagger` CLI dependency of its own; `paws-dagger::core` executes what they return) and each
+  pulls a single public image rather than needing a `builders/*` one: `ruby:trixie`,
+  `composer:2` (Composer's own image — the official `php:*-cli` ships no Composer at all),
+  `mcr.microsoft.com/dotnet/sdk:10.0`, `elixir:otp-28`. All four are new native implementations,
+  not ports — `gh-reusable` had only a `setupRuby` container-setup step and nothing at all for the
+  other three. Detection is structural throughout: Rake-vs-RSpec from a `Rakefile`/`spec/`, a
+  PHPUnit suite from `phpunit.xml`/`.dist`, a .NET test project from a real
+  `Microsoft.NET.Test.Sdk` reference rather than a `*.Tests` name. See `docs/ROADMAP.md`'s
+  "Ruby / PHP / .NET / Elixir" for the per-toolchain step sequences and why each is scoped the way
+  it is.
 - `crates/paws-rust` — native port of `gh-reusable`'s real `rustBuildAndTest` Dagger function
   (read directly for parity, not reimplemented from memory): `cargo fmt -- --check`, `cargo
 clippy`, `cargo build --verbose`, `cargo test --verbose`, in that order, fail-fast. Runs
@@ -225,6 +238,13 @@ package` with `--package` — against every chart it finds, via `builders/helm/D
   `examples/node-fixture`/`examples/python-fixture` (FR-008), kept as its own job since it depends
   on external infrastructure (a Dagger engine, `gh-reusable` being reachable on GitHub) the fast
   unit-test job doesn't need.
+- **`ci-e2e-languages`** — the same FR-008 rule for `--toolchain java`/`kotlin`/`ruby`/`php`/
+  `dotnet`/`elixir`, one matrix leg per (toolchain, fixture) pair — nine of them, since `java` has
+  two build systems plus the JDK-25 toolchain fixture to cover and `kotlin` has the mixed
+  Java/Kotlin one. Matrixed rather than appended to `ci-e2e`'s step list because each leg is
+  independent and individually slow (a cold Gradle or .NET run is minutes of image pull plus
+  dependency resolution), so the job's wall clock is the slowest leg instead of their sum.
+  `fail-fast: false` — one language's regression shouldn't hide another's.
 
 `main` is protected by a ruleset requiring the `build, test, lint` check before merge (no force
 push, no deletion). The repo owner can always bypass it (break-glass); Renovate's GitHub App can

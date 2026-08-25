@@ -15,6 +15,16 @@
       "description": "eclipse-temurin (builders/java's JDK 21 + JDK 25 pair, shared by paws-java/paws-kotlin) needs a deliberate look before bumping either FROM line, not an automatic merge -- confirmed for real that Gradle <=8.10 can't even launch on a JDK-25 host JVM at all, and that a real project's `java.toolchain.languageVersion` requirement needs the specific JDK installed, not just \"newer\" (see builders/java/Dockerfile's header comment).",
       "matchDepNames": ["eclipse-temurin"],
       "automerge": false
+    },
+    {
+      "description": "The .NET SDK pin (crates/paws-dotnet's DEFAULT_DOTNET_SDK_VERSION) tracks the current LTS, not simply the newest major -- .NET alternates LTS (even majors, 3 years) and STS (odd majors, 18 months), so a bump onto an STS release is a downgrade in supportability and needs a human's call. Same reasoning as the eclipse-temurin rule above.",
+      "matchDepNames": ["mcr.microsoft.com/dotnet/sdk"],
+      "automerge": false
+    },
+    {
+      "description": "The OTP major behind crates/paws-elixir's BASE_IMAGE. NIF/native dependencies and Erlang-level behavior change across OTP majors in ways Elixir's own releases don't, so this is a deliberate bump, never an automatic one.",
+      "matchDepNames": ["erlang"],
+      "automerge": false
     }
   ],
   "customManagers": [
@@ -37,6 +47,26 @@
       ],
       "datasourceTemplate": "golang-version",
       "depNameTemplate": "go"
+    },
+    {
+      "customType": "regex",
+      "description": "paws-dotnet's SDK image tag (crates/paws-dotnet/src/lib.rs's DEFAULT_DOTNET_SDK_VERSION): mcr.microsoft.com/dotnet/sdk publishes a floating per-major tag, but no \"current LTS\" alias -- `latest` follows STS releases too -- so the major is a real pin needing a real bump each LTS. The bare constant is matched rather than an image address, since it only holds the \"10.0\" fragment `format!` interpolates into one (and a test in the same file asserts a deliberately-non-default \"9.0\" literal that must NOT be tracked, the same trap paws-python's manager above works around).",
+      "managerFilePatterns": ["/^crates/paws-dotnet/src/lib\\.rs$/"],
+      "matchStrings": [
+        "pub const DEFAULT_DOTNET_SDK_VERSION: &str = \"(?<currentValue>[0-9.]+)\";"
+      ],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "mcr.microsoft.com/dotnet/sdk"
+    },
+    {
+      "customType": "regex",
+      "description": "The OTP major in paws-elixir's base image (crates/paws-elixir/src/lib.rs's BASE_IMAGE, `elixir:otp-<major>`). That tag floats the Elixir version deliberately, so only the OTP half is a dependency to track; it resolves against the official `erlang` image's own major tags, since the `elixir` image's `otp-N` tags carry no comparable version for Renovate to order.",
+      "managerFilePatterns": ["/^crates/paws-elixir/src/lib\\.rs$/"],
+      "matchStrings": [
+        "pub const BASE_IMAGE: &str = \"elixir:otp-(?<currentValue>[0-9]+)\";"
+      ],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "erlang"
     }
   ]
 }

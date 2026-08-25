@@ -9,7 +9,8 @@ see [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) for how a new stack actually gets ad
 Confirmed directly against the code, not from memory:
 
 - **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node`, `python`, `go`,
-  `java`, `kotlin`, `tauri`, `tauri-android`, `flatpak`, `esp32` (`crates/paws-cli-core/src/lib.rs`)
+  `java`, `kotlin`, `ruby`, `php`, `dotnet`, `elixir`, `tauri`, `tauri-android`, `flatpak`,
+  `esp32` (`crates/paws-cli-core/src/lib.rs`)
   — see "Embedded (ESP32 / no_std targets)" below for `esp32`'s full write-up. `java`
   (2026-08-22, `crates/paws-java`) is a new native implementation too — `gh-reusable` only ever
   had `setupJava` (container setup picking a JDK distribution/image, no build/test steps). Detects
@@ -103,12 +104,18 @@ compose` runtime difference under this pipeline's root context that a real GitHu
   treats `go.mod` as a signal, matching `Cargo.toml`/`package.json`/`pyproject.toml`. `gh-reusable`
   (the TS system `paws` is replacing) also has `setupRuby`/`setupJava`/`setupTerraform`/
   `setupPulumi` — none of those ecosystems are wired into `paws-provision` yet, they're just
-  precedent for what "add a new ecosystem" looks like next.
+  precedent for what "add a new ecosystem" looks like next. `paws ci --toolchain
+java`/`kotlin`/`ruby`/`php`/`dotnet`/`elixir` all work regardless: each runs entirely inside its
+  own container, so none of them needs a *host* toolchain provisioned first. Provisioning matters
+  for the ecosystems `paws` itself shells out to locally, not for every toolchain it can build.
 - **`paws audit`** (language detection for scanner selection): detects `rust`, `node`, `python`,
   `go`, `docker` signals (`paws_audit::LanguageFamily`) — detection only, not execution; still
-  doesn't detect `java`/`kotlin` signals even though `paws ci --toolchain java`/`kotlin` both exist
-  now (`paws-audit`'s `LanguageFamily` hasn't been extended to match — a real, if minor, gap
-  between what `paws ci` can build and what `paws audit`'s scanner-selection step notices).
+  doesn't detect `java`/`kotlin`/`ruby`/`php`/`dotnet`/`elixir` signals even though `paws ci
+--toolchain` handles all six now (`paws-audit`'s `LanguageFamily` hasn't been extended to match —
+  a real, if minor, gap between what `paws ci` can build and what `paws audit`'s scanner-selection
+  step notices; it widens with each toolchain added, since `LanguageFamily` is a port of a real TS
+  enum and extending it means deciding which scanners each new family should actually select, not
+  just adding a variant).
   As of 2026-08-19, `paws audit` no longer depends on `gh-reusable` at all — scanner execution
   (`semgrep`/`gitleaks`, the only two scanners `gh-reusable`'s `audit` function ran) is native
   `crates/paws-audit` logic running through `paws-dagger::core`, a byte-for-byte port of
@@ -459,15 +466,68 @@ real against `examples/esp32-fixture` (a minimal `esp-idf-svc` "blink" project);
 `esp-hal`/`no_std` row is a plausible fast-follow, not bundled into this first cut — a different
 (simpler — no ESP-IDF/Python/CMake) toolchain shape.
 
+## Ruby / PHP / .NET / Elixir
+
+Four toolchains landed together (2026-08-25), all four new native implementations rather than
+ports: `gh-reusable` had a `setupRuby` (container setup, no build/test steps) and nothing at all
+for PHP, .NET, or Elixir, so there was no real logic to port for parity — the same situation
+`go`/`java`/`kotlin` were in. None of them needed a `builders/*` image; a single public image
+already carries everything each one needs (see "How a new stack gets added" below). Every one was
+verified for real, end to end, through Dagger against its own fixture, with the tests genuinely
+executing — not a compile check:
+
+- **`ruby`** (`crates/paws-ruby`, `ruby:trixie`) — Bundler-only. `bundle install`, then the
+  project's own test task: `bundle exec rake` when a `Rakefile` is present, `bundle exec rspec`
+  when only a `spec/` directory is. A project with neither gets a clear error rather than a
+  guess. A committed `Gemfile.lock` turns on `BUNDLE_FROZEN=true` so lockfile drift fails the
+  build instead of being silently rewritten — the Bundler equivalent of `uv sync --frozen`/`npm
+ci`, set via the env var because `bundle install --frozen` is gone in Bundler 4 (confirmed
+  against `ruby:trixie`, which ships it). No `gem build` step: a `Gemfile` doesn't imply a
+  gemspec, and packaging belongs in `paws publish`. Verified against `examples/ruby-fixture`.
+- **`php`** (`crates/paws-php`, `composer:2`) — Composer-only: `composer validate --strict
+--no-check-publish` (a real gate — it catches a malformed manifest or a `composer.lock` out of
+  sync with `composer.json`, PHP's lockfile-drift check), `composer install`, then
+  `vendor/bin/phpunit` when a `phpunit.xml`/`phpunit.xml.dist` exists. The base image is
+  Composer's own rather than the official `php:*-cli`, which ships no Composer at all — using it
+  would mean `paws` downloading and verifying `installer.php` itself, reimplementing what an
+  official image already does. Verified against `examples/php-fixture` (PHPUnit 11 on PHP 8.5).
+- **`dotnet`** (`crates/paws-dotnet`, `mcr.microsoft.com/dotnet/sdk:10.0`) — `dotnet restore`,
+  `dotnet build --no-restore -c Release`, `dotnet test --no-build -c Release`, each step reusing
+  the previous one's output so a failure names the phase that actually broke. Detects
+  `.csproj`/`.fsproj`/`.vbproj` alike (C#, F#, VB are the same SDK invocation) plus both solution
+  formats, including the `.slnx` the modern SDK's `dotnet new sln` emits by default — confirmed
+  for real, that's what scaffolding `examples/dotnet-fixture` actually produced. The test step is
+  gated on a project genuinely referencing `Microsoft.NET.Test.Sdk`, a structural check rather
+  than a `*.Tests` naming convention. Ambiguity the SDK itself refuses to resolve (several root
+  projects and no solution — MSB1011) is caught up front with an actionable message instead of a
+  bare error code deep in a container log. The `.NET Blazor`/`.NET MAUI` rows stay 📋: MAUI needs
+  Android/iOS/Windows SDK workloads and, for Apple targets, a macOS host — the same blocker the
+  Swift/Flutter rows have. Verified against `examples/dotnet-fixture` (xUnit on .NET 10).
+- **`elixir`** (`crates/paws-elixir`, `elixir:otp-28`) — `mix local.hex --force`, `mix
+local.rebar --force`, `mix deps.get`, `mix compile --warnings-as-errors`, `mix test`. The two
+  install steps come first because a fresh container has neither and `mix deps.get` would
+  otherwise stop to prompt interactively; both are no-ops when a project has no dependencies.
+  `--warnings-as-errors` is deliberate: Elixir's compiler warnings cover genuinely broken code
+  (an undefined function, an unreachable clause) that would otherwise only surface at runtime,
+  matching what `clippy -D warnings` means for `--toolchain rust`. Umbrella projects need no
+  special handling — `mix` already fans out across `apps/`. Verified against
+  `examples/elixir-fixture`. No OTP-release (`mix release`) step: that's a packaging concern,
+  same call as Ruby's `gem build`.
+
+None of the four are `paws provision` targets, and none add a `paws-audit` `LanguageFamily` —
+the same deliberate gaps `java`/`kotlin` have. `paws ci` runs each entirely inside its container,
+so nothing needs a host toolchain provisioned first.
+
 ## Other language ecosystems
 
 | Stack Permutation     | Primary Languages | Package Manager(s)               | Core Toolchain / Frameworks        | Output Type                             | Status |
 | --------------------- | ----------------- | -------------------------------- | ---------------------------------- | --------------------------------------- | ------ |
 | Python                | Python            | uv                               | CPython, FastAPI, Django           | Python Package (.whl), Docker Image     | ✅     |
-| C# / .NET             | C#, F#            | NuGet                            | .NET SDK, ASP.NET Core, EF Core    | Binaries (.exe, .dll), NuGet Package    | 📋     |
+| C# / .NET             | C#, F#            | NuGet                            | .NET SDK, ASP.NET Core, EF Core    | Binaries (.exe, .dll), NuGet Package    | ✅     |
 | C / C++               | C, C++            | conan, vcpkg, system pkg mgrs    | GCC, Clang, MSVC, CMake, Make      | Native Binaries, Libs (.so, .dll, .a)   | 📋     |
-| Ruby                  | Ruby              | gem, bundler                     | Ruby (MRI), Ruby on Rails, Sinatra | Gem Package, Docker Image               | 📋     |
-| PHP                   | PHP               | composer                         | PHP-FPM, Laravel, Symfony          | Source code deploy, Docker Image        | 📋     |
+| Ruby                  | Ruby              | gem, bundler                     | Ruby (MRI), Ruby on Rails, Sinatra | Gem Package, Docker Image               | ✅     |
+| PHP                   | PHP               | composer                         | PHP-FPM, Laravel, Symfony          | Source code deploy, Docker Image        | ✅     |
+| Elixir / BEAM         | Elixir            | mix, hex                         | Erlang/OTP, Mix, Phoenix           | OTP Release, Docker Image               | ✅     |
 | Swift (iOS/macOS)     | Swift             | Swift Package Manager, CocoaPods | Xcode Command Line Tools, iOS SDK  | iOS App (.ipa), macOS App (.app)        | 📋     |
 | Flutter               | Dart              | pub                              | Flutter SDK, Android/iOS SDKs      | Mobile (.apk, .aab, .ipa), Web Assets   | 📋     |
 | Electron + React/Node | JS/TS             | npm, yarn, pnpm                  | Node.js, Electron, React           | Desktop App Installers                  | 📋     |
@@ -480,6 +540,11 @@ real against `examples/esp32-fixture` (a minimal `esp-idf-svc` "blink" project);
 `Python`'s ✅ is `uv`-only, matching what `gh-reusable`'s real `pythonBuildAndTest` function
 actually supports — pip/poetry/conda projects (no `pyproject.toml` + `uv.lock`) aren't detected
 and fall through to `paws ci`'s "unsupported toolchain" error; see "Current coverage" above.
+`Ruby`/`PHP`/`Elixir` are scoped the same narrow way — Bundler, Composer, and Mix respectively,
+each the near-universal convention for its language, with no second package manager path invented
+alongside it; `C# / .NET` covers the SDK's own restore/build/test loop, which is why the
+`.NET Blazor`/`.NET MAUI` rows stay 📋 rather than following it to ✅. See
+"Ruby / PHP / .NET / Elixir" above for all four.
 `Swift`/`.NET MAUI`/`Flutter` mobile+Apple targets are the hardest group: they need either a
 macOS-hosted runner or a cross-compilation story `paws` doesn't have for anything beyond `paws`'s
 own binary (`builders/macos`'s osxcross setup is Rust-specific, not a general Swift/Xcode

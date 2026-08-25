@@ -209,7 +209,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Build and test a language target (node, rust, python, tauri, tauri-android, ...).
+    /// Build and test a language target (node, rust, python, go, java, kotlin, ruby,
+    /// php, dotnet, elixir, tauri, tauri-android, flatpak, esp32).
     Ci(CiArgs),
     /// Build and gate a container image the same way `docker-facts` + `docker-release` do.
     Docker(DockerArgs),
@@ -380,13 +381,23 @@ pub struct GenerateArgs {
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct CiArgs {
     /// Which toolchain to build: node, rust, python, go, java, kotlin,
-    /// tauri, or tauri-android. For `node`, the package manager
+    /// ruby, php, dotnet, elixir, tauri, tauri-android, flatpak, or esp32.
+    /// For `node`, the package manager
     /// (npm/yarn/pnpm/bun) and framework (Vite, Next.js, or plain) are
     /// auto-detected from lockfiles/package.json — no separate flag needed
     /// — and a Playwright e2e project (`@playwright/test` dependency or a
     /// playwright.config.*) is detected automatically too, running
     /// `npx playwright install --with-deps && npx playwright test`
-    /// instead of the plain build+test pipeline.
+    /// instead of the plain build+test pipeline. For `esp32`, builds an
+    /// ESP-IDF/`esp-idf-sys` Rust firmware project (fmt/clippy/build, plus
+    /// `cargo test` against any host-testable sibling crate — the embedded
+    /// target itself has no test story) against a dedicated `builders/esp32`
+    /// image (`espup`-installed ESP Rust toolchain, `libclang`, `espflash`).
+    /// `ruby` (Bundler), `php` (Composer), `dotnet` (the .NET SDK), and
+    /// `elixir` (Mix) each detect their own project layout too: the Ruby
+    /// test runner (`rake` vs `rspec`), and whether a PHPUnit suite or a
+    /// `Microsoft.NET.Test.Sdk` test project exists at all before running
+    /// one.
     #[arg(long)]
     #[serde(default)]
     pub toolchain: Option<String>,
@@ -1123,6 +1134,70 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             run_dagger_core(&args, silent).await?;
             println!("ci: kotlin build/test succeeded");
         }
+        Some("ruby") => {
+            let dir = std::env::current_dir()?;
+            let project = paws_ruby::detect_project(&dir)
+                .context("failed to detect a Ruby project in the current directory")?;
+            println!(
+                "ci: ruby project testing via {} ({})",
+                project.test_runner.as_str(),
+                dir.display()
+            );
+            let args = paws_ruby::dagger_pipeline_args(&project, &dir.to_string_lossy());
+            run_dagger_core(&args, silent).await?;
+            println!("ci: ruby install/test succeeded");
+        }
+        Some("php") => {
+            let dir = std::env::current_dir()?;
+            let project = paws_php::detect_project(&dir)
+                .context("failed to detect a PHP project in the current directory")?;
+            println!(
+                "ci: php project ({}){}",
+                dir.display(),
+                if project.has_phpunit {
+                    ""
+                } else {
+                    " — no phpunit config, skipping tests"
+                }
+            );
+            let args = paws_php::dagger_pipeline_args(&project, &dir.to_string_lossy());
+            run_dagger_core(&args, silent).await?;
+            println!("ci: php install/test succeeded");
+        }
+        Some("dotnet") => {
+            let dir = std::env::current_dir()?;
+            let project = paws_dotnet::detect_project(&dir)
+                .context("failed to detect a .NET project in the current directory")?;
+            println!(
+                "ci: dotnet project ({}){}",
+                dir.display(),
+                if project.has_tests {
+                    ""
+                } else {
+                    " — no test project, skipping dotnet test"
+                }
+            );
+            let args = paws_dotnet::dagger_pipeline_args(&project, &dir.to_string_lossy());
+            run_dagger_core(&args, silent).await?;
+            println!("ci: dotnet build/test succeeded");
+        }
+        Some("elixir") => {
+            let dir = std::env::current_dir()?;
+            let project = paws_elixir::detect_project(&dir)
+                .context("failed to detect an Elixir project in the current directory")?;
+            println!(
+                "ci: elixir project ({}){}",
+                dir.display(),
+                if project.has_lockfile {
+                    ""
+                } else {
+                    " — no mix.lock committed"
+                }
+            );
+            let args = paws_elixir::dagger_pipeline_args(&dir.to_string_lossy());
+            run_dagger_core(&args, silent).await?;
+            println!("ci: elixir build/test succeeded");
+        }
         Some("flatpak") => {
             let dir = std::env::current_dir()?;
             let project = paws_flatpak::detect_project(&dir)
@@ -1264,7 +1339,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             }
         }
         Some(other) => anyhow::bail!(
-            "unsupported --toolchain '{other}'; expected 'node', 'rust', 'python', 'go', 'java', 'kotlin', 'tauri', 'tauri-android', 'flatpak', or 'esp32'"
+            "unsupported --toolchain '{other}'; expected 'node', 'rust', 'python', 'go', 'java', 'kotlin', 'ruby', 'php', 'dotnet', 'elixir', 'tauri', 'tauri-android', 'flatpak', or 'esp32'"
         ),
         None => anyhow::bail!("--toolchain is required (e.g. --toolchain node)"),
     }

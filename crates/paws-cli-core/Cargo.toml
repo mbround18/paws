@@ -21,6 +21,10 @@ paws-rust = { path = "../paws-rust" }
 paws-go = { path = "../paws-go" }
 paws-java = { path = "../paws-java" }
 paws-kotlin = { path = "../paws-kotlin" }
+paws-ruby = { path = "../paws-ruby" }
+paws-php = { path = "../paws-php" }
+paws-dotnet = { path = "../paws-dotnet" }
+paws-elixir = { path = "../paws-elixir" }
 paws-esp32 = { path = "../paws-esp32" }
 paws-publish = { path = "../paws-publish" }
 paws-flatpak = { path = "../paws-flatpak" }

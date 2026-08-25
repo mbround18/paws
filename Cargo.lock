@@ -1211,6 +1211,8 @@ dependencies = [
  "paws-dagger",
  "paws-docker",
  "paws-docs",
+ "paws-dotnet",
+ "paws-elixir",
  "paws-environment",
  "paws-esp32",
  "paws-flatpak",
@@ -1219,10 +1221,12 @@ dependencies = [
  "paws-java",
  "paws-kotlin",
  "paws-node",
+ "paws-php",
  "paws-provision",
  "paws-publish",
  "paws-python",
  "paws-release",
+ "paws-ruby",
  "paws-rust",
  "paws-semver",
  "paws-tauri",
@@ -1272,6 +1276,20 @@ dependencies = [
  "paws-release",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "paws-dotnet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
+name = "paws-elixir"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]
@@ -1356,6 +1374,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "paws-php"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "paws-provision"
 version = "0.1.0"
 dependencies = [
@@ -1388,6 +1413,13 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "paws-ruby"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

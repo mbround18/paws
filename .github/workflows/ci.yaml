@@ -111,6 +111,61 @@ jobs:
             exit 1
           }
 
+  # The same FR-008 "exercised end-to-end against a real fixture, not just
+  # unit-tested" rule as `ci-e2e` above, for the JVM/Ruby/PHP/.NET/Elixir
+  # toolchains. A separate, matrixed job rather than more steps on `ci-e2e`:
+  # these are independent (nothing shared between a Gradle build and a
+  # `dotnet restore`) and individually slow — a Gradle or .NET cold run is
+  # minutes of image pull plus dependency resolution — so running them in
+  # parallel keeps the wall clock at "the slowest one" instead of "the sum".
+  # Two Java fixtures because `paws-java` has two genuinely different build
+  # systems to detect (Maven and Gradle), and `java-jdk25-toolchain-fixture`
+  # because it's the only one that proves `builders/java`'s JDK 21 + JDK 25
+  # split resolves a real `java.toolchain.languageVersion` requirement.
+  ci-e2e-languages:
+    name: paws ci ${{ matrix.toolchain }} (${{ matrix.fixture }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: java
+            fixture: java-maven-fixture
+          - toolchain: java
+            fixture: java-gradle-fixture
+          - toolchain: java
+            fixture: java-jdk25-toolchain-fixture
+          - toolchain: kotlin
+            fixture: kotlin-fixture
+          - toolchain: kotlin
+            fixture: java-kotlin-mixed-fixture
+          - toolchain: ruby
+            fixture: ruby-fixture
+          - toolchain: php
+            fixture: php-fixture
+          - toolchain: dotnet
+            fixture: dotnet-fixture
+          - toolchain: elixir
+            fixture: elixir-fixture
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry/build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build paws
+        run: cargo build -p paws-cli
+
+      - name: Install dagger CLI
+        run: curl -fsSL https://dl.dagger.io/dagger/install.sh | BIN_DIR=/usr/local/bin sh
+
+      - name: paws ci --toolchain ${{ matrix.toolchain }} (examples/${{ matrix.fixture }})
+        working-directory: examples/${{ matrix.fixture }}
+        run: ../../target/debug/paws ci --toolchain ${{ matrix.toolchain }}
+
   # specs/006-paws-doesn-expose FR-004/SC-001/SC-003: proves, against real
   # GitHub-hosted runners (not a unit test injecting env vars directly), that
   # the fixed `./actions/paws-up` (this branch's own copy, not a published
