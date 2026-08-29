@@ -1607,6 +1607,23 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
         // signal it gave.
         println!("{}", paws_docker::publish_summary(&outcomes));
 
+        // Downstream steps routinely need the tags that were actually
+        // published — to alias one, scan it, or record it in a release.
+        let published: Vec<String> = outcomes
+            .iter()
+            .filter_map(|outcome| match outcome {
+                paws_docker::PublishOutcome::Published { tags, .. } => Some(tags.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        paws_environment::write_outputs(&[
+            ("image", &image),
+            ("tags", &published.join("\n")),
+            ("published-count", &published.len().to_string()),
+        ])
+        .context("writing $GITHUB_OUTPUT")?;
+
         // Asked to push, pushed nothing: that is a failure, not a quiet
         // success. Every silent under-publish this tool has had would have
         // surfaced here at the moment it was introduced.
@@ -1770,6 +1787,10 @@ pub async fn run_semver(args: SemverArgs) -> anyhow::Result<()> {
 
     let version = compute_new_version(&tag_source, &request).await?;
     println!("{version}");
+
+    // So a workflow can use steps.<id>.outputs.version instead of scraping
+    // stdout, which breaks the moment this prints one more line.
+    paws_environment::write_outputs(&[("version", &version)]).context("writing $GITHUB_OUTPUT")?;
 
     if push {
         anyhow::ensure!(

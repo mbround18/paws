@@ -479,3 +479,123 @@ nyLOmeNH7f0X0tWR6B87/0i02mQpvK4v1N7MsvUIpQDM8g6zqqq8bRe9uCdTdw17
         assert!(err.to_string().contains("GH_APP_CLIENT_ID"));
     }
 }
+
+// --- GitHub Actions step outputs ------------------------------------------
+
+/// Format one entry for `$GITHUB_OUTPUT`.
+///
+/// Single-line values use `key=value`. Anything containing a newline needs the
+/// heredoc form, and the delimiter must not appear in the value — otherwise a
+/// value could close its own block early and forge further outputs. The
+/// delimiter is extended until it is absent from the value rather than assumed
+/// unique.
+pub fn format_output(key: &str, value: &str) -> String {
+    if !value.contains('\n') && !value.contains('\r') {
+        return format!("{key}={value}\n");
+    }
+
+    let mut delimiter = String::from("paws_eof");
+    while value.contains(&delimiter) {
+        delimiter.push('_');
+    }
+
+    format!("{key}<<{delimiter}\n{value}\n{delimiter}\n")
+}
+
+/// Append step outputs to `$GITHUB_OUTPUT`, if it is set.
+///
+/// A no-op when the variable is absent, so callers never branch on whether
+/// they are running under GitHub Actions. Returns whether anything was written.
+///
+/// Without this, every consumer has to scrape stdout —
+/// `version="$(paws semver … | tail -n1)"` — which breaks the moment a
+/// subcommand prints one extra line.
+pub fn write_outputs(pairs: &[(&str, &str)]) -> std::io::Result<bool> {
+    use std::io::Write as _;
+
+    let Ok(path) = std::env::var("GITHUB_OUTPUT") else {
+        return Ok(false);
+    };
+    if path.is_empty() || pairs.is_empty() {
+        return Ok(false);
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    for (key, value) in pairs {
+        file.write_all(format_output(key, value).as_bytes())?;
+    }
+
+    Ok(true)
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    #[test]
+    fn a_single_line_value_uses_the_simple_form() {
+        assert_eq!(format_output("version", "v1.2.3"), "version=v1.2.3\n");
+    }
+
+    #[test]
+    fn an_empty_value_is_still_written() {
+        // Consumers distinguish "set but empty" from "absent"; dropping it
+        // would make those look the same.
+        assert_eq!(format_output("tags", ""), "tags=\n");
+    }
+
+    #[test]
+    fn a_multiline_value_uses_a_heredoc() {
+        let formatted = format_output("tags", "ghcr.io/o/a:v1\nghcr.io/o/a:latest");
+
+        assert_eq!(
+            formatted,
+            "tags<<paws_eof\nghcr.io/o/a:v1\nghcr.io/o/a:latest\npaws_eof\n"
+        );
+    }
+
+    /// A value containing the delimiter could otherwise close its own block
+    /// early and forge whatever outputs followed.
+    #[test]
+    fn a_value_containing_the_delimiter_gets_a_longer_one() {
+        let formatted = format_output("body", "line\npaws_eof\nmore");
+
+        assert!(
+            formatted.starts_with("body<<paws_eof_\n"),
+            "got {formatted}"
+        );
+        assert!(formatted.ends_with("\npaws_eof_\n"));
+        // The literal in the value must not terminate the block.
+        assert!(formatted.contains("\npaws_eof\n"));
+    }
+
+    #[test]
+    fn the_delimiter_grows_until_it_is_unique() {
+        let value = "paws_eof\npaws_eof_\npaws_eof__";
+        let formatted = format_output("body", value);
+
+        assert!(
+            formatted.starts_with("body<<paws_eof___\n"),
+            "got {formatted}"
+        );
+    }
+
+    #[test]
+    fn carriage_returns_also_force_the_heredoc_form() {
+        // A bare \r would otherwise be written into a key=value line and
+        // truncate it on parse.
+        assert!(format_output("v", "a\rb").starts_with("v<<"));
+    }
+
+    #[test]
+    fn writing_is_a_no_op_without_the_environment_variable() {
+        // Safe regardless of how the suite is run: absent or empty both skip.
+        if std::env::var("GITHUB_OUTPUT").is_err() {
+            assert!(!write_outputs(&[("k", "v")]).unwrap());
+        }
+        assert!(!write_outputs(&[]).unwrap());
+    }
+}
