@@ -2,8 +2,8 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use paws_audit::{RepositorySignals, select_audit_scanners};
 use paws_docker::{
-    DockerFactsInput, GithubContext as DockerGithubContext, docker_hub_tags,
-    native_publish_pipeline_args, registry_token_env_var, resolve_docker_facts, tags_for_registry,
+    DockerFactsInput, GithubContext as DockerGithubContext, native_publish_pipeline_args,
+    resolve_docker_facts,
 };
 use paws_provision::{Ecosystem, Installer, provision_with_timing, real_installer};
 use paws_release::{AssetUploadMode, GitHubReleaseClient, archive_name, package_zip};
@@ -1446,102 +1446,32 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
     // known registries to go through a separate code path.
     let dockerhub_username = resolve_docker_credential(dockerhub_username, "DOCKERHUB_USERNAME");
     let ghcr_username = resolve_docker_credential(ghcr_username, "GHCR_USERNAME");
-    let extra_usernames = parse_registry_usernames(&registry_username)?;
 
-    // docker.io/ghcr.io mirror `dockerRelease`'s own graceful
-    // degrade — missing credentials there just skips that
-    // registry's publish (preserves existing behavior for repos
-    // that only ever configured one of the two). A registry
-    // reached via --registries (ghcr.io or a custom one) is an
-    // explicit ask, so missing credentials for it fails loudly
-    // instead — the whole reason `--registries` silently dropping
-    // docker.io got caught earlier this session was a *silent*
-    // under-publish; an explicit registry with no way to
-    // authenticate deserves the same loud treatment, not a repeat.
-    struct DockerPublishTarget<'a> {
-        registry: String,
-        tags: Vec<&'a str>,
-        username: Option<&'a String>,
-        token_env_var: String,
-        credentials_required: bool,
-        /// Which flag put this registry in the target list, so a missing
-        /// credential blames the right one.
-        origin: &'static str,
-    }
+    // Planning lives in paws-docker as a pure function so it can be
+    // table-tested without a Dagger daemon or a registry — see
+    // `plan_publish_targets`.
+    let extra_usernames: Vec<(String, String)> = parse_registry_usernames(&registry_username)?
+        .into_iter()
+        .collect();
 
-    // Credentials for a registry, following the DOCKER_TOKEN/GHCR_TOKEN
-    // convention and generalizing it to anything else.
-    let credentials_for = |registry: &str| {
-        let username = if registry == "ghcr.io" {
-            ghcr_username.as_ref()
-        } else {
-            extra_usernames.get(registry)
-        };
-        let token_env_var = if registry == "ghcr.io" {
-            // In GitHub Actions the natural GHCR credential is the workflow
-            // token, and requiring it to be copied into GHCR_TOKEN as well is a
-            // step everyone forgets — silently, since a missing token only
-            // skips the publish. Prefer GHCR_TOKEN when it is set, so an
-            // explicit choice still wins.
-            if std::env::var("GHCR_TOKEN").is_ok() || std::env::var("GITHUB_TOKEN").is_err() {
-                "GHCR_TOKEN".to_string()
-            } else {
-                "GITHUB_TOKEN".to_string()
-            }
-        } else {
-            registry_token_env_var(registry)
-        };
-        (username, token_env_var)
-    };
-
-    // A fully-qualified --image names the registry it is meant to publish to.
-    // That registry used to be a publish target only if it was *also* passed to
-    // --registries; otherwise its tags fell through to docker.io and were
-    // dropped for want of Docker Hub credentials, while the run still reported
-    // success.
-    let image_registry = paws_docker::registry_of(&image)
-        .map(str::to_string)
-        .filter(|registry| registry != "docker.io" && !registries.contains(registry));
-
-    let mut targets = vec![DockerPublishTarget {
-        registry: "docker.io".to_string(),
-        tags: docker_hub_tags(&facts.tags, &registries),
-        username: dockerhub_username.as_ref(),
-        token_env_var: "DOCKER_TOKEN".to_string(),
-        credentials_required: false,
-        origin: "--image",
-    }];
-
-    if let Some(registry) = &image_registry {
-        let (username, token_env_var) = credentials_for(registry);
-        targets.push(DockerPublishTarget {
-            registry: registry.clone(),
-            tags: tags_for_registry(&facts.tags, registry),
-            username,
-            token_env_var,
-            // Naming a registry in --image is as explicit an ask as naming it in
-            // --registries, so missing credentials fail loudly rather than
-            // publishing nothing and exiting zero.
-            credentials_required: true,
-            origin: "--image",
-        });
-    }
-
-    for registry in &registries {
-        let (username, token_env_var) = credentials_for(registry);
-        targets.push(DockerPublishTarget {
-            registry: registry.clone(),
-            tags: tags_for_registry(&facts.tags, registry),
-            username,
-            token_env_var,
-            credentials_required: registry != "ghcr.io",
-            origin: "--registries",
-        });
-    }
+    let targets = paws_docker::plan_publish_targets(&paws_docker::PublishPlanInput {
+        image: &image,
+        tags: &facts.tags,
+        registries: &registries,
+        dockerhub_username: dockerhub_username.as_deref(),
+        ghcr_username: ghcr_username.as_deref(),
+        extra_usernames: &extra_usernames,
+        ghcr_token_present: std::env::var("GHCR_TOKEN").is_ok(),
+        github_token_present: std::env::var("GITHUB_TOKEN").is_ok(),
+    });
 
     if facts.push {
+        // Recorded per target so the run can close with a ledger, rather than
+        // leaving per-target chatter as the only evidence of what happened.
+        let mut outcomes: Vec<paws_docker::PublishOutcome> = Vec::new();
+
         for target in &targets {
-            let DockerPublishTarget {
+            let paws_docker::PublishTarget {
                 registry,
                 tags,
                 username,
@@ -1550,6 +1480,9 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
                 origin,
             } = target;
             if tags.is_empty() {
+                outcomes.push(paws_docker::PublishOutcome::NoTags {
+                    registry: registry.clone(),
+                });
                 continue;
             }
             let username = match username {
@@ -1561,9 +1494,10 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
                         "--registry-username"
                     };
                     anyhow::bail!(
-                        "no username configured for {registry}, which {origin} asks to \
+                        "no username configured for {registry}, which {} asks to \
                          publish to — pass {flag} (or set the matching *_USERNAME env \
-                         var), and set ${token_env_var}"
+                         var), and set ${token_env_var}",
+                        origin.flag()
                     );
                 }
                 None => {
@@ -1572,6 +1506,10 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
                          ({} tag(s))",
                         tags.len()
                     );
+                    outcomes.push(paws_docker::PublishOutcome::Skipped {
+                        registry: registry.clone(),
+                        reason: paws_docker::SkipReason::NoUsername,
+                    });
                     continue;
                 }
             };
@@ -1585,6 +1523,12 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
                      ({} tag(s))",
                     tags.len()
                 );
+                outcomes.push(paws_docker::PublishOutcome::Skipped {
+                    registry: registry.clone(),
+                    reason: paws_docker::SkipReason::NoToken {
+                        env_var: token_env_var.clone(),
+                    },
+                });
                 continue;
             }
             for tag in tags {
@@ -1608,6 +1552,23 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
                     .with_context(|| format!("failed to publish {tag} to {registry}"))?;
                 println!("docker: published {tag}");
             }
+
+            outcomes.push(paws_docker::PublishOutcome::Published {
+                registry: registry.clone(),
+                tags: tags.clone(),
+            });
+        }
+
+        // Always close with what actually happened. A run that publishes
+        // nothing has repeatedly gone unnoticed because success was the only
+        // signal it gave.
+        println!("{}", paws_docker::publish_summary(&outcomes));
+
+        // Asked to push, pushed nothing: that is a failure, not a quiet
+        // success. Every silent under-publish this tool has had would have
+        // surfaced here at the moment it was introduced.
+        if let Some(error) = paws_docker::nothing_published_error(&outcomes) {
+            anyhow::bail!(error);
         }
     } else {
         let total_tags: usize = targets.iter().map(|t| t.tags.len()).sum();

@@ -678,6 +678,239 @@ pub fn tags_for_registry<'a>(tags: &'a [String], registry: &str) -> Vec<&'a str>
         .collect()
 }
 
+/// Which flag put a registry into the publish plan, so a missing credential
+/// blames the right one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetOrigin {
+    /// Docker Hub, which is always considered.
+    DockerHub,
+    /// A registry host named in `--image`.
+    Image,
+    /// A registry named in `--registries`.
+    Registries,
+}
+
+impl TargetOrigin {
+    /// The flag to cite when this target has no usable credential.
+    pub fn flag(self) -> &'static str {
+        match self {
+            Self::DockerHub => "--image",
+            Self::Image => "--image",
+            Self::Registries => "--registries",
+        }
+    }
+}
+
+/// One registry the build should publish to, and how to authenticate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishTarget {
+    pub registry: String,
+    pub tags: Vec<String>,
+    pub username: Option<String>,
+    /// Env var the password is read from at publish time.
+    pub token_env_var: String,
+    /// Whether missing credentials should fail the run rather than skip it.
+    pub credentials_required: bool,
+    pub origin: TargetOrigin,
+}
+
+/// Everything [`plan_publish_targets`] needs.
+///
+/// Credential *presence* is passed in rather than read from the environment, so
+/// planning stays a pure function and can be table-tested without a Dagger
+/// daemon, a registry, or environment mutation. Both bugs this planning has had
+/// — docker.io being silently dropped, and a fully-qualified `--image` never
+/// becoming its own target — lived in code that could not be tested this way.
+#[derive(Debug, Clone, Default)]
+pub struct PublishPlanInput<'a> {
+    pub image: &'a str,
+    pub tags: &'a [String],
+    pub registries: &'a [String],
+    pub dockerhub_username: Option<&'a str>,
+    pub ghcr_username: Option<&'a str>,
+    /// `--registry-username` entries, keyed by registry.
+    pub extra_usernames: &'a [(String, String)],
+    /// Whether `$GHCR_TOKEN` is set.
+    pub ghcr_token_present: bool,
+    /// Whether `$GITHUB_TOKEN` is set — the GHCR fallback.
+    pub github_token_present: bool,
+}
+
+/// Decide which registries to publish to, with which credentials.
+pub fn plan_publish_targets(input: &PublishPlanInput<'_>) -> Vec<PublishTarget> {
+    let owned = |tags: Vec<&str>| tags.into_iter().map(str::to_string).collect::<Vec<_>>();
+
+    let username_for = |registry: &str| -> Option<String> {
+        if registry == "ghcr.io" {
+            return input.ghcr_username.map(str::to_string);
+        }
+        input
+            .extra_usernames
+            .iter()
+            .find(|(name, _)| name == registry)
+            .map(|(_, user)| user.clone())
+    };
+
+    let token_env_for = |registry: &str| -> String {
+        if registry != "ghcr.io" {
+            return registry_token_env_var(registry);
+        }
+        // In GitHub Actions the workflow token is the natural GHCR credential,
+        // and copying it into GHCR_TOKEN as well is a step that is easy to
+        // forget — silently, because a missing token only skipped the publish.
+        // An explicitly set GHCR_TOKEN still wins.
+        if input.ghcr_token_present || !input.github_token_present {
+            "GHCR_TOKEN".to_string()
+        } else {
+            "GITHUB_TOKEN".to_string()
+        }
+    };
+
+    let mut targets = vec![PublishTarget {
+        registry: "docker.io".to_string(),
+        tags: owned(docker_hub_tags(input.tags, input.registries)),
+        username: input.dockerhub_username.map(str::to_string),
+        token_env_var: "DOCKER_TOKEN".to_string(),
+        // Docker Hub is always considered rather than asked for, so missing
+        // credentials degrade rather than fail — a repo that only ever
+        // configured ghcr.io must keep working.
+        credentials_required: false,
+        origin: TargetOrigin::DockerHub,
+    }];
+
+    // A fully-qualified --image names the registry it is meant to publish to.
+    let image_registry = registry_of(input.image)
+        .filter(|registry| *registry != "docker.io" && !input.registries.iter().any(|r| r == registry));
+
+    if let Some(registry) = image_registry {
+        targets.push(PublishTarget {
+            registry: registry.to_string(),
+            tags: owned(tags_for_registry(input.tags, registry)),
+            username: username_for(registry),
+            token_env_var: token_env_for(registry),
+            // Naming a registry in --image is as explicit an ask as naming it
+            // in --registries.
+            credentials_required: true,
+            origin: TargetOrigin::Image,
+        });
+    }
+
+    for registry in input.registries {
+        targets.push(PublishTarget {
+            registry: registry.clone(),
+            tags: owned(tags_for_registry(input.tags, registry)),
+            username: username_for(registry),
+            token_env_var: token_env_for(registry),
+            credentials_required: registry != "ghcr.io",
+            origin: TargetOrigin::Registries,
+        });
+    }
+
+    targets
+}
+
+/// Why a target with tags could not publish them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    NoUsername,
+    NoToken { env_var: String },
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoUsername => write!(f, "no username configured"),
+            Self::NoToken { env_var } => write!(f, "${env_var} not set"),
+        }
+    }
+}
+
+/// What actually happened for one publish target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishOutcome {
+    Published { registry: String, tags: Vec<String> },
+    /// Had tags, but could not publish them.
+    Skipped { registry: String, reason: SkipReason },
+    /// Had no tags of its own — normal when another registry owns them all.
+    NoTags { registry: String },
+}
+
+/// Total tags actually published across every target.
+pub fn published_tag_count(outcomes: &[PublishOutcome]) -> usize {
+    outcomes
+        .iter()
+        .map(|outcome| match outcome {
+            PublishOutcome::Published { tags, .. } => tags.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// A one-line ledger of what a publish run actually did.
+///
+/// Printed unconditionally, because the failure mode this exists for is a run
+/// that reports success while publishing nothing — and the thing that made it
+/// invisible was per-target chatter with no closing statement.
+pub fn publish_summary(outcomes: &[PublishOutcome]) -> String {
+    let mut published: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+
+    for outcome in outcomes {
+        match outcome {
+            PublishOutcome::Published { registry, tags } => {
+                published.push(format!("{} tag(s) to {registry}", tags.len()));
+            }
+            PublishOutcome::Skipped { registry, reason } => {
+                skipped.push(format!("{registry} ({reason})"));
+            }
+            // Not worth reporting: a registry with no tags was never asked to
+            // do anything.
+            PublishOutcome::NoTags { .. } => {}
+        }
+    }
+
+    let mut summary = if published.is_empty() {
+        "docker: published nothing".to_string()
+    } else {
+        format!("docker: published {}", published.join(", "))
+    };
+
+    if !skipped.is_empty() {
+        summary.push_str(&format!(" — skipped {}", skipped.join(", ")));
+    }
+
+    summary
+}
+
+/// An error message when a run was asked to push but published nothing.
+///
+/// Returns `None` when at least one tag published, or when there was nothing to
+/// publish in the first place.
+pub fn nothing_published_error(outcomes: &[PublishOutcome]) -> Option<String> {
+    if published_tag_count(outcomes) > 0 {
+        return None;
+    }
+
+    let blocked: Vec<String> = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            PublishOutcome::Skipped { registry, reason } => Some(format!("{registry}: {reason}")),
+            _ => None,
+        })
+        .collect();
+
+    // Nothing published and nothing blocked means there was nothing to do —
+    // no tags resolved at all, which is reported elsewhere.
+    if blocked.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "--push was requested but nothing was published ({})",
+        blocked.join("; ")
+    ))
+}
+
 /// The registry host an image reference names explicitly, if any.
 ///
 /// Follows Docker's own rule: the first path segment is a registry only when it
@@ -1432,6 +1665,293 @@ mod tests {
             docker_hub_tags(&tags, &["ghcr.io".to_string(), "myco.jfrog.io".to_string()]),
             vec!["app:v1.0.0"]
         );
+    }
+
+    // --- the publish ledger -----------------------------------------------
+    //
+    // Every case here is a shape this tool has actually shipped: a run that
+    // reported success while publishing nothing.
+
+    fn published(registry: &str, tags: &[&str]) -> PublishOutcome {
+        PublishOutcome::Published {
+            registry: registry.to_string(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    fn skipped_no_username(registry: &str) -> PublishOutcome {
+        PublishOutcome::Skipped {
+            registry: registry.to_string(),
+            reason: SkipReason::NoUsername,
+        }
+    }
+
+    fn skipped_no_token(registry: &str, env_var: &str) -> PublishOutcome {
+        PublishOutcome::Skipped {
+            registry: registry.to_string(),
+            reason: SkipReason::NoToken { env_var: env_var.to_string() },
+        }
+    }
+
+    #[test]
+    fn the_summary_states_what_published() {
+        let outcomes = vec![published("ghcr.io", &["ghcr.io/o/a:v1", "ghcr.io/o/a:latest"])];
+        assert_eq!(publish_summary(&outcomes), "docker: published 2 tag(s) to ghcr.io");
+    }
+
+    #[test]
+    fn the_summary_names_what_was_skipped_alongside_what_published() {
+        let outcomes = vec![
+            published("ghcr.io", &["ghcr.io/o/a:v1"]),
+            skipped_no_username("docker.io"),
+        ];
+        assert_eq!(
+            publish_summary(&outcomes),
+            "docker: published 1 tag(s) to ghcr.io — skipped docker.io (no username configured)"
+        );
+    }
+
+    /// The exact line the ghcr regression should have produced.
+    #[test]
+    fn the_summary_is_unambiguous_when_nothing_published() {
+        let outcomes = vec![skipped_no_username("docker.io")];
+        assert_eq!(
+            publish_summary(&outcomes),
+            "docker: published nothing — skipped docker.io (no username configured)"
+        );
+    }
+
+    #[test]
+    fn a_registry_with_no_tags_is_not_reported() {
+        // Normal whenever another registry owns every tag; reporting it would
+        // be noise that trains people to ignore the line.
+        let outcomes = vec![
+            published("ghcr.io", &["ghcr.io/o/a:v1"]),
+            PublishOutcome::NoTags { registry: "docker.io".to_string() },
+        ];
+        assert_eq!(publish_summary(&outcomes), "docker: published 1 tag(s) to ghcr.io");
+    }
+
+    #[test]
+    fn publishing_nothing_while_blocked_is_an_error() {
+        let outcomes = vec![skipped_no_username("docker.io")];
+
+        let error = nothing_published_error(&outcomes).expect("should fail the run");
+        assert!(error.contains("nothing was published"));
+        assert!(error.contains("docker.io: no username configured"));
+    }
+
+    #[test]
+    fn a_missing_token_is_reported_with_the_variable_to_set() {
+        let outcomes = vec![skipped_no_token("ghcr.io", "GHCR_TOKEN")];
+
+        let error = nothing_published_error(&outcomes).expect("should fail the run");
+        assert!(error.contains("$GHCR_TOKEN not set"), "got {error}");
+    }
+
+    #[test]
+    fn publishing_anything_at_all_is_not_an_error() {
+        // A partial publish is a real outcome, not a failure — the summary
+        // still names what was skipped.
+        let outcomes = vec![
+            published("ghcr.io", &["ghcr.io/o/a:v1"]),
+            skipped_no_username("docker.io"),
+        ];
+        assert_eq!(nothing_published_error(&outcomes), None);
+    }
+
+    #[test]
+    fn having_nothing_to_publish_is_not_an_error() {
+        // No tags anywhere is reported earlier as "no tags resolved"; it is
+        // not the silent-under-publish failure this guard exists for.
+        let outcomes = vec![PublishOutcome::NoTags { registry: "docker.io".to_string() }];
+        assert_eq!(nothing_published_error(&outcomes), None);
+        assert_eq!(nothing_published_error(&[]), None);
+    }
+
+    #[test]
+    fn published_tag_count_sums_across_registries() {
+        let outcomes = vec![
+            published("ghcr.io", &["a", "b"]),
+            published("docker.io", &["c"]),
+            skipped_no_username("myco.jfrog.io"),
+        ];
+        assert_eq!(published_tag_count(&outcomes), 3);
+    }
+
+    // --- publish planning -------------------------------------------------
+    //
+    // Planning is a pure function precisely so these can exist: every case
+    // below used to require a Dagger daemon, a registry, and environment
+    // mutation to exercise, which is why two planning bugs shipped.
+
+    fn tags(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    fn plan<'a>(image: &'a str, tag_list: &'a [String], registries: &'a [String]) -> PublishPlanInput<'a> {
+        PublishPlanInput {
+            image,
+            tags: tag_list,
+            registries,
+            ..Default::default()
+        }
+    }
+
+    fn target<'a>(targets: &'a [PublishTarget], registry: &str) -> &'a PublishTarget {
+        targets
+            .iter()
+            .find(|t| t.registry == registry)
+            .unwrap_or_else(|| panic!("no target for {registry} in {targets:#?}"))
+    }
+
+    #[test]
+    fn a_qualified_image_becomes_its_own_target() {
+        let tag_list = tags(&["ghcr.io/owner/app:v1.0.0"]);
+        let targets = plan_publish_targets(&plan("ghcr.io/owner/app", &tag_list, &[]));
+
+        let ghcr = target(&targets, "ghcr.io");
+        assert_eq!(ghcr.tags, vec!["ghcr.io/owner/app:v1.0.0"]);
+        assert_eq!(ghcr.origin, TargetOrigin::Image);
+        // The whole point: naming it in --image is an explicit ask, so a
+        // missing credential must fail rather than skip.
+        assert!(ghcr.credentials_required);
+
+        // ...and Docker Hub must not claim the tag.
+        assert!(target(&targets, "docker.io").tags.is_empty());
+    }
+
+    #[test]
+    fn a_bare_image_targets_docker_hub_only() {
+        let tag_list = tags(&["owner/app:v1.0.0"]);
+        let targets = plan_publish_targets(&plan("owner/app", &tag_list, &[]));
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].registry, "docker.io");
+        assert_eq!(targets[0].tags, vec!["owner/app:v1.0.0"]);
+        // Docker Hub is considered rather than asked for, so it degrades.
+        assert!(!targets[0].credentials_required);
+    }
+
+    #[test]
+    fn an_image_registry_repeated_in_registries_is_not_duplicated() {
+        let tag_list = tags(&["ghcr.io/owner/app:v1.0.0"]);
+        let registries = vec!["ghcr.io".to_string()];
+        let targets = plan_publish_targets(&plan("ghcr.io/owner/app", &tag_list, &registries));
+
+        assert_eq!(
+            targets.iter().filter(|t| t.registry == "ghcr.io").count(),
+            1,
+            "ghcr.io must appear once, not twice"
+        );
+        // Reached via --registries, ghcr.io keeps its graceful degrade.
+        assert_eq!(target(&targets, "ghcr.io").origin, TargetOrigin::Registries);
+    }
+
+    #[test]
+    fn an_explicitly_qualified_docker_io_image_stays_docker_hubs() {
+        let tag_list = tags(&["docker.io/owner/app:v1.0.0"]);
+        let targets = plan_publish_targets(&plan("docker.io/owner/app", &tag_list, &[]));
+
+        assert_eq!(targets.len(), 1, "docker.io must not be added twice");
+        assert_eq!(target(&targets, "docker.io").tags, vec!["docker.io/owner/app:v1.0.0"]);
+    }
+
+    #[test]
+    fn tags_are_routed_to_the_registry_that_owns_them() {
+        let tag_list = tags(&[
+            "owner/app:v1",
+            "ghcr.io/owner/app:v1",
+            "myco.jfrog.io/owner/app:v1",
+        ]);
+        let registries = vec!["ghcr.io".to_string(), "myco.jfrog.io".to_string()];
+        let targets = plan_publish_targets(&plan("owner/app", &tag_list, &registries));
+
+        assert_eq!(target(&targets, "docker.io").tags, vec!["owner/app:v1"]);
+        assert_eq!(target(&targets, "ghcr.io").tags, vec!["ghcr.io/owner/app:v1"]);
+        assert_eq!(
+            target(&targets, "myco.jfrog.io").tags,
+            vec!["myco.jfrog.io/owner/app:v1"]
+        );
+    }
+
+    #[test]
+    fn a_custom_registry_requires_credentials_and_derives_its_token_var() {
+        let tag_list = tags(&["myco.jfrog.io/app:v1"]);
+        let registries = vec!["myco.jfrog.io".to_string()];
+        let targets = plan_publish_targets(&plan("app", &tag_list, &registries));
+
+        let custom = target(&targets, "myco.jfrog.io");
+        assert_eq!(custom.token_env_var, "MYCO_JFROG_IO_TOKEN");
+        assert!(custom.credentials_required);
+    }
+
+    #[test]
+    fn ghcr_falls_back_to_the_workflow_token() {
+        let tag_list = tags(&["ghcr.io/owner/app:v1"]);
+        let base = plan("ghcr.io/owner/app", &tag_list, &[]);
+
+        // Neither set: name GHCR_TOKEN, so the error tells you what to set.
+        let neither = plan_publish_targets(&base);
+        assert_eq!(target(&neither, "ghcr.io").token_env_var, "GHCR_TOKEN");
+
+        // Only the workflow token: use it rather than skipping the publish.
+        let fallback = plan_publish_targets(&PublishPlanInput {
+            github_token_present: true,
+            ..base.clone()
+        });
+        assert_eq!(target(&fallback, "ghcr.io").token_env_var, "GITHUB_TOKEN");
+
+        // An explicit GHCR_TOKEN always wins.
+        let explicit = plan_publish_targets(&PublishPlanInput {
+            ghcr_token_present: true,
+            github_token_present: true,
+            ..base.clone()
+        });
+        assert_eq!(target(&explicit, "ghcr.io").token_env_var, "GHCR_TOKEN");
+    }
+
+    #[test]
+    fn usernames_are_routed_from_the_matching_flag() {
+        let tag_list = tags(&["owner/app:v1", "ghcr.io/owner/app:v1", "myco.jfrog.io/app:v1"]);
+        let registries = vec!["ghcr.io".to_string(), "myco.jfrog.io".to_string()];
+        let extra = vec![("myco.jfrog.io".to_string(), "deploy-bot".to_string())];
+
+        let targets = plan_publish_targets(&PublishPlanInput {
+            image: "owner/app",
+            tags: &tag_list,
+            registries: &registries,
+            dockerhub_username: Some("hub-user"),
+            ghcr_username: Some("ghcr-user"),
+            extra_usernames: &extra,
+            ..Default::default()
+        });
+
+        assert_eq!(target(&targets, "docker.io").username.as_deref(), Some("hub-user"));
+        assert_eq!(target(&targets, "ghcr.io").username.as_deref(), Some("ghcr-user"));
+        assert_eq!(
+            target(&targets, "myco.jfrog.io").username.as_deref(),
+            Some("deploy-bot")
+        );
+    }
+
+    #[test]
+    fn a_missing_credential_blames_the_flag_that_asked_for_the_registry() {
+        let tag_list = tags(&["ghcr.io/owner/app:v1"]);
+
+        let from_image = plan_publish_targets(&plan("ghcr.io/owner/app", &tag_list, &[]));
+        assert_eq!(target(&from_image, "ghcr.io").origin.flag(), "--image");
+
+        let registries = vec!["ghcr.io".to_string()];
+        let from_flag = plan_publish_targets(&plan("owner/app", &tag_list, &registries));
+        assert_eq!(target(&from_flag, "ghcr.io").origin.flag(), "--registries");
+    }
+
+    #[test]
+    fn planning_is_deterministic() {
+        let tag_list = tags(&["ghcr.io/owner/app:v1"]);
+        let input = plan("ghcr.io/owner/app", &tag_list, &[]);
+        assert_eq!(plan_publish_targets(&input), plan_publish_targets(&input));
     }
 
     /// The regression this all existed for: with `--image ghcr.io/owner/app`
