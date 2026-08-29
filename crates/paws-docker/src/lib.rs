@@ -678,6 +678,17 @@ pub fn tags_for_registry<'a>(tags: &'a [String], registry: &str) -> Vec<&'a str>
         .collect()
 }
 
+/// The registry host an image reference names explicitly, if any.
+///
+/// Follows Docker's own rule: the first path segment is a registry only when it
+/// looks like a host — it contains a `.` or a `:`, or is `localhost`. So
+/// `ghcr.io/owner/app` names ghcr.io, while `owner/app` is a Docker Hub
+/// namespace and `app` is a bare Docker Hub image.
+pub fn registry_of(image: &str) -> Option<&str> {
+    let (first, _rest) = image.split_once('/')?;
+    (first.contains('.') || first.contains(':') || first == "localhost").then_some(first)
+}
+
 /// The subset of `tags` that are docker.io's — [`generate_tags`] never
 /// prefixes docker.io's own tags with a registry hostname at all (a bare
 /// `"image:tag"`, or `"org/image:tag"` for a namespaced Docker Hub image —
@@ -687,6 +698,13 @@ pub fn tags_for_registry<'a>(tags: &'a [String], registry: &str) -> Vec<&'a str>
 /// Identified by elimination instead: whatever isn't prefixed by one of
 /// `extra_registries` (`--registries`, i.e. every registry *other* than
 /// docker.io) must be a docker.io tag.
+///
+/// Elimination alone is not enough, though. A tag built from a fully-qualified
+/// `--image` (`ghcr.io/owner/app`) is prefixed by no *extra* registry when
+/// `--registries` is empty, and used to be classified as a Docker Hub tag on
+/// that basis — so it was published to docker.io or, with no Docker Hub
+/// credentials, silently skipped. A reference that names its own registry is
+/// never a Docker Hub reference, so those are excluded too.
 pub fn docker_hub_tags<'a>(tags: &'a [String], extra_registries: &[String]) -> Vec<&'a str> {
     tags.iter()
         .map(|t| t.as_str())
@@ -695,6 +713,9 @@ pub fn docker_hub_tags<'a>(tags: &'a [String], extra_registries: &[String]) -> V
                 .iter()
                 .any(|r| t.starts_with(&format!("{r}/")))
         })
+        // An explicit registry other than docker.io means the tag belongs to
+        // that registry, not here.
+        .filter(|t| registry_of(t).is_none_or(|registry| registry == "docker.io"))
         .collect()
 }
 
@@ -1411,6 +1432,47 @@ mod tests {
             docker_hub_tags(&tags, &["ghcr.io".to_string(), "myco.jfrog.io".to_string()]),
             vec!["app:v1.0.0"]
         );
+    }
+
+    /// The regression this all existed for: with `--image ghcr.io/owner/app`
+    /// and no `--registries`, the ghcr tag is prefixed by no *extra* registry,
+    /// so elimination alone claimed it for docker.io. It was then published to
+    /// Docker Hub, or — with no Docker Hub credentials — skipped while the run
+    /// still reported success.
+    #[test]
+    fn docker_hub_tags_does_not_claim_a_qualified_image_with_no_extra_registries() {
+        let tags = vec!["ghcr.io/owner/app:v1.0.0".to_string()];
+
+        assert!(
+            docker_hub_tags(&tags, &[]).is_empty(),
+            "a ghcr.io reference is not a Docker Hub tag"
+        );
+        assert_eq!(
+            tags_for_registry(&tags, "ghcr.io"),
+            vec!["ghcr.io/owner/app:v1.0.0"],
+            "it belongs to ghcr.io"
+        );
+    }
+
+    /// docker.io named explicitly is still Docker Hub's.
+    #[test]
+    fn docker_hub_tags_keeps_an_explicitly_qualified_docker_io_tag() {
+        let tags = vec!["docker.io/owner/app:v1.0.0".to_string()];
+        assert_eq!(docker_hub_tags(&tags, &[]), vec!["docker.io/owner/app:v1.0.0"]);
+    }
+
+    #[test]
+    fn registry_of_follows_docker_reference_rules() {
+        // A host is recognised by a dot, a port, or being localhost.
+        assert_eq!(registry_of("ghcr.io/owner/app"), Some("ghcr.io"));
+        assert_eq!(registry_of("myco.jfrog.io/app:v1"), Some("myco.jfrog.io"));
+        assert_eq!(registry_of("localhost/app"), Some("localhost"));
+        assert_eq!(registry_of("localhost:5000/app"), Some("localhost:5000"));
+
+        // Docker Hub references name no registry, whether namespaced or not.
+        assert_eq!(registry_of("owner/app"), None);
+        assert_eq!(registry_of("app"), None);
+        assert_eq!(registry_of("app:v1"), None);
     }
 
     #[test]
