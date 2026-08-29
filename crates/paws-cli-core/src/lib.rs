@@ -78,21 +78,24 @@ mod field_defaults {
 /// Detects which of the ecosystems `paws-provision` knows about are needed in
 /// the current directory, purely from marker files (mirrors `paws-audit`'s
 /// signal-based detection, scoped to what `paws-provision` actually supports).
-fn detect_needed_ecosystems() -> Vec<Ecosystem> {
-    let mut ecosystems = Vec::new();
-    if std::path::Path::new("Cargo.toml").exists() {
-        ecosystems.push(Ecosystem::Rust);
-    }
-    if std::path::Path::new("package.json").exists() {
-        ecosystems.push(Ecosystem::Node);
-    }
-    if std::path::Path::new("pyproject.toml").exists() {
-        ecosystems.push(Ecosystem::Python);
-    }
-    if std::path::Path::new("go.mod").exists() {
-        ecosystems.push(Ecosystem::Go);
-    }
-    ecosystems
+/// Ecosystems whose marker files sit directly in `dir`.
+///
+/// Takes the directory rather than assuming the process's own, so `--source`
+/// provisions for the project actually being built rather than for whatever
+/// happens to be at the repo root.
+fn detect_needed_ecosystems(dir: &std::path::Path) -> Vec<Ecosystem> {
+    const MARKERS: &[(&str, Ecosystem)] = &[
+        ("Cargo.toml", Ecosystem::Rust),
+        ("package.json", Ecosystem::Node),
+        ("pyproject.toml", Ecosystem::Python),
+        ("go.mod", Ecosystem::Go),
+    ];
+
+    MARKERS
+        .iter()
+        .filter(|(marker, _)| dir.join(marker).exists())
+        .map(|(_, ecosystem)| *ecosystem)
+        .collect()
 }
 
 /// Runs a `dagger core <args>` pipeline, streaming its live progress to the
@@ -380,6 +383,14 @@ pub struct GenerateArgs {
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct CiArgs {
+    /// Directory to build, relative to the current one. Defaults to the
+    /// current directory.
+    ///
+    /// Lets a monorepo build a package in a subdirectory without the caller
+    /// having to `cd` first — `paws ci --toolchain node --source web`.
+    #[arg(long)]
+    #[serde(default)]
+    pub source: Option<String>,
     /// Which toolchain to build: node, rust, python, go, java, kotlin,
     /// ruby, php, dotnet, elixir, tauri, tauri-android, flatpak, or esp32.
     /// For `node`, the package manager
@@ -895,8 +906,30 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
     result
 }
 
+/// Resolve `--source` against the current directory, failing with a clear
+/// message rather than an opaque "not found" from whatever runs next.
+fn resolve_source_dir(source: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
+    let current = std::env::current_dir()?;
+    let Some(source) = source else {
+        return Ok(current);
+    };
+
+    let resolved = current.join(source);
+    if !resolved.is_dir() {
+        anyhow::bail!(
+            "--source {source} is not a directory (looked in {})",
+            current.display()
+        );
+    }
+
+    // Canonicalize so the path handed to Dagger's host mount is absolute and
+    // free of `..` segments.
+    Ok(resolved.canonicalize()?)
+}
+
 async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
     let CiArgs {
+        source,
         toolchain,
         verbose,
         silent,
@@ -915,10 +948,17 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
         anyhow::bail!("--publish-artifacts is only valid with --toolchain esp32");
     }
 
+    // Resolved once; every toolchain below builds from here rather than from
+    // whatever directory the caller happened to be in.
+    let source_dir = resolve_source_dir(source.as_deref())?;
+    if source.is_some() {
+        println!("ci: building {}", source_dir.display());
+    }
+
     // FR-015: provisioning must go through the same concurrent path as
     // `paws provision`, never a sequential loop, whenever the target
     // repo needs more than one ecosystem.
-    let needed = detect_needed_ecosystems();
+    let needed = detect_needed_ecosystems(&source_dir);
     if needed.len() > 1 {
         run_provisioning(needed, verbose).await?;
     }
@@ -926,7 +966,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
     paws_dagger::ensure_available().await?;
     match toolchain.as_deref() {
         Some("node") | Some("tauri") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let is_tauri = paws_tauri::is_tauri_project(&dir);
             if toolchain.as_deref() == Some("tauri") && !is_tauri {
                 anyhow::bail!(
@@ -980,7 +1020,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             }
         }
         Some("tauri-android") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             if !paws_tauri::is_tauri_project(&dir) {
                 anyhow::bail!(
                     "--toolchain tauri-android given, but no src-tauri/tauri.conf.json found in {}",
@@ -1005,7 +1045,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: tauri android build succeeded");
         }
         Some("python") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let project = paws_python::detect_project(&dir)
                 .context("failed to detect a Python project in the current directory")?;
             println!(
@@ -1022,7 +1062,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: python build/test succeeded");
         }
         Some("rust") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             if !paws_rust::is_rust_project(&dir) {
                 anyhow::bail!(
                     "--toolchain rust given, but no Cargo.toml found in {}",
@@ -1063,7 +1103,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: rust build/test succeeded");
         }
         Some("go") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             if !paws_go::is_go_project(&dir) {
                 anyhow::bail!(
                     "--toolchain go given, but no go.mod found in {}",
@@ -1106,7 +1146,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             }
         }
         Some("java") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let build_system = paws_java::detect_project(&dir)
                 .context("failed to detect a Java project in the current directory")?;
             println!(
@@ -1125,7 +1165,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: java build/test succeeded");
         }
         Some("kotlin") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             paws_kotlin::detect_project(&dir)
                 .context("failed to detect a Kotlin project in the current directory")?;
             println!("ci: kotlin project ({})", dir.display());
@@ -1139,7 +1179,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: kotlin build/test succeeded");
         }
         Some("ruby") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let project = paws_ruby::detect_project(&dir)
                 .context("failed to detect a Ruby project in the current directory")?;
             println!(
@@ -1152,7 +1192,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: ruby install/test succeeded");
         }
         Some("php") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let project = paws_php::detect_project(&dir)
                 .context("failed to detect a PHP project in the current directory")?;
             println!(
@@ -1169,7 +1209,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: php install/test succeeded");
         }
         Some("dotnet") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let project = paws_dotnet::detect_project(&dir)
                 .context("failed to detect a .NET project in the current directory")?;
             println!(
@@ -1186,7 +1226,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: dotnet build/test succeeded");
         }
         Some("elixir") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let project = paws_elixir::detect_project(&dir)
                 .context("failed to detect an Elixir project in the current directory")?;
             println!(
@@ -1203,7 +1243,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: elixir build/test succeeded");
         }
         Some("flatpak") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let project = paws_flatpak::detect_project(&dir)
                 .context("failed to detect a Flatpak manifest in the current directory")?;
             println!(
@@ -1222,7 +1262,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: flatpak build succeeded");
         }
         Some("esp32") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             if !paws_esp32::is_esp32_project(&dir) {
                 anyhow::bail!(
                     "--toolchain esp32 given, but no esp-idf-sys/esp-idf-svc dependency or \
@@ -1323,7 +1363,10 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
                 tokio::fs::create_dir_all(&release_dir)
                     .await
                     .with_context(|| {
-                        format!("failed to create {} for the esp32 export", release_dir.display())
+                        format!(
+                            "failed to create {} for the esp32 export",
+                            release_dir.display()
+                        )
                     })?;
                 let export_args = paws_esp32::dagger_export_pipeline_args(
                     &mount_dir.to_string_lossy(),
@@ -2778,6 +2821,7 @@ mod tests {
     #[tokio::test]
     async fn coverage_is_rejected_outside_toolchain_rust() {
         let args = CiArgs {
+            source: None,
             toolchain: Some("node".to_string()),
             verbose: false,
             silent: true,
@@ -2796,6 +2840,7 @@ mod tests {
     #[tokio::test]
     async fn coverage_with_no_toolchain_at_all_is_also_rejected() {
         let args = CiArgs {
+            source: None,
             toolchain: None,
             verbose: false,
             silent: true,
@@ -2817,6 +2862,7 @@ mod tests {
     #[tokio::test]
     async fn publish_artifacts_is_rejected_outside_toolchain_esp32() {
         let args = CiArgs {
+            source: None,
             toolchain: Some("rust".to_string()),
             verbose: false,
             silent: true,
@@ -2835,6 +2881,7 @@ mod tests {
     #[tokio::test]
     async fn publish_artifacts_with_no_toolchain_at_all_is_also_rejected() {
         let args = CiArgs {
+            source: None,
             toolchain: None,
             verbose: false,
             silent: true,
@@ -3205,5 +3252,94 @@ mod tests {
         assert_eq!(helm.output, "tmp");
         assert_eq!(helm.pages_branch, "gh-pages");
         assert_eq!(helm.index_path, "index.yaml");
+    }
+
+    // --- --source resolution and ecosystem detection ----------------------
+
+    /// Same idiom the other crates use for scratch dirs — no extra dependency.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("paws-ci-source-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    #[test]
+    fn no_source_flag_means_the_current_directory() {
+        let resolved = resolve_source_dir(None).expect("should resolve");
+        assert_eq!(resolved, std::env::current_dir().unwrap());
+    }
+
+    #[test]
+    fn a_source_that_is_not_a_directory_fails_with_the_path_it_looked_in() {
+        let error = resolve_source_dir(Some("definitely-not-here"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("definitely-not-here"), "got {error}");
+        // The message must say where it looked; "not a directory" alone sends
+        // you hunting.
+        assert!(error.contains("looked in"), "got {error}");
+    }
+
+    #[test]
+    fn a_file_is_not_a_valid_source() {
+        let dir = scratch("file-not-dir");
+        std::fs::write(dir.join("Cargo.toml"), "").unwrap();
+
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let result = resolve_source_dir(Some("Cargo.toml"));
+        std::env::set_current_dir(previous).unwrap();
+
+        assert!(
+            result.is_err(),
+            "a file must not resolve as a source directory"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ecosystems_are_detected_in_the_directory_given_not_the_process_one() {
+        let root = scratch("detect");
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        let web = root.join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("package.json"), "{}").unwrap();
+
+        // This is the monorepo case: --source web must provision for node,
+        // not for the rust project at the repo root.
+        assert_eq!(detect_needed_ecosystems(&root), vec![Ecosystem::Rust]);
+        assert_eq!(detect_needed_ecosystems(&web), vec![Ecosystem::Node]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_polyglot_directory_detects_every_ecosystem_present() {
+        let dir = scratch("polyglot");
+        for marker in ["Cargo.toml", "package.json", "pyproject.toml", "go.mod"] {
+            std::fs::write(dir.join(marker), "").unwrap();
+        }
+
+        assert_eq!(
+            detect_needed_ecosystems(&dir),
+            vec![
+                Ecosystem::Rust,
+                Ecosystem::Node,
+                Ecosystem::Python,
+                Ecosystem::Go
+            ]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_empty_directory_needs_no_provisioning() {
+        let dir = scratch("empty");
+        assert!(detect_needed_ecosystems(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

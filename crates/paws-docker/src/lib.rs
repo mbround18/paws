@@ -779,8 +779,9 @@ pub fn plan_publish_targets(input: &PublishPlanInput<'_>) -> Vec<PublishTarget> 
     }];
 
     // A fully-qualified --image names the registry it is meant to publish to.
-    let image_registry = registry_of(input.image)
-        .filter(|registry| *registry != "docker.io" && !input.registries.iter().any(|r| r == registry));
+    let image_registry = registry_of(input.image).filter(|registry| {
+        *registry != "docker.io" && !input.registries.iter().any(|r| r == registry)
+    });
 
     if let Some(registry) = image_registry {
         targets.push(PublishTarget {
@@ -828,11 +829,19 @@ impl std::fmt::Display for SkipReason {
 /// What actually happened for one publish target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishOutcome {
-    Published { registry: String, tags: Vec<String> },
+    Published {
+        registry: String,
+        tags: Vec<String>,
+    },
     /// Had tags, but could not publish them.
-    Skipped { registry: String, reason: SkipReason },
+    Skipped {
+        registry: String,
+        reason: SkipReason,
+    },
     /// Had no tags of its own — normal when another registry owns them all.
-    NoTags { registry: String },
+    NoTags {
+        registry: String,
+    },
 }
 
 /// Total tags actually published across every target.
@@ -1689,14 +1698,22 @@ mod tests {
     fn skipped_no_token(registry: &str, env_var: &str) -> PublishOutcome {
         PublishOutcome::Skipped {
             registry: registry.to_string(),
-            reason: SkipReason::NoToken { env_var: env_var.to_string() },
+            reason: SkipReason::NoToken {
+                env_var: env_var.to_string(),
+            },
         }
     }
 
     #[test]
     fn the_summary_states_what_published() {
-        let outcomes = vec![published("ghcr.io", &["ghcr.io/o/a:v1", "ghcr.io/o/a:latest"])];
-        assert_eq!(publish_summary(&outcomes), "docker: published 2 tag(s) to ghcr.io");
+        let outcomes = vec![published(
+            "ghcr.io",
+            &["ghcr.io/o/a:v1", "ghcr.io/o/a:latest"],
+        )];
+        assert_eq!(
+            publish_summary(&outcomes),
+            "docker: published 2 tag(s) to ghcr.io"
+        );
     }
 
     #[test]
@@ -1727,9 +1744,14 @@ mod tests {
         // be noise that trains people to ignore the line.
         let outcomes = vec![
             published("ghcr.io", &["ghcr.io/o/a:v1"]),
-            PublishOutcome::NoTags { registry: "docker.io".to_string() },
+            PublishOutcome::NoTags {
+                registry: "docker.io".to_string(),
+            },
         ];
-        assert_eq!(publish_summary(&outcomes), "docker: published 1 tag(s) to ghcr.io");
+        assert_eq!(
+            publish_summary(&outcomes),
+            "docker: published 1 tag(s) to ghcr.io"
+        );
     }
 
     #[test]
@@ -1764,7 +1786,9 @@ mod tests {
     fn having_nothing_to_publish_is_not_an_error() {
         // No tags anywhere is reported earlier as "no tags resolved"; it is
         // not the silent-under-publish failure this guard exists for.
-        let outcomes = vec![PublishOutcome::NoTags { registry: "docker.io".to_string() }];
+        let outcomes = vec![PublishOutcome::NoTags {
+            registry: "docker.io".to_string(),
+        }];
         assert_eq!(nothing_published_error(&outcomes), None);
         assert_eq!(nothing_published_error(&[]), None);
     }
@@ -1789,7 +1813,11 @@ mod tests {
         values.iter().map(|v| v.to_string()).collect()
     }
 
-    fn plan<'a>(image: &'a str, tag_list: &'a [String], registries: &'a [String]) -> PublishPlanInput<'a> {
+    fn plan<'a>(
+        image: &'a str,
+        tag_list: &'a [String],
+        registries: &'a [String],
+    ) -> PublishPlanInput<'a> {
         PublishPlanInput {
             image,
             tags: tag_list,
@@ -1854,7 +1882,10 @@ mod tests {
         let targets = plan_publish_targets(&plan("docker.io/owner/app", &tag_list, &[]));
 
         assert_eq!(targets.len(), 1, "docker.io must not be added twice");
-        assert_eq!(target(&targets, "docker.io").tags, vec!["docker.io/owner/app:v1.0.0"]);
+        assert_eq!(
+            target(&targets, "docker.io").tags,
+            vec!["docker.io/owner/app:v1.0.0"]
+        );
     }
 
     #[test]
@@ -1868,7 +1899,10 @@ mod tests {
         let targets = plan_publish_targets(&plan("owner/app", &tag_list, &registries));
 
         assert_eq!(target(&targets, "docker.io").tags, vec!["owner/app:v1"]);
-        assert_eq!(target(&targets, "ghcr.io").tags, vec!["ghcr.io/owner/app:v1"]);
+        assert_eq!(
+            target(&targets, "ghcr.io").tags,
+            vec!["ghcr.io/owner/app:v1"]
+        );
         assert_eq!(
             target(&targets, "myco.jfrog.io").tags,
             vec!["myco.jfrog.io/owner/app:v1"]
@@ -1913,7 +1947,11 @@ mod tests {
 
     #[test]
     fn usernames_are_routed_from_the_matching_flag() {
-        let tag_list = tags(&["owner/app:v1", "ghcr.io/owner/app:v1", "myco.jfrog.io/app:v1"]);
+        let tag_list = tags(&[
+            "owner/app:v1",
+            "ghcr.io/owner/app:v1",
+            "myco.jfrog.io/app:v1",
+        ]);
         let registries = vec!["ghcr.io".to_string(), "myco.jfrog.io".to_string()];
         let extra = vec![("myco.jfrog.io".to_string(), "deploy-bot".to_string())];
 
@@ -1927,8 +1965,14 @@ mod tests {
             ..Default::default()
         });
 
-        assert_eq!(target(&targets, "docker.io").username.as_deref(), Some("hub-user"));
-        assert_eq!(target(&targets, "ghcr.io").username.as_deref(), Some("ghcr-user"));
+        assert_eq!(
+            target(&targets, "docker.io").username.as_deref(),
+            Some("hub-user")
+        );
+        assert_eq!(
+            target(&targets, "ghcr.io").username.as_deref(),
+            Some("ghcr-user")
+        );
         assert_eq!(
             target(&targets, "myco.jfrog.io").username.as_deref(),
             Some("deploy-bot")
@@ -1978,7 +2022,10 @@ mod tests {
     #[test]
     fn docker_hub_tags_keeps_an_explicitly_qualified_docker_io_tag() {
         let tags = vec!["docker.io/owner/app:v1.0.0".to_string()];
-        assert_eq!(docker_hub_tags(&tags, &[]), vec!["docker.io/owner/app:v1.0.0"]);
+        assert_eq!(
+            docker_hub_tags(&tags, &[]),
+            vec!["docker.io/owner/app:v1.0.0"]
+        );
     }
 
     #[test]
