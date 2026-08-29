@@ -2421,19 +2421,110 @@ pub async fn run_release(args: ReleaseArgs) -> anyhow::Result<()> {
 /// kept separate from `RepositorySignals`'s raw filename map so the
 /// rendering logic is independent of `paws-audit`'s specific signal-file
 /// list and can be unit tested without touching the filesystem at all.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct DetectedWorkflowInputs {
-    rust: bool,
-    node: bool,
-    python: bool,
+    /// Directories holding a Rust project, relative to the repo root. "." is
+    /// the root itself.
+    rust: Vec<String>,
+    node: Vec<String>,
+    python: Vec<String>,
     docker: bool,
     helm: bool,
 }
 
 impl DetectedWorkflowInputs {
     fn any(&self) -> bool {
-        self.rust || self.node || self.python || self.docker || self.helm
+        !self.rust.is_empty()
+            || !self.node.is_empty()
+            || !self.python.is_empty()
+            || self.docker
+            || self.helm
     }
+}
+
+/// How far below the repo root to look for projects. Deep enough for the
+/// common `web/`, `apps/web/` and `packages/thing/` layouts without walking a
+/// whole tree.
+const PROJECT_SEARCH_DEPTH: usize = 3;
+
+/// Directories that never hold a project worth its own CI job.
+const SKIPPED_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "vendor",
+    "coverage",
+    ".venv",
+    "venv",
+    "__pycache__",
+];
+
+/// Directories at or under `root` holding `marker`, relative to `root`.
+///
+/// A directory holding the marker is not descended into. That is what keeps a
+/// Cargo workspace one project rather than one per member, while still finding
+/// `web/` and `e2e/` in a repo whose root has no package.json — the case where
+/// flat root-only detection produced a workflow covering half the repo.
+///
+/// A directory containing its own `.git` is skipped: a nested checkout is a
+/// different repository, not part of this one's CI. That covers vendored
+/// reference clones and submodules.
+///
+/// Gitignored directories without their own `.git` are still found — there is
+/// no gitignore parsing here. The generated workflow is a starting point, and
+/// an extra step is easier to notice and delete than a missing one is to
+/// notice at all, which is the failure this replaced.
+fn discover_projects(root: &std::path::Path, marker: &str, max_depth: usize) -> Vec<String> {
+    fn walk(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        marker: &str,
+        depth: usize,
+        max_depth: usize,
+        found: &mut Vec<String>,
+    ) {
+        if dir.join(marker).exists() {
+            let relative = dir.strip_prefix(root).unwrap_or(dir);
+            found.push(if relative.as_os_str().is_empty() {
+                ".".to_string()
+            } else {
+                relative.to_string_lossy().replace('\\', "/")
+            });
+            // Found here, so anything nested belongs to this project.
+            return;
+        }
+
+        if depth >= max_depth {
+            return;
+        }
+
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut children: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| !name.starts_with('.') && !SKIPPED_DIRS.contains(&name))
+            })
+            // A nested repository is not this repository.
+            .filter(|path| !path.join(".git").exists())
+            .collect();
+        // Stable output regardless of filesystem ordering.
+        children.sort();
+
+        for child in children {
+            walk(&child, root, marker, depth + 1, max_depth, found);
+        }
+    }
+
+    let mut found = Vec::new();
+    walk(root, root, marker, 0, max_depth, &mut found);
+    found
 }
 
 /// Renders a starter GitHub Actions workflow wiring `paws-up` plus one
@@ -2453,15 +2544,23 @@ fn render_github_workflow(detected: &DetectedWorkflowInputs) -> Option<String> {
     out.push_str("      - uses: actions/checkout@v7\n\n");
     out.push_str("      - uses: mbround18/paws/actions/paws-up@main\n\n");
 
-    if detected.rust {
-        out.push_str("      - run: paws ci --toolchain rust\n");
-    }
-    if detected.node {
-        out.push_str("      - run: paws ci --toolchain node\n");
-    }
-    if detected.python {
-        out.push_str("      - run: paws ci --toolchain python\n");
-    }
+    // One step per project. A project outside the repo root gets --source, so
+    // a monorepo does not need a working-directory on every step.
+    let mut step = |toolchain: &str, dirs: &[String]| {
+        for dir in dirs {
+            if dir == "." {
+                out.push_str(&format!("      - run: paws ci --toolchain {toolchain}\n"));
+            } else {
+                out.push_str(&format!(
+                    "      - run: paws ci --toolchain {toolchain} --source {dir}\n"
+                ));
+            }
+        }
+    };
+
+    step("rust", &detected.rust);
+    step("node", &detected.node);
+    step("python", &detected.python);
     if detected.docker {
         out.push_str(
             "      # Build-only by default — add --push plus registry credentials \
@@ -2488,9 +2587,11 @@ pub async fn run_workflow_generate(args: WorkflowGenerateArgs) -> anyhow::Result
     let signals = collect_repository_signals();
     let dir = std::env::current_dir()?;
     let detected = DetectedWorkflowInputs {
-        rust: signals.get("Cargo.toml").copied().unwrap_or(false),
-        node: signals.get("package.json").copied().unwrap_or(false),
-        python: signals.get("pyproject.toml").copied().unwrap_or(false),
+        // Discovered rather than read from the flat root-only signal map, so
+        // a project in a subdirectory gets its own step.
+        rust: discover_projects(&dir, "Cargo.toml", PROJECT_SEARCH_DEPTH),
+        node: discover_projects(&dir, "package.json", PROJECT_SEARCH_DEPTH),
+        python: discover_projects(&dir, "pyproject.toml", PROJECT_SEARCH_DEPTH),
         docker: [
             "Dockerfile",
             "docker-compose.yml",
@@ -2522,21 +2623,26 @@ pub async fn run_workflow_generate(args: WorkflowGenerateArgs) -> anyhow::Result
         .await
         .with_context(|| format!("failed to write {output}"))?;
 
-    let mut kinds = Vec::new();
-    if detected.rust {
-        kinds.push("rust");
-    }
-    if detected.node {
-        kinds.push("node");
-    }
-    if detected.python {
-        kinds.push("python");
-    }
+    let mut kinds: Vec<String> = Vec::new();
+    // Name the directories, not just the ecosystems: in a monorepo "node" alone
+    // does not tell you which projects were picked up.
+    let mut describe = |toolchain: &str, dirs: &[String]| {
+        for dir in dirs {
+            kinds.push(if dir == "." {
+                toolchain.to_string()
+            } else {
+                format!("{toolchain}:{dir}")
+            });
+        }
+    };
+    describe("rust", &detected.rust);
+    describe("node", &detected.node);
+    describe("python", &detected.python);
     if detected.docker {
-        kinds.push("docker");
+        kinds.push("docker".to_string());
     }
     if detected.helm {
-        kinds.push("helm");
+        kinds.push("helm".to_string());
     }
     println!("workflow: generated {output} ({})", kinds.join(", "));
 
@@ -3173,7 +3279,7 @@ mod tests {
     #[test]
     fn workflow_render_includes_only_detected_ecosystems() {
         let detected = DetectedWorkflowInputs {
-            rust: true,
+            rust: vec![".".to_string()],
             docker: true,
             ..Default::default()
         };
@@ -3184,6 +3290,114 @@ mod tests {
         assert!(!rendered.contains("paws ci --toolchain python"));
         assert!(!rendered.contains("paws helm"));
         assert!(rendered.contains("mbround18/paws/actions/paws-up@main"));
+    }
+
+    /// The monorepo case: a project outside the root gets --source, so the
+    /// generated workflow needs no working-directory on any step.
+    #[test]
+    fn workflow_render_points_subdirectory_projects_at_their_source() {
+        let detected = DetectedWorkflowInputs {
+            rust: vec![".".to_string()],
+            node: vec!["web".to_string(), "e2e".to_string()],
+            ..Default::default()
+        };
+        let rendered = render_github_workflow(&detected).expect("something was detected");
+
+        // The root project takes no --source.
+        assert!(rendered.contains("- run: paws ci --toolchain rust\n"));
+        assert!(!rendered.contains("--toolchain rust --source"));
+
+        // One step per node project, each pointed at its own directory.
+        assert!(rendered.contains("paws ci --toolchain node --source web"));
+        assert!(rendered.contains("paws ci --toolchain node --source e2e"));
+        assert_eq!(rendered.matches("--toolchain node").count(), 2);
+    }
+
+    // --- project discovery -------------------------------------------------
+
+    fn project_scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("paws-discover-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    fn touch(dir: &std::path::Path, relative: &str) {
+        let path = dir.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+    }
+
+    /// A Cargo workspace is one project, not one per member.
+    #[test]
+    fn discovery_does_not_descend_into_a_directory_that_already_matched() {
+        let root = project_scratch("workspace");
+        touch(&root, "Cargo.toml");
+        touch(&root, "crates/core/Cargo.toml");
+        touch(&root, "crates/server/Cargo.toml");
+
+        assert_eq!(discover_projects(&root, "Cargo.toml", 3), vec!["."]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The bug this replaced: root-only detection saw no package.json and
+    /// generated a workflow covering half the repo.
+    #[test]
+    fn discovery_finds_projects_in_subdirectories() {
+        let root = project_scratch("monorepo");
+        touch(&root, "Cargo.toml");
+        touch(&root, "web/package.json");
+        touch(&root, "e2e/package.json");
+
+        // Sorted, so the generated workflow is stable across filesystems.
+        assert_eq!(
+            discover_projects(&root, "package.json", 3),
+            vec!["e2e", "web"]
+        );
+        assert_eq!(discover_projects(&root, "Cargo.toml", 3), vec!["."]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn discovery_skips_build_output_and_hidden_directories() {
+        let root = project_scratch("noise");
+        touch(&root, "web/package.json");
+        touch(&root, "node_modules/some-dep/package.json");
+        touch(&root, "web/node_modules/other/package.json");
+        touch(&root, "dist/package.json");
+        touch(&root, ".cache/package.json");
+
+        assert_eq!(discover_projects(&root, "package.json", 3), vec!["web"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A vendored reference clone or submodule is a different repository.
+    #[test]
+    fn discovery_skips_nested_checkouts() {
+        let root = project_scratch("nested-git");
+        touch(&root, "web/package.json");
+        touch(&root, "upstream/package.json");
+        std::fs::create_dir_all(root.join("upstream/.git")).unwrap();
+
+        assert_eq!(discover_projects(&root, "package.json", 3), vec!["web"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn discovery_respects_the_depth_limit() {
+        let root = project_scratch("deep");
+        touch(&root, "a/b/c/d/package.json");
+
+        assert!(discover_projects(&root, "package.json", 3).is_empty());
+        assert_eq!(discover_projects(&root, "package.json", 4), vec!["a/b/c/d"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn discovery_finds_nothing_in_an_empty_tree() {
+        let root = project_scratch("bare");
+        assert!(discover_projects(&root, "package.json", 3).is_empty());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
