@@ -41,7 +41,7 @@ Build and test a language target (node, rust, python, go, java, kotlin, ruby, ph
 
 Build and gate a container image the same way `docker-facts` + `docker-release` do
 
-- `--image` — Image name, e.g. "ghcr.io/example/app". Falls back to $GITHUB_REPOSITORY
+- `--image` — Image name, e.g. "ghcr.io/example/app". Falls back to $GITHUB_REPOSITORY. A registry host here selects the registry to publish to — "ghcr.io/..." publishes to ghcr.io without also needing --registries. An unqualified name ("owner/app") is a Docker Hub reference, as docker itself reads it
 - `--version` — Version to tag with. Falls back to $GITHUB_SHA (short)
 - `--registries` — Additional registries to mirror tags into, comma-separated
 - `--dockerfile` — Path to the Dockerfile to build, relative to the repo root. Falls back to auto-detection (`Dockerfile` at the repo root, or a `compose.yml` service's own `dockerfile`/`context`)
@@ -54,7 +54,7 @@ Build and gate a container image the same way `docker-facts` + `docker-release` 
 - `--labels` — PR labels to check against --canary-label, comma-separated
 - `--default-branch` (default: `main`) — The repo's default branch. A push directly to this branch, or any tag push, always pushes the image — --canary-label/--push only matter for everything else (feature branches, PRs)
 - `--dockerhub-username` — Docker Hub username to authenticate publishing with. Falls back to $DOCKERHUB_USERNAME. Required (here or via env) to actually push to docker.io — without it, `dockerRelease` builds but can't authenticate, so `push=true` still publishes nothing
-- `--ghcr-username` — GHCR username to authenticate publishing with. Falls back to $GHCR_USERNAME. Required (here or via env) to actually push to ghcr.io
+- `--ghcr-username` — GHCR username to authenticate publishing with. Falls back to $GHCR_USERNAME. Required (here or via env) to actually push to ghcr.io. The password is read from $GHCR_TOKEN, falling back to $GITHUB_TOKEN — which is what a GitHub Actions workflow already has
 - `--registry-username` — Username(s) for registries in --registries other than docker.io/ghcr.io (Artifactory, a private registry, etc.), as "<registry>=<username>" pairs, comma-separated — e.g. "myco.jfrog.io=deploy-bot". These are built and published natively through Dagger (`Container.withRegistryAuth`), not via the docker.io/ghcr.io-only `dockerRelease` call. The matching token/password is read from an env var derived from the registry: uppercased, every non-alphanumeric character replaced with `_`, suffixed `_TOKEN` — e.g. "myco.jfrog.io" reads $MYCO_JFROG_IO_TOKEN
 - `--silent` — Suppress dagger's live build/publish progress; only print output once each pipeline finishes (or on failure). Default is streamed live
 - `--tag-rollup` — Also publish `major` and `major.minor` rollup tags (e.g. `:3` and `:3.2` alongside `:v3.2.1`) for release-quality version tags — the pattern consumers pinning to a major version for stability need. Gated identically to `--with-latest`: only on a real (non-prerelease) version tag build. Off by default; omitting this flag produces byte-identical output to before this flag existed. This is a `paws`-native tag scheme, not a byte-for-byte port of `crazy-max/ghaction-docker-meta`'s semver tag output

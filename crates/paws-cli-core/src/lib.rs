@@ -448,6 +448,9 @@ pub struct CiArgs {
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct DockerArgs {
     /// Image name, e.g. "ghcr.io/example/app". Falls back to $GITHUB_REPOSITORY.
+    /// A registry host here selects the registry to publish to — "ghcr.io/..."
+    /// publishes to ghcr.io without also needing --registries. An unqualified
+    /// name ("owner/app") is a Docker Hub reference, as docker itself reads it.
     #[arg(long)]
     #[serde(default)]
     pub image: Option<String>,
@@ -515,7 +518,8 @@ pub struct DockerArgs {
     pub dockerhub_username: Option<String>,
     /// GHCR username to authenticate publishing with. Falls back to
     /// $GHCR_USERNAME. Required (here or via env) to actually push to
-    /// ghcr.io.
+    /// ghcr.io. The password is read from $GHCR_TOKEN, falling back to
+    /// $GITHUB_TOKEN — which is what a GitHub Actions workflow already has.
     #[arg(long)]
     #[serde(default)]
     pub ghcr_username: Option<String>,
@@ -1460,7 +1464,44 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
         username: Option<&'a String>,
         token_env_var: String,
         credentials_required: bool,
+        /// Which flag put this registry in the target list, so a missing
+        /// credential blames the right one.
+        origin: &'static str,
     }
+
+    // Credentials for a registry, following the DOCKER_TOKEN/GHCR_TOKEN
+    // convention and generalizing it to anything else.
+    let credentials_for = |registry: &str| {
+        let username = if registry == "ghcr.io" {
+            ghcr_username.as_ref()
+        } else {
+            extra_usernames.get(registry)
+        };
+        let token_env_var = if registry == "ghcr.io" {
+            // In GitHub Actions the natural GHCR credential is the workflow
+            // token, and requiring it to be copied into GHCR_TOKEN as well is a
+            // step everyone forgets — silently, since a missing token only
+            // skips the publish. Prefer GHCR_TOKEN when it is set, so an
+            // explicit choice still wins.
+            if std::env::var("GHCR_TOKEN").is_ok() || std::env::var("GITHUB_TOKEN").is_err() {
+                "GHCR_TOKEN".to_string()
+            } else {
+                "GITHUB_TOKEN".to_string()
+            }
+        } else {
+            registry_token_env_var(registry)
+        };
+        (username, token_env_var)
+    };
+
+    // A fully-qualified --image names the registry it is meant to publish to.
+    // That registry used to be a publish target only if it was *also* passed to
+    // --registries; otherwise its tags fell through to docker.io and were
+    // dropped for want of Docker Hub credentials, while the run still reported
+    // success.
+    let image_registry = paws_docker::registry_of(&image)
+        .map(str::to_string)
+        .filter(|registry| registry != "docker.io" && !registries.contains(registry));
 
     let mut targets = vec![DockerPublishTarget {
         registry: "docker.io".to_string(),
@@ -1468,24 +1509,33 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
         username: dockerhub_username.as_ref(),
         token_env_var: "DOCKER_TOKEN".to_string(),
         credentials_required: false,
+        origin: "--image",
     }];
+
+    if let Some(registry) = &image_registry {
+        let (username, token_env_var) = credentials_for(registry);
+        targets.push(DockerPublishTarget {
+            registry: registry.clone(),
+            tags: tags_for_registry(&facts.tags, registry),
+            username,
+            token_env_var,
+            // Naming a registry in --image is as explicit an ask as naming it in
+            // --registries, so missing credentials fail loudly rather than
+            // publishing nothing and exiting zero.
+            credentials_required: true,
+            origin: "--image",
+        });
+    }
+
     for registry in &registries {
-        let username = if registry == "ghcr.io" {
-            ghcr_username.as_ref()
-        } else {
-            extra_usernames.get(registry)
-        };
-        let token_env_var = if registry == "ghcr.io" {
-            "GHCR_TOKEN".to_string()
-        } else {
-            registry_token_env_var(registry)
-        };
+        let (username, token_env_var) = credentials_for(registry);
         targets.push(DockerPublishTarget {
             registry: registry.clone(),
             tags: tags_for_registry(&facts.tags, registry),
             username,
             token_env_var,
             credentials_required: registry != "ghcr.io",
+            origin: "--registries",
         });
     }
 
@@ -1497,6 +1547,7 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
                 username,
                 token_env_var,
                 credentials_required,
+                origin,
             } = target;
             if tags.is_empty() {
                 continue;
@@ -1504,10 +1555,15 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
             let username = match username {
                 Some(u) => u,
                 None if *credentials_required => {
+                    let flag = if *registry == "ghcr.io" {
+                        "--ghcr-username"
+                    } else {
+                        "--registry-username"
+                    };
                     anyhow::bail!(
-                        "--registry-username is required for {registry} (got \
-                         --registries including it, but no matching \
-                         --registry-username entry) to actually publish"
+                        "no username configured for {registry}, which {origin} asks to \
+                         publish to — pass {flag} (or set the matching *_USERNAME env \
+                         var), and set ${token_env_var}"
                     );
                 }
                 None => {
