@@ -147,7 +147,9 @@ impl CacheBackend {
                 version: CacheApiVersion::V2,
             };
         }
-        if let Some(base_url) = non_empty("ACTIONS_CACHE_URL").or_else(|| non_empty("ACTIONS_RESULTS_URL")) {
+        if let Some(base_url) =
+            non_empty("ACTIONS_CACHE_URL").or_else(|| non_empty("ACTIONS_RESULTS_URL"))
+        {
             return CacheBackend::GitHubActionsCache {
                 base_url,
                 token,
@@ -376,8 +378,7 @@ impl ActionsCacheClient {
     /// this first cut).
     async fn reserve(&self, key: &str, size: u64) -> Result<u64> {
         let url = format!("{}/_apis/artifactcache/caches", self.base_url);
-        let body =
-            serde_json::json!({ "key": key, "version": short_cache_version(key), "cacheSize": size });
+        let body = serde_json::json!({ "key": key, "version": short_cache_version(key), "cacheSize": size });
         let response = self
             .auth_headers(self.client.post(&url))
             .json(&body)
@@ -535,7 +536,11 @@ impl ActionsCacheClientV2 {
     async fn find_entry(&self, key: &str) -> Result<Option<String>> {
         let body = serde_json::json!({ "key": key, "restore_keys": [], "version": short_cache_version(key) });
         let response = self.call("GetCacheEntryDownloadURL", body).await?;
-        if !response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !response
+            .get("ok")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             return Ok(None);
         }
         Ok(json_str(&response, "signedDownloadUrl", "signed_download_url").map(String::from))
@@ -562,7 +567,11 @@ impl ActionsCacheClientV2 {
     async fn create_entry(&self, key: &str) -> Result<String> {
         let body = serde_json::json!({ "key": key, "version": short_cache_version(key) });
         let response = self.call("CreateCacheEntry", body).await?;
-        if !response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !response
+            .get("ok")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             let message = response
                 .get("message")
                 .and_then(|v| v.as_str())
@@ -601,7 +610,11 @@ impl ActionsCacheClientV2 {
     async fn finalize(&self, key: &str, size: u64) -> Result<()> {
         let body = serde_json::json!({ "key": key, "version": short_cache_version(key), "size_bytes": size.to_string() });
         let response = self.call("FinalizeCacheEntryUpload", body).await?;
-        if !response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !response
+            .get("ok")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             let message = response
                 .get("message")
                 .and_then(|v| v.as_str())

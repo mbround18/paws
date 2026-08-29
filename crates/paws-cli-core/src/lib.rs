@@ -78,21 +78,24 @@ mod field_defaults {
 /// Detects which of the ecosystems `paws-provision` knows about are needed in
 /// the current directory, purely from marker files (mirrors `paws-audit`'s
 /// signal-based detection, scoped to what `paws-provision` actually supports).
-fn detect_needed_ecosystems() -> Vec<Ecosystem> {
-    let mut ecosystems = Vec::new();
-    if std::path::Path::new("Cargo.toml").exists() {
-        ecosystems.push(Ecosystem::Rust);
-    }
-    if std::path::Path::new("package.json").exists() {
-        ecosystems.push(Ecosystem::Node);
-    }
-    if std::path::Path::new("pyproject.toml").exists() {
-        ecosystems.push(Ecosystem::Python);
-    }
-    if std::path::Path::new("go.mod").exists() {
-        ecosystems.push(Ecosystem::Go);
-    }
-    ecosystems
+/// Ecosystems whose marker files sit directly in `dir`.
+///
+/// Takes the directory rather than assuming the process's own, so `--source`
+/// provisions for the project actually being built rather than for whatever
+/// happens to be at the repo root.
+fn detect_needed_ecosystems(dir: &std::path::Path) -> Vec<Ecosystem> {
+    const MARKERS: &[(&str, Ecosystem)] = &[
+        ("Cargo.toml", Ecosystem::Rust),
+        ("package.json", Ecosystem::Node),
+        ("pyproject.toml", Ecosystem::Python),
+        ("go.mod", Ecosystem::Go),
+    ];
+
+    MARKERS
+        .iter()
+        .filter(|(marker, _)| dir.join(marker).exists())
+        .map(|(_, ecosystem)| *ecosystem)
+        .collect()
 }
 
 /// Runs a `dagger core <args>` pipeline, streaming its live progress to the
@@ -380,6 +383,14 @@ pub struct GenerateArgs {
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct CiArgs {
+    /// Directory to build, relative to the current one. Defaults to the
+    /// current directory.
+    ///
+    /// Lets a monorepo build a package in a subdirectory without the caller
+    /// having to `cd` first — `paws ci --toolchain node --source web`.
+    #[arg(long)]
+    #[serde(default)]
+    pub source: Option<String>,
     /// Which toolchain to build: node, rust, python, go, java, kotlin,
     /// ruby, php, dotnet, elixir, tauri, tauri-android, flatpak, or esp32.
     /// For `node`, the package manager
@@ -895,8 +906,30 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
     result
 }
 
+/// Resolve `--source` against the current directory, failing with a clear
+/// message rather than an opaque "not found" from whatever runs next.
+fn resolve_source_dir(source: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
+    let current = std::env::current_dir()?;
+    let Some(source) = source else {
+        return Ok(current);
+    };
+
+    let resolved = current.join(source);
+    if !resolved.is_dir() {
+        anyhow::bail!(
+            "--source {source} is not a directory (looked in {})",
+            current.display()
+        );
+    }
+
+    // Canonicalize so the path handed to Dagger's host mount is absolute and
+    // free of `..` segments.
+    Ok(resolved.canonicalize()?)
+}
+
 async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
     let CiArgs {
+        source,
         toolchain,
         verbose,
         silent,
@@ -915,10 +948,17 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
         anyhow::bail!("--publish-artifacts is only valid with --toolchain esp32");
     }
 
+    // Resolved once; every toolchain below builds from here rather than from
+    // whatever directory the caller happened to be in.
+    let source_dir = resolve_source_dir(source.as_deref())?;
+    if source.is_some() {
+        println!("ci: building {}", source_dir.display());
+    }
+
     // FR-015: provisioning must go through the same concurrent path as
     // `paws provision`, never a sequential loop, whenever the target
     // repo needs more than one ecosystem.
-    let needed = detect_needed_ecosystems();
+    let needed = detect_needed_ecosystems(&source_dir);
     if needed.len() > 1 {
         run_provisioning(needed, verbose).await?;
     }
@@ -926,7 +966,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
     paws_dagger::ensure_available().await?;
     match toolchain.as_deref() {
         Some("node") | Some("tauri") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let is_tauri = paws_tauri::is_tauri_project(&dir);
             if toolchain.as_deref() == Some("tauri") && !is_tauri {
                 anyhow::bail!(
@@ -980,7 +1020,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             }
         }
         Some("tauri-android") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             if !paws_tauri::is_tauri_project(&dir) {
                 anyhow::bail!(
                     "--toolchain tauri-android given, but no src-tauri/tauri.conf.json found in {}",
@@ -1005,7 +1045,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: tauri android build succeeded");
         }
         Some("python") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let project = paws_python::detect_project(&dir)
                 .context("failed to detect a Python project in the current directory")?;
             println!(
@@ -1022,7 +1062,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: python build/test succeeded");
         }
         Some("rust") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             if !paws_rust::is_rust_project(&dir) {
                 anyhow::bail!(
                     "--toolchain rust given, but no Cargo.toml found in {}",
@@ -1063,7 +1103,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: rust build/test succeeded");
         }
         Some("go") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             if !paws_go::is_go_project(&dir) {
                 anyhow::bail!(
                     "--toolchain go given, but no go.mod found in {}",
@@ -1106,7 +1146,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             }
         }
         Some("java") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let build_system = paws_java::detect_project(&dir)
                 .context("failed to detect a Java project in the current directory")?;
             println!(
@@ -1125,7 +1165,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: java build/test succeeded");
         }
         Some("kotlin") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             paws_kotlin::detect_project(&dir)
                 .context("failed to detect a Kotlin project in the current directory")?;
             println!("ci: kotlin project ({})", dir.display());
@@ -1139,7 +1179,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: kotlin build/test succeeded");
         }
         Some("ruby") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let project = paws_ruby::detect_project(&dir)
                 .context("failed to detect a Ruby project in the current directory")?;
             println!(
@@ -1152,7 +1192,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: ruby install/test succeeded");
         }
         Some("php") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let project = paws_php::detect_project(&dir)
                 .context("failed to detect a PHP project in the current directory")?;
             println!(
@@ -1169,7 +1209,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: php install/test succeeded");
         }
         Some("dotnet") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let project = paws_dotnet::detect_project(&dir)
                 .context("failed to detect a .NET project in the current directory")?;
             println!(
@@ -1186,7 +1226,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: dotnet build/test succeeded");
         }
         Some("elixir") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let project = paws_elixir::detect_project(&dir)
                 .context("failed to detect an Elixir project in the current directory")?;
             println!(
@@ -1203,7 +1243,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: elixir build/test succeeded");
         }
         Some("flatpak") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             let project = paws_flatpak::detect_project(&dir)
                 .context("failed to detect a Flatpak manifest in the current directory")?;
             println!(
@@ -1222,7 +1262,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
             println!("ci: flatpak build succeeded");
         }
         Some("esp32") => {
-            let dir = std::env::current_dir()?;
+            let dir = source_dir.clone();
             if !paws_esp32::is_esp32_project(&dir) {
                 anyhow::bail!(
                     "--toolchain esp32 given, but no esp-idf-sys/esp-idf-svc dependency or \
@@ -1323,7 +1363,10 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
                 tokio::fs::create_dir_all(&release_dir)
                     .await
                     .with_context(|| {
-                        format!("failed to create {} for the esp32 export", release_dir.display())
+                        format!(
+                            "failed to create {} for the esp32 export",
+                            release_dir.display()
+                        )
                     })?;
                 let export_args = paws_esp32::dagger_export_pipeline_args(
                     &mount_dir.to_string_lossy(),
@@ -1564,6 +1607,23 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
         // signal it gave.
         println!("{}", paws_docker::publish_summary(&outcomes));
 
+        // Downstream steps routinely need the tags that were actually
+        // published — to alias one, scan it, or record it in a release.
+        let published: Vec<String> = outcomes
+            .iter()
+            .filter_map(|outcome| match outcome {
+                paws_docker::PublishOutcome::Published { tags, .. } => Some(tags.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        paws_environment::write_outputs(&[
+            ("image", &image),
+            ("tags", &published.join("\n")),
+            ("published-count", &published.len().to_string()),
+        ])
+        .context("writing $GITHUB_OUTPUT")?;
+
         // Asked to push, pushed nothing: that is a failure, not a quiet
         // success. Every silent under-publish this tool has had would have
         // surfaced here at the moment it was introduced.
@@ -1727,6 +1787,10 @@ pub async fn run_semver(args: SemverArgs) -> anyhow::Result<()> {
 
     let version = compute_new_version(&tag_source, &request).await?;
     println!("{version}");
+
+    // So a workflow can use steps.<id>.outputs.version instead of scraping
+    // stdout, which breaks the moment this prints one more line.
+    paws_environment::write_outputs(&[("version", &version)]).context("writing $GITHUB_OUTPUT")?;
 
     if push {
         anyhow::ensure!(
@@ -2357,19 +2421,110 @@ pub async fn run_release(args: ReleaseArgs) -> anyhow::Result<()> {
 /// kept separate from `RepositorySignals`'s raw filename map so the
 /// rendering logic is independent of `paws-audit`'s specific signal-file
 /// list and can be unit tested without touching the filesystem at all.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct DetectedWorkflowInputs {
-    rust: bool,
-    node: bool,
-    python: bool,
+    /// Directories holding a Rust project, relative to the repo root. "." is
+    /// the root itself.
+    rust: Vec<String>,
+    node: Vec<String>,
+    python: Vec<String>,
     docker: bool,
     helm: bool,
 }
 
 impl DetectedWorkflowInputs {
     fn any(&self) -> bool {
-        self.rust || self.node || self.python || self.docker || self.helm
+        !self.rust.is_empty()
+            || !self.node.is_empty()
+            || !self.python.is_empty()
+            || self.docker
+            || self.helm
     }
+}
+
+/// How far below the repo root to look for projects. Deep enough for the
+/// common `web/`, `apps/web/` and `packages/thing/` layouts without walking a
+/// whole tree.
+const PROJECT_SEARCH_DEPTH: usize = 3;
+
+/// Directories that never hold a project worth its own CI job.
+const SKIPPED_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "vendor",
+    "coverage",
+    ".venv",
+    "venv",
+    "__pycache__",
+];
+
+/// Directories at or under `root` holding `marker`, relative to `root`.
+///
+/// A directory holding the marker is not descended into. That is what keeps a
+/// Cargo workspace one project rather than one per member, while still finding
+/// `web/` and `e2e/` in a repo whose root has no package.json — the case where
+/// flat root-only detection produced a workflow covering half the repo.
+///
+/// A directory containing its own `.git` is skipped: a nested checkout is a
+/// different repository, not part of this one's CI. That covers vendored
+/// reference clones and submodules.
+///
+/// Gitignored directories without their own `.git` are still found — there is
+/// no gitignore parsing here. The generated workflow is a starting point, and
+/// an extra step is easier to notice and delete than a missing one is to
+/// notice at all, which is the failure this replaced.
+fn discover_projects(root: &std::path::Path, marker: &str, max_depth: usize) -> Vec<String> {
+    fn walk(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        marker: &str,
+        depth: usize,
+        max_depth: usize,
+        found: &mut Vec<String>,
+    ) {
+        if dir.join(marker).exists() {
+            let relative = dir.strip_prefix(root).unwrap_or(dir);
+            found.push(if relative.as_os_str().is_empty() {
+                ".".to_string()
+            } else {
+                relative.to_string_lossy().replace('\\', "/")
+            });
+            // Found here, so anything nested belongs to this project.
+            return;
+        }
+
+        if depth >= max_depth {
+            return;
+        }
+
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut children: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| !name.starts_with('.') && !SKIPPED_DIRS.contains(&name))
+            })
+            // A nested repository is not this repository.
+            .filter(|path| !path.join(".git").exists())
+            .collect();
+        // Stable output regardless of filesystem ordering.
+        children.sort();
+
+        for child in children {
+            walk(&child, root, marker, depth + 1, max_depth, found);
+        }
+    }
+
+    let mut found = Vec::new();
+    walk(root, root, marker, 0, max_depth, &mut found);
+    found
 }
 
 /// Renders a starter GitHub Actions workflow wiring `paws-up` plus one
@@ -2389,15 +2544,23 @@ fn render_github_workflow(detected: &DetectedWorkflowInputs) -> Option<String> {
     out.push_str("      - uses: actions/checkout@v7\n\n");
     out.push_str("      - uses: mbround18/paws/actions/paws-up@main\n\n");
 
-    if detected.rust {
-        out.push_str("      - run: paws ci --toolchain rust\n");
-    }
-    if detected.node {
-        out.push_str("      - run: paws ci --toolchain node\n");
-    }
-    if detected.python {
-        out.push_str("      - run: paws ci --toolchain python\n");
-    }
+    // One step per project. A project outside the repo root gets --source, so
+    // a monorepo does not need a working-directory on every step.
+    let mut step = |toolchain: &str, dirs: &[String]| {
+        for dir in dirs {
+            if dir == "." {
+                out.push_str(&format!("      - run: paws ci --toolchain {toolchain}\n"));
+            } else {
+                out.push_str(&format!(
+                    "      - run: paws ci --toolchain {toolchain} --source {dir}\n"
+                ));
+            }
+        }
+    };
+
+    step("rust", &detected.rust);
+    step("node", &detected.node);
+    step("python", &detected.python);
     if detected.docker {
         out.push_str(
             "      # Build-only by default — add --push plus registry credentials \
@@ -2424,9 +2587,11 @@ pub async fn run_workflow_generate(args: WorkflowGenerateArgs) -> anyhow::Result
     let signals = collect_repository_signals();
     let dir = std::env::current_dir()?;
     let detected = DetectedWorkflowInputs {
-        rust: signals.get("Cargo.toml").copied().unwrap_or(false),
-        node: signals.get("package.json").copied().unwrap_or(false),
-        python: signals.get("pyproject.toml").copied().unwrap_or(false),
+        // Discovered rather than read from the flat root-only signal map, so
+        // a project in a subdirectory gets its own step.
+        rust: discover_projects(&dir, "Cargo.toml", PROJECT_SEARCH_DEPTH),
+        node: discover_projects(&dir, "package.json", PROJECT_SEARCH_DEPTH),
+        python: discover_projects(&dir, "pyproject.toml", PROJECT_SEARCH_DEPTH),
         docker: [
             "Dockerfile",
             "docker-compose.yml",
@@ -2458,21 +2623,26 @@ pub async fn run_workflow_generate(args: WorkflowGenerateArgs) -> anyhow::Result
         .await
         .with_context(|| format!("failed to write {output}"))?;
 
-    let mut kinds = Vec::new();
-    if detected.rust {
-        kinds.push("rust");
-    }
-    if detected.node {
-        kinds.push("node");
-    }
-    if detected.python {
-        kinds.push("python");
-    }
+    let mut kinds: Vec<String> = Vec::new();
+    // Name the directories, not just the ecosystems: in a monorepo "node" alone
+    // does not tell you which projects were picked up.
+    let mut describe = |toolchain: &str, dirs: &[String]| {
+        for dir in dirs {
+            kinds.push(if dir == "." {
+                toolchain.to_string()
+            } else {
+                format!("{toolchain}:{dir}")
+            });
+        }
+    };
+    describe("rust", &detected.rust);
+    describe("node", &detected.node);
+    describe("python", &detected.python);
     if detected.docker {
-        kinds.push("docker");
+        kinds.push("docker".to_string());
     }
     if detected.helm {
-        kinds.push("helm");
+        kinds.push("helm".to_string());
     }
     println!("workflow: generated {output} ({})", kinds.join(", "));
 
@@ -2778,6 +2948,7 @@ mod tests {
     #[tokio::test]
     async fn coverage_is_rejected_outside_toolchain_rust() {
         let args = CiArgs {
+            source: None,
             toolchain: Some("node".to_string()),
             verbose: false,
             silent: true,
@@ -2796,6 +2967,7 @@ mod tests {
     #[tokio::test]
     async fn coverage_with_no_toolchain_at_all_is_also_rejected() {
         let args = CiArgs {
+            source: None,
             toolchain: None,
             verbose: false,
             silent: true,
@@ -2817,6 +2989,7 @@ mod tests {
     #[tokio::test]
     async fn publish_artifacts_is_rejected_outside_toolchain_esp32() {
         let args = CiArgs {
+            source: None,
             toolchain: Some("rust".to_string()),
             verbose: false,
             silent: true,
@@ -2835,6 +3008,7 @@ mod tests {
     #[tokio::test]
     async fn publish_artifacts_with_no_toolchain_at_all_is_also_rejected() {
         let args = CiArgs {
+            source: None,
             toolchain: None,
             verbose: false,
             silent: true,
@@ -3105,7 +3279,7 @@ mod tests {
     #[test]
     fn workflow_render_includes_only_detected_ecosystems() {
         let detected = DetectedWorkflowInputs {
-            rust: true,
+            rust: vec![".".to_string()],
             docker: true,
             ..Default::default()
         };
@@ -3116,6 +3290,114 @@ mod tests {
         assert!(!rendered.contains("paws ci --toolchain python"));
         assert!(!rendered.contains("paws helm"));
         assert!(rendered.contains("mbround18/paws/actions/paws-up@main"));
+    }
+
+    /// The monorepo case: a project outside the root gets --source, so the
+    /// generated workflow needs no working-directory on any step.
+    #[test]
+    fn workflow_render_points_subdirectory_projects_at_their_source() {
+        let detected = DetectedWorkflowInputs {
+            rust: vec![".".to_string()],
+            node: vec!["web".to_string(), "e2e".to_string()],
+            ..Default::default()
+        };
+        let rendered = render_github_workflow(&detected).expect("something was detected");
+
+        // The root project takes no --source.
+        assert!(rendered.contains("- run: paws ci --toolchain rust\n"));
+        assert!(!rendered.contains("--toolchain rust --source"));
+
+        // One step per node project, each pointed at its own directory.
+        assert!(rendered.contains("paws ci --toolchain node --source web"));
+        assert!(rendered.contains("paws ci --toolchain node --source e2e"));
+        assert_eq!(rendered.matches("--toolchain node").count(), 2);
+    }
+
+    // --- project discovery -------------------------------------------------
+
+    fn project_scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("paws-discover-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    fn touch(dir: &std::path::Path, relative: &str) {
+        let path = dir.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+    }
+
+    /// A Cargo workspace is one project, not one per member.
+    #[test]
+    fn discovery_does_not_descend_into_a_directory_that_already_matched() {
+        let root = project_scratch("workspace");
+        touch(&root, "Cargo.toml");
+        touch(&root, "crates/core/Cargo.toml");
+        touch(&root, "crates/server/Cargo.toml");
+
+        assert_eq!(discover_projects(&root, "Cargo.toml", 3), vec!["."]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The bug this replaced: root-only detection saw no package.json and
+    /// generated a workflow covering half the repo.
+    #[test]
+    fn discovery_finds_projects_in_subdirectories() {
+        let root = project_scratch("monorepo");
+        touch(&root, "Cargo.toml");
+        touch(&root, "web/package.json");
+        touch(&root, "e2e/package.json");
+
+        // Sorted, so the generated workflow is stable across filesystems.
+        assert_eq!(
+            discover_projects(&root, "package.json", 3),
+            vec!["e2e", "web"]
+        );
+        assert_eq!(discover_projects(&root, "Cargo.toml", 3), vec!["."]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn discovery_skips_build_output_and_hidden_directories() {
+        let root = project_scratch("noise");
+        touch(&root, "web/package.json");
+        touch(&root, "node_modules/some-dep/package.json");
+        touch(&root, "web/node_modules/other/package.json");
+        touch(&root, "dist/package.json");
+        touch(&root, ".cache/package.json");
+
+        assert_eq!(discover_projects(&root, "package.json", 3), vec!["web"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A vendored reference clone or submodule is a different repository.
+    #[test]
+    fn discovery_skips_nested_checkouts() {
+        let root = project_scratch("nested-git");
+        touch(&root, "web/package.json");
+        touch(&root, "upstream/package.json");
+        std::fs::create_dir_all(root.join("upstream/.git")).unwrap();
+
+        assert_eq!(discover_projects(&root, "package.json", 3), vec!["web"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn discovery_respects_the_depth_limit() {
+        let root = project_scratch("deep");
+        touch(&root, "a/b/c/d/package.json");
+
+        assert!(discover_projects(&root, "package.json", 3).is_empty());
+        assert_eq!(discover_projects(&root, "package.json", 4), vec!["a/b/c/d"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn discovery_finds_nothing_in_an_empty_tree() {
+        let root = project_scratch("bare");
+        assert!(discover_projects(&root, "package.json", 3).is_empty());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -3205,5 +3487,94 @@ mod tests {
         assert_eq!(helm.output, "tmp");
         assert_eq!(helm.pages_branch, "gh-pages");
         assert_eq!(helm.index_path, "index.yaml");
+    }
+
+    // --- --source resolution and ecosystem detection ----------------------
+
+    /// Same idiom the other crates use for scratch dirs — no extra dependency.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("paws-ci-source-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    #[test]
+    fn no_source_flag_means_the_current_directory() {
+        let resolved = resolve_source_dir(None).expect("should resolve");
+        assert_eq!(resolved, std::env::current_dir().unwrap());
+    }
+
+    #[test]
+    fn a_source_that_is_not_a_directory_fails_with_the_path_it_looked_in() {
+        let error = resolve_source_dir(Some("definitely-not-here"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("definitely-not-here"), "got {error}");
+        // The message must say where it looked; "not a directory" alone sends
+        // you hunting.
+        assert!(error.contains("looked in"), "got {error}");
+    }
+
+    #[test]
+    fn a_file_is_not_a_valid_source() {
+        let dir = scratch("file-not-dir");
+        std::fs::write(dir.join("Cargo.toml"), "").unwrap();
+
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let result = resolve_source_dir(Some("Cargo.toml"));
+        std::env::set_current_dir(previous).unwrap();
+
+        assert!(
+            result.is_err(),
+            "a file must not resolve as a source directory"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ecosystems_are_detected_in_the_directory_given_not_the_process_one() {
+        let root = scratch("detect");
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        let web = root.join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("package.json"), "{}").unwrap();
+
+        // This is the monorepo case: --source web must provision for node,
+        // not for the rust project at the repo root.
+        assert_eq!(detect_needed_ecosystems(&root), vec![Ecosystem::Rust]);
+        assert_eq!(detect_needed_ecosystems(&web), vec![Ecosystem::Node]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_polyglot_directory_detects_every_ecosystem_present() {
+        let dir = scratch("polyglot");
+        for marker in ["Cargo.toml", "package.json", "pyproject.toml", "go.mod"] {
+            std::fs::write(dir.join(marker), "").unwrap();
+        }
+
+        assert_eq!(
+            detect_needed_ecosystems(&dir),
+            vec![
+                Ecosystem::Rust,
+                Ecosystem::Node,
+                Ecosystem::Python,
+                Ecosystem::Go
+            ]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_empty_directory_needs_no_provisioning() {
+        let dir = scratch("empty");
+        assert!(detect_needed_ecosystems(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
