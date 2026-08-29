@@ -1466,6 +1466,10 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
     });
 
     if facts.push {
+        // Recorded per target so the run can close with a ledger, rather than
+        // leaving per-target chatter as the only evidence of what happened.
+        let mut outcomes: Vec<paws_docker::PublishOutcome> = Vec::new();
+
         for target in &targets {
             let paws_docker::PublishTarget {
                 registry,
@@ -1476,6 +1480,9 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
                 origin,
             } = target;
             if tags.is_empty() {
+                outcomes.push(paws_docker::PublishOutcome::NoTags {
+                    registry: registry.clone(),
+                });
                 continue;
             }
             let username = match username {
@@ -1499,6 +1506,10 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
                          ({} tag(s))",
                         tags.len()
                     );
+                    outcomes.push(paws_docker::PublishOutcome::Skipped {
+                        registry: registry.clone(),
+                        reason: paws_docker::SkipReason::NoUsername,
+                    });
                     continue;
                 }
             };
@@ -1512,6 +1523,12 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
                      ({} tag(s))",
                     tags.len()
                 );
+                outcomes.push(paws_docker::PublishOutcome::Skipped {
+                    registry: registry.clone(),
+                    reason: paws_docker::SkipReason::NoToken {
+                        env_var: token_env_var.clone(),
+                    },
+                });
                 continue;
             }
             for tag in tags {
@@ -1535,6 +1552,23 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
                     .with_context(|| format!("failed to publish {tag} to {registry}"))?;
                 println!("docker: published {tag}");
             }
+
+            outcomes.push(paws_docker::PublishOutcome::Published {
+                registry: registry.clone(),
+                tags: tags.clone(),
+            });
+        }
+
+        // Always close with what actually happened. A run that publishes
+        // nothing has repeatedly gone unnoticed because success was the only
+        // signal it gave.
+        println!("{}", paws_docker::publish_summary(&outcomes));
+
+        // Asked to push, pushed nothing: that is a failure, not a quiet
+        // success. Every silent under-publish this tool has had would have
+        // surfaced here at the moment it was introduced.
+        if let Some(error) = paws_docker::nothing_published_error(&outcomes) {
+            anyhow::bail!(error);
         }
     } else {
         let total_tags: usize = targets.iter().map(|t| t.tags.len()).sum();

@@ -809,6 +809,108 @@ pub fn plan_publish_targets(input: &PublishPlanInput<'_>) -> Vec<PublishTarget> 
     targets
 }
 
+/// Why a target with tags could not publish them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    NoUsername,
+    NoToken { env_var: String },
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoUsername => write!(f, "no username configured"),
+            Self::NoToken { env_var } => write!(f, "${env_var} not set"),
+        }
+    }
+}
+
+/// What actually happened for one publish target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishOutcome {
+    Published { registry: String, tags: Vec<String> },
+    /// Had tags, but could not publish them.
+    Skipped { registry: String, reason: SkipReason },
+    /// Had no tags of its own — normal when another registry owns them all.
+    NoTags { registry: String },
+}
+
+/// Total tags actually published across every target.
+pub fn published_tag_count(outcomes: &[PublishOutcome]) -> usize {
+    outcomes
+        .iter()
+        .map(|outcome| match outcome {
+            PublishOutcome::Published { tags, .. } => tags.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// A one-line ledger of what a publish run actually did.
+///
+/// Printed unconditionally, because the failure mode this exists for is a run
+/// that reports success while publishing nothing — and the thing that made it
+/// invisible was per-target chatter with no closing statement.
+pub fn publish_summary(outcomes: &[PublishOutcome]) -> String {
+    let mut published: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+
+    for outcome in outcomes {
+        match outcome {
+            PublishOutcome::Published { registry, tags } => {
+                published.push(format!("{} tag(s) to {registry}", tags.len()));
+            }
+            PublishOutcome::Skipped { registry, reason } => {
+                skipped.push(format!("{registry} ({reason})"));
+            }
+            // Not worth reporting: a registry with no tags was never asked to
+            // do anything.
+            PublishOutcome::NoTags { .. } => {}
+        }
+    }
+
+    let mut summary = if published.is_empty() {
+        "docker: published nothing".to_string()
+    } else {
+        format!("docker: published {}", published.join(", "))
+    };
+
+    if !skipped.is_empty() {
+        summary.push_str(&format!(" — skipped {}", skipped.join(", ")));
+    }
+
+    summary
+}
+
+/// An error message when a run was asked to push but published nothing.
+///
+/// Returns `None` when at least one tag published, or when there was nothing to
+/// publish in the first place.
+pub fn nothing_published_error(outcomes: &[PublishOutcome]) -> Option<String> {
+    if published_tag_count(outcomes) > 0 {
+        return None;
+    }
+
+    let blocked: Vec<String> = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            PublishOutcome::Skipped { registry, reason } => Some(format!("{registry}: {reason}")),
+            _ => None,
+        })
+        .collect();
+
+    // Nothing published and nothing blocked means there was nothing to do —
+    // no tags resolved at all, which is reported elsewhere.
+    if blocked.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "--push was requested but nothing was published ({})",
+        blocked.join("; ")
+    ))
+}
+
 /// The registry host an image reference names explicitly, if any.
 ///
 /// Follows Docker's own rule: the first path segment is a registry only when it
@@ -1563,6 +1665,118 @@ mod tests {
             docker_hub_tags(&tags, &["ghcr.io".to_string(), "myco.jfrog.io".to_string()]),
             vec!["app:v1.0.0"]
         );
+    }
+
+    // --- the publish ledger -----------------------------------------------
+    //
+    // Every case here is a shape this tool has actually shipped: a run that
+    // reported success while publishing nothing.
+
+    fn published(registry: &str, tags: &[&str]) -> PublishOutcome {
+        PublishOutcome::Published {
+            registry: registry.to_string(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    fn skipped_no_username(registry: &str) -> PublishOutcome {
+        PublishOutcome::Skipped {
+            registry: registry.to_string(),
+            reason: SkipReason::NoUsername,
+        }
+    }
+
+    fn skipped_no_token(registry: &str, env_var: &str) -> PublishOutcome {
+        PublishOutcome::Skipped {
+            registry: registry.to_string(),
+            reason: SkipReason::NoToken { env_var: env_var.to_string() },
+        }
+    }
+
+    #[test]
+    fn the_summary_states_what_published() {
+        let outcomes = vec![published("ghcr.io", &["ghcr.io/o/a:v1", "ghcr.io/o/a:latest"])];
+        assert_eq!(publish_summary(&outcomes), "docker: published 2 tag(s) to ghcr.io");
+    }
+
+    #[test]
+    fn the_summary_names_what_was_skipped_alongside_what_published() {
+        let outcomes = vec![
+            published("ghcr.io", &["ghcr.io/o/a:v1"]),
+            skipped_no_username("docker.io"),
+        ];
+        assert_eq!(
+            publish_summary(&outcomes),
+            "docker: published 1 tag(s) to ghcr.io — skipped docker.io (no username configured)"
+        );
+    }
+
+    /// The exact line the ghcr regression should have produced.
+    #[test]
+    fn the_summary_is_unambiguous_when_nothing_published() {
+        let outcomes = vec![skipped_no_username("docker.io")];
+        assert_eq!(
+            publish_summary(&outcomes),
+            "docker: published nothing — skipped docker.io (no username configured)"
+        );
+    }
+
+    #[test]
+    fn a_registry_with_no_tags_is_not_reported() {
+        // Normal whenever another registry owns every tag; reporting it would
+        // be noise that trains people to ignore the line.
+        let outcomes = vec![
+            published("ghcr.io", &["ghcr.io/o/a:v1"]),
+            PublishOutcome::NoTags { registry: "docker.io".to_string() },
+        ];
+        assert_eq!(publish_summary(&outcomes), "docker: published 1 tag(s) to ghcr.io");
+    }
+
+    #[test]
+    fn publishing_nothing_while_blocked_is_an_error() {
+        let outcomes = vec![skipped_no_username("docker.io")];
+
+        let error = nothing_published_error(&outcomes).expect("should fail the run");
+        assert!(error.contains("nothing was published"));
+        assert!(error.contains("docker.io: no username configured"));
+    }
+
+    #[test]
+    fn a_missing_token_is_reported_with_the_variable_to_set() {
+        let outcomes = vec![skipped_no_token("ghcr.io", "GHCR_TOKEN")];
+
+        let error = nothing_published_error(&outcomes).expect("should fail the run");
+        assert!(error.contains("$GHCR_TOKEN not set"), "got {error}");
+    }
+
+    #[test]
+    fn publishing_anything_at_all_is_not_an_error() {
+        // A partial publish is a real outcome, not a failure — the summary
+        // still names what was skipped.
+        let outcomes = vec![
+            published("ghcr.io", &["ghcr.io/o/a:v1"]),
+            skipped_no_username("docker.io"),
+        ];
+        assert_eq!(nothing_published_error(&outcomes), None);
+    }
+
+    #[test]
+    fn having_nothing_to_publish_is_not_an_error() {
+        // No tags anywhere is reported earlier as "no tags resolved"; it is
+        // not the silent-under-publish failure this guard exists for.
+        let outcomes = vec![PublishOutcome::NoTags { registry: "docker.io".to_string() }];
+        assert_eq!(nothing_published_error(&outcomes), None);
+        assert_eq!(nothing_published_error(&[]), None);
+    }
+
+    #[test]
+    fn published_tag_count_sums_across_registries() {
+        let outcomes = vec![
+            published("ghcr.io", &["a", "b"]),
+            published("docker.io", &["c"]),
+            skipped_no_username("myco.jfrog.io"),
+        ];
+        assert_eq!(published_tag_count(&outcomes), 3);
     }
 
     // --- publish planning -------------------------------------------------
