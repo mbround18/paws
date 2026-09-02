@@ -2,20 +2,24 @@
 //! and the config shapes every language-specific crate builds on.
 
 pub mod builders;
+pub mod config;
 pub mod fsutil;
 pub mod pipeline;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support;
 pub mod toolchain;
+pub mod version;
 
 pub use builders::write_builder_dockerfile;
+pub use config::PawsConfig;
 pub use fsutil::{find_files, find_files_with_extension};
 pub use pipeline::{Pipeline, builder_build_args};
 pub use toolchain::{TOOLCHAINS, Toolchain, ToolchainInfo};
+pub use version::{ResolvedVersion, VersionOrigin, VersionSource};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PipelineDefaults {
     pub toolchain: Option<String>,
     pub registry: Option<String>,

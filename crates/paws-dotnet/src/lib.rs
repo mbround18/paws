@@ -147,7 +147,17 @@ pub fn dagger_pipeline_args_with_version(
     source_dir: &str,
     sdk_version: &str,
 ) -> Vec<String> {
-    Pipeline::from_image(&base_image(sdk_version))
+    dagger_pipeline_args_with_image(project, source_dir, &base_image(sdk_version))
+}
+
+/// [`dagger_pipeline_args`] against an explicit image — see
+/// `paws_core::Toolchain::image_for`.
+pub fn dagger_pipeline_args_with_image(
+    project: &DotnetProject,
+    source_dir: &str,
+    image: &str,
+) -> Vec<String> {
+    Pipeline::from_image(image)
         .mount("/src", source_dir)
         .workdir("/src")
         // First-run telemetry/welcome output is pure noise in a CI log and

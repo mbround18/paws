@@ -83,7 +83,19 @@ pub fn is_wasm_project(dir: &Path) -> bool {
 /// included, so a `syscall/js`-guarded file is invisible without them —
 /// and `go test` is skipped (see this module's doc comment on why).
 pub fn dagger_pipeline_args(source_dir: &str, is_wasm: bool) -> Vec<String> {
-    let pipeline = Pipeline::from_image(BASE_IMAGE)
+    dagger_pipeline_args_with_image(source_dir, is_wasm, BASE_IMAGE)
+}
+
+/// [`dagger_pipeline_args`] against an explicit image, so a caller that
+/// resolved a Go version (from `go.mod`, `paws.toml`, or
+/// `--toolchain-version`) can build against it — see
+/// `paws_core::Toolchain::image_for`.
+pub fn dagger_pipeline_args_with_image(
+    source_dir: &str,
+    is_wasm: bool,
+    image: &str,
+) -> Vec<String> {
+    let pipeline = Pipeline::from_image(image)
         .mount("/src", source_dir)
         .workdir("/src")
         .env_if(is_wasm, "GOOS", "js")

@@ -221,6 +221,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
     let CiArgs {
         source,
         toolchain,
+        toolchain_version,
         verbose,
         silent,
         targets,
@@ -253,21 +254,41 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
         run_provisioning(needed, verbose).await?;
     }
 
+    // Resolve the toolchain version once, here, so every `ci_*` below builds
+    // against the same answer and the log names where it came from.
+    // `paws.toml` is discovered by walking up, so `--source web` in a monorepo
+    // still sees the repo-root config.
+    let (config, _) = paws_core::PawsConfig::discover(&source_dir)?;
+    let version = toolchain.map(|toolchain| {
+        toolchain.resolve_version(
+            &source_dir,
+            toolchain_version.as_deref(),
+            config.toolchain_version(toolchain.as_str()),
+        )
+    });
+    if let (Some(toolchain), Some(version)) = (toolchain, &version) {
+        println!("ci: {toolchain} {}", version.describe());
+    }
+    let image = match (toolchain, &version) {
+        (Some(toolchain), Some(version)) => toolchain.image_for(&version.version),
+        _ => None,
+    };
+
     paws_dagger::ensure_available().await?;
     match toolchain {
         Some(Toolchain::Node | Toolchain::Tauri) => {
             ci_node_or_tauri(&source_dir, silent, toolchain).await?;
         }
         Some(Toolchain::TauriAndroid) => ci_tauri_android(&source_dir, silent).await?,
-        Some(Toolchain::Python) => ci_python(&source_dir, silent).await?,
-        Some(Toolchain::Rust) => ci_rust(&source_dir, silent, coverage).await?,
-        Some(Toolchain::Go) => ci_go(&source_dir, silent, &targets).await?,
+        Some(Toolchain::Python) => ci_python(&source_dir, silent, image.as_deref()).await?,
+        Some(Toolchain::Rust) => ci_rust(&source_dir, silent, coverage, image.as_deref()).await?,
+        Some(Toolchain::Go) => ci_go(&source_dir, silent, &targets, image.as_deref()).await?,
         Some(Toolchain::Java) => ci_java(&source_dir, silent).await?,
         Some(Toolchain::Kotlin) => ci_kotlin(&source_dir, silent).await?,
-        Some(Toolchain::Ruby) => ci_ruby(&source_dir, silent).await?,
-        Some(Toolchain::Php) => ci_php(&source_dir, silent).await?,
-        Some(Toolchain::Dotnet) => ci_dotnet(&source_dir, silent).await?,
-        Some(Toolchain::Elixir) => ci_elixir(&source_dir, silent).await?,
+        Some(Toolchain::Ruby) => ci_ruby(&source_dir, silent, image.as_deref()).await?,
+        Some(Toolchain::Php) => ci_php(&source_dir, silent, image.as_deref()).await?,
+        Some(Toolchain::Dotnet) => ci_dotnet(&source_dir, silent, image.as_deref()).await?,
+        Some(Toolchain::Elixir) => ci_elixir(&source_dir, silent, image.as_deref()).await?,
         Some(Toolchain::Flatpak) => ci_flatpak(&source_dir, silent).await?,
         Some(Toolchain::Esp32) => ci_esp32(&source_dir, silent, publish_artifacts).await?,
         None => anyhow::bail!("--toolchain is required (e.g. --toolchain node)"),
@@ -365,7 +386,11 @@ async fn ci_tauri_android(source_dir: &std::path::Path, silent: bool) -> anyhow:
 }
 
 /// `paws ci` for uv-based Python projects.
-async fn ci_python(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()> {
+async fn ci_python(
+    source_dir: &std::path::Path,
+    silent: bool,
+    image: Option<&str>,
+) -> anyhow::Result<()> {
     let dir = source_dir.to_path_buf();
     let project = paws_python::detect_project(&dir)
         .context("failed to detect a Python project in the current directory")?;
@@ -378,14 +403,24 @@ async fn ci_python(source_dir: &std::path::Path, silent: bool) -> anyhow::Result
         },
         dir.display()
     );
-    let args = paws_python::dagger_pipeline_args(&project, &dir.to_string_lossy());
+    let args = image.map_or_else(
+        || paws_python::dagger_pipeline_args(&project, &dir.to_string_lossy()),
+        |image| {
+            paws_python::dagger_pipeline_args_with_image(&project, &dir.to_string_lossy(), image)
+        },
+    );
     run_dagger_core(&args, silent).await?;
     println!("ci: python build/test succeeded");
     Ok(())
 }
 
 /// `paws ci` for Cargo projects, with optional llvm-cov coverage.
-async fn ci_rust(source_dir: &std::path::Path, silent: bool, coverage: bool) -> anyhow::Result<()> {
+async fn ci_rust(
+    source_dir: &std::path::Path,
+    silent: bool,
+    coverage: bool,
+    image: Option<&str>,
+) -> anyhow::Result<()> {
     let dir = source_dir.to_path_buf();
     if !paws_rust::is_rust_project(&dir) {
         anyhow::bail!(
@@ -417,11 +452,12 @@ async fn ci_rust(source_dir: &std::path::Path, silent: bool, coverage: bool) -> 
         None
     };
     let builder_dir_str = builder_dir.as_ref().map(|d| d.to_string_lossy());
-    let args = paws_rust::dagger_pipeline_args(
+    let args = paws_rust::dagger_pipeline_args_with_image(
         &dir.to_string_lossy(),
         is_wasm,
         coverage,
         builder_dir_str.as_deref(),
+        image.unwrap_or(paws_rust::BASE_IMAGE),
     );
     run_dagger_core(&args, silent).await?;
     println!("ci: rust build/test succeeded");
@@ -433,6 +469,7 @@ async fn ci_go(
     source_dir: &std::path::Path,
     silent: bool,
     targets: &[String],
+    image: Option<&str>,
 ) -> anyhow::Result<()> {
     let dir = source_dir.to_path_buf();
     if !paws_go::is_go_project(&dir) {
@@ -448,7 +485,11 @@ async fn ci_go(
             if is_wasm { " (js/wasm)" } else { "" },
             dir.display()
         );
-        let args = paws_go::dagger_pipeline_args(&dir.to_string_lossy(), is_wasm);
+        let args = paws_go::dagger_pipeline_args_with_image(
+            &dir.to_string_lossy(),
+            is_wasm,
+            image.unwrap_or(paws_go::BASE_IMAGE),
+        );
         run_dagger_core(&args, silent).await?;
         println!("ci: go build/test succeeded");
     } else {
@@ -516,7 +557,11 @@ async fn ci_kotlin(source_dir: &std::path::Path, silent: bool) -> anyhow::Result
 }
 
 /// `paws ci` for Bundler projects.
-async fn ci_ruby(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()> {
+async fn ci_ruby(
+    source_dir: &std::path::Path,
+    silent: bool,
+    image: Option<&str>,
+) -> anyhow::Result<()> {
     let dir = source_dir.to_path_buf();
     let project = paws_ruby::detect_project(&dir)
         .context("failed to detect a Ruby project in the current directory")?;
@@ -525,14 +570,21 @@ async fn ci_ruby(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<(
         project.test_runner.as_str(),
         dir.display()
     );
-    let args = paws_ruby::dagger_pipeline_args(&project, &dir.to_string_lossy());
+    let args = image.map_or_else(
+        || paws_ruby::dagger_pipeline_args(&project, &dir.to_string_lossy()),
+        |image| paws_ruby::dagger_pipeline_args_with_image(&project, &dir.to_string_lossy(), image),
+    );
     run_dagger_core(&args, silent).await?;
     println!("ci: ruby install/test succeeded");
     Ok(())
 }
 
 /// `paws ci` for Composer projects.
-async fn ci_php(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()> {
+async fn ci_php(
+    source_dir: &std::path::Path,
+    silent: bool,
+    image: Option<&str>,
+) -> anyhow::Result<()> {
     let dir = source_dir.to_path_buf();
     let project = paws_php::detect_project(&dir)
         .context("failed to detect a PHP project in the current directory")?;
@@ -545,14 +597,21 @@ async fn ci_php(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()
             " — no phpunit config, skipping tests"
         }
     );
-    let args = paws_php::dagger_pipeline_args(&project, &dir.to_string_lossy());
+    let args = image.map_or_else(
+        || paws_php::dagger_pipeline_args(&project, &dir.to_string_lossy()),
+        |image| paws_php::dagger_pipeline_args_with_image(&project, &dir.to_string_lossy(), image),
+    );
     run_dagger_core(&args, silent).await?;
     println!("ci: php install/test succeeded");
     Ok(())
 }
 
 /// `paws ci` for .NET SDK projects.
-async fn ci_dotnet(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()> {
+async fn ci_dotnet(
+    source_dir: &std::path::Path,
+    silent: bool,
+    image: Option<&str>,
+) -> anyhow::Result<()> {
     let dir = source_dir.to_path_buf();
     let project = paws_dotnet::detect_project(&dir)
         .context("failed to detect a .NET project in the current directory")?;
@@ -565,14 +624,23 @@ async fn ci_dotnet(source_dir: &std::path::Path, silent: bool) -> anyhow::Result
             " — no test project, skipping dotnet test"
         }
     );
-    let args = paws_dotnet::dagger_pipeline_args(&project, &dir.to_string_lossy());
+    let args = image.map_or_else(
+        || paws_dotnet::dagger_pipeline_args(&project, &dir.to_string_lossy()),
+        |image| {
+            paws_dotnet::dagger_pipeline_args_with_image(&project, &dir.to_string_lossy(), image)
+        },
+    );
     run_dagger_core(&args, silent).await?;
     println!("ci: dotnet build/test succeeded");
     Ok(())
 }
 
 /// `paws ci` for Mix projects.
-async fn ci_elixir(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()> {
+async fn ci_elixir(
+    source_dir: &std::path::Path,
+    silent: bool,
+    image: Option<&str>,
+) -> anyhow::Result<()> {
     let dir = source_dir.to_path_buf();
     let project = paws_elixir::detect_project(&dir)
         .context("failed to detect an Elixir project in the current directory")?;
@@ -585,7 +653,10 @@ async fn ci_elixir(source_dir: &std::path::Path, silent: bool) -> anyhow::Result
             " — no mix.lock committed"
         }
     );
-    let args = paws_elixir::dagger_pipeline_args(&dir.to_string_lossy());
+    let args = image.map_or_else(
+        || paws_elixir::dagger_pipeline_args(&dir.to_string_lossy()),
+        |image| paws_elixir::dagger_pipeline_args_with_image(&dir.to_string_lossy(), image),
+    );
     run_dagger_core(&args, silent).await?;
     println!("ci: elixir build/test succeeded");
     Ok(())
@@ -1236,10 +1307,20 @@ pub async fn run_cache(args: CacheArgs) -> anyhow::Result<()> {
 }
 
 pub async fn run_init(_args: InitArgs) -> anyhow::Result<()> {
-    let install_dir = paws_dagger::install_cli()
+    // `[tools] dagger = "..."` in paws.toml pins the engine, so two `paws
+    // init` runs weeks apart leave the same version behind.
+    let (config, _) = paws_core::PawsConfig::discover(&std::env::current_dir()?)?;
+    let pinned = config.tool_version("dagger");
+    let install_dir = paws_dagger::install_cli_with_version(pinned)
         .await
         .context("failed to install the dagger CLI")?;
-    println!("dagger CLI installed to {}", install_dir.display());
+    match pinned {
+        Some(version) => println!(
+            "dagger CLI {version} installed to {} (pinned by paws.toml)",
+            install_dir.display()
+        ),
+        None => println!("dagger CLI installed to {}", install_dir.display()),
+    }
 
     // Prepend to this process's own PATH so the sanity check below
     // (and any subcommand run later in the same shell invocation)
@@ -1284,7 +1365,11 @@ pub async fn run_audit(_args: AuditArgs) -> anyhow::Result<()> {
     // Docker project entirely" edge case).
     let signals = collect_repository_signals();
     let detection = paws_audit::detect_language_families(&signals);
-    let scanners = select_audit_scanners(&detection, true);
+    let mut scanners = select_audit_scanners(&detection, true);
+    // `[tools]` in paws.toml repins any scanner image, so a repo can hold a
+    // scanner back (or move it forward) without waiting on a paws release.
+    let (config, _) = paws_core::PawsConfig::discover(&std::env::current_dir()?)?;
+    paws_audit::apply_tool_versions(&mut scanners, &config.tools);
     if !scanners.iter().any(|s| s.should_run) {
         println!("audit: no recognizable project markers found here; nothing to scan.");
         return Ok(());
@@ -2381,6 +2466,7 @@ mod tests {
     async fn coverage_is_rejected_outside_toolchain_rust() {
         let args = CiArgs {
             source: None,
+            toolchain_version: None,
             toolchain: Some(Toolchain::Node),
             verbose: false,
             silent: true,
@@ -2400,6 +2486,7 @@ mod tests {
     async fn coverage_with_no_toolchain_at_all_is_also_rejected() {
         let args = CiArgs {
             source: None,
+            toolchain_version: None,
             toolchain: None,
             verbose: false,
             silent: true,
@@ -2422,6 +2509,7 @@ mod tests {
     async fn publish_artifacts_is_rejected_outside_toolchain_esp32() {
         let args = CiArgs {
             source: None,
+            toolchain_version: None,
             toolchain: Some(Toolchain::Rust),
             verbose: false,
             silent: true,
@@ -2441,6 +2529,7 @@ mod tests {
     async fn publish_artifacts_with_no_toolchain_at_all_is_also_rejected() {
         let args = CiArgs {
             source: None,
+            toolchain_version: None,
             toolchain: None,
             verbose: false,
             silent: true,

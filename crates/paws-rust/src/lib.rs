@@ -104,12 +104,29 @@ pub fn dagger_pipeline_args(
     coverage: bool,
     builder_dir: Option<&str>,
 ) -> Vec<String> {
+    dagger_pipeline_args_with_image(source_dir, is_wasm, coverage, builder_dir, BASE_IMAGE)
+}
+
+/// [`dagger_pipeline_args`] against an explicit image, so a channel resolved
+/// from `rust-toolchain.toml` reaches the build — see
+/// `paws_core::Toolchain::image_for`, which also maps `stable` onto a tag that
+/// exists on Docker Hub.
+///
+/// `image` is ignored on the coverage path: that one builds `builders/rust`,
+/// whose Rust version is pinned inside the Dockerfile rather than by a tag.
+pub fn dagger_pipeline_args_with_image(
+    source_dir: &str,
+    is_wasm: bool,
+    coverage: bool,
+    builder_dir: Option<&str>,
+    image: &str,
+) -> Vec<String> {
     let opening = if coverage && !is_wasm {
         let builder_dir = builder_dir
             .expect("builder_dir must be Some(..) when coverage is true (see doc comment)");
         Pipeline::from_host_dockerfile(builder_dir)
     } else {
-        Pipeline::from_image(BASE_IMAGE)
+        Pipeline::from_image(image)
     };
 
     let pipeline = opening.mount("/src", source_dir).workdir("/src");

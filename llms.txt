@@ -32,6 +32,7 @@ Build and test a language target (node, rust, python, go, java, kotlin, ruby, ph
 
 - `--source` — Directory to build, relative to the current one. Defaults to the current directory
 - `--toolchain` — Which toolchain to build. Clap lists the accepted values from `paws_core::TOOLCHAINS`, so `--help` can't fall behind what `paws ci` actually dispatches
+- `--toolchain-version` — Build against a specific version of `--toolchain`, e.g. `--toolchain rust --toolchain-version 1.90.0`
 - `--verbose` — Print per-ecosystem provisioning start/elapsed timing to stderr
 - `--silent` — Suppress dagger's live build progress; only print output once the pipeline finishes (or on failure). Default is streamed live
 - `--targets` — Cross-compile to these GOOS/GOARCH pairs instead of the native build, e.g. "linux/amd64,darwin/arm64,windows/amd64" — only valid with `--toolchain go`. Binaries land in `dist/` under the project root; `go test` is skipped for every target (none of them can run in this build container, native or not)

@@ -105,7 +105,18 @@ pub fn detect_project(dir: &Path) -> Result<RubyProject> {
 /// for `project`: `bundle install` (frozen when a lockfile is committed),
 /// then the project's own test task.
 pub fn dagger_pipeline_args(project: &RubyProject, source_dir: &str) -> Vec<String> {
-    Pipeline::from_image(BASE_IMAGE)
+    dagger_pipeline_args_with_image(project, source_dir, BASE_IMAGE)
+}
+
+/// [`dagger_pipeline_args`] against an explicit image, so a resolved Ruby
+/// version (`.ruby-version`, `paws.toml`, `--toolchain-version`) reaches the
+/// build — see `paws_core::Toolchain::image_for`.
+pub fn dagger_pipeline_args_with_image(
+    project: &RubyProject,
+    source_dir: &str,
+    image: &str,
+) -> Vec<String> {
+    Pipeline::from_image(image)
         .mount("/src", source_dir)
         .workdir("/src")
         .env_if(project.has_lockfile, "BUNDLE_FROZEN", "true")

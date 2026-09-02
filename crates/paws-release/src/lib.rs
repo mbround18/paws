@@ -190,6 +190,46 @@ pub fn prebuilt_image_candidate(builder_dir: &str, version: &str) -> String {
     format!("ghcr.io/mbround18/paws-builders:{name}-{version}")
 }
 
+/// Builds the `dagger core` chain that cross-compiles one release target and
+/// exports the binary — split out as a pure function so the step *order* is
+/// testable without a Dagger engine.
+///
+/// That order is load-bearing: `rustup target add` must run before `cargo
+/// build`. The builder images add their targets at image-build time, bound to
+/// that image's toolchain, so a source tree containing a `rust-toolchain.toml`
+/// makes rustup switch to the toolchain that file names — one with no targets
+/// installed — and the build fails with an `error[E0463]` naming a missing
+/// `core` crate, which reads like a broken image rather than a missing target.
+/// Installing it here fixes it for any consumer repo that pins its toolchain,
+/// which is a case `paws` explicitly supports.
+fn cross_build_pipeline_args(
+    prebuilt: &str,
+    request: &BuildRequest<'_>,
+    container_bin_path: &str,
+    host_out_path: &str,
+) -> Vec<String> {
+    paws_core::Pipeline::from_image(prebuilt)
+        .mount("/src", request.source_dir)
+        .workdir("/src")
+        .exec(["rustup", "target", "add", request.triple])
+        .exec([
+            "cargo",
+            "build",
+            "--release",
+            "--target",
+            request.triple,
+            "-p",
+            request.package,
+        ])
+        .raw(vec![
+            "file".into(),
+            format!("--path={container_bin_path}"),
+            "export".into(),
+            format!("--path={host_out_path}"),
+        ])
+        .into_args()
+}
+
 /// Pulls the prebuilt builder image ([`prebuilt_image_candidate`]) —
 /// `release.yaml`'s `build-builders` job pushes it before the target
 /// matrix starts (`needs: [ci, build-builders]`), so it's always there by
@@ -226,28 +266,12 @@ pub async fn build_binary(request: &BuildRequest<'_>) -> Result<PathBuf> {
         );
     }
 
-    let mut args: Vec<String> = vec![
-        "container".into(),
-        "from".into(),
-        format!("--address={prebuilt}"),
-    ];
-
-    args.extend([
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={}", request.source_dir),
-        "with-workdir".into(),
-        "--path=/src".into(),
-        "with-exec".into(),
-        format!(
-            "--args=cargo,build,--release,--target,{},-p,{}",
-            request.triple, request.package
-        ),
-        "file".into(),
-        format!("--path={container_bin_path}"),
-        "export".into(),
-        format!("--path={}", out_path.display()),
-    ]);
+    let args = cross_build_pipeline_args(
+        &prebuilt,
+        request,
+        &container_bin_path,
+        &out_path.to_string_lossy(),
+    );
 
     paws_dagger::core(&args)
         .await
@@ -289,26 +313,30 @@ pub async fn build_binary_local(
         .context("failed to create release output directory")?;
     let out_path = out_dir.join(&file_name);
 
-    let args: Vec<String> = vec![
-        "host".into(),
-        "directory".into(),
-        format!("--path={}", local_builder_dir.display()),
-        "docker-build".into(),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={}", request.source_dir),
-        "with-workdir".into(),
-        "--path=/src".into(),
-        "with-exec".into(),
-        format!(
-            "--args=cargo,build,--release,--target,{},-p,{}",
-            request.triple, request.package
-        ),
-        "file".into(),
-        format!("--path={container_bin_path}"),
-        "export".into(),
-        format!("--path={}", out_path.display()),
-    ];
+    // Same `rustup target add` ordering as `cross_build_pipeline_args` — see
+    // its doc comment. This path builds the Dockerfile locally rather than
+    // pulling a prebuilt image, but the toolchain-override problem is
+    // identical.
+    let args = paws_core::Pipeline::from_host_dockerfile(&local_builder_dir.to_string_lossy())
+        .mount("/src", request.source_dir)
+        .workdir("/src")
+        .exec(["rustup", "target", "add", request.triple])
+        .exec([
+            "cargo",
+            "build",
+            "--release",
+            "--target",
+            request.triple,
+            "-p",
+            request.package,
+        ])
+        .raw(vec![
+            "file".into(),
+            format!("--path={container_bin_path}"),
+            "export".into(),
+            format!("--path={}", out_path.display()),
+        ])
+        .into_args();
 
     paws_dagger::core(&args)
         .await
@@ -1055,6 +1083,47 @@ mod tests {
             .join("builders/linux-gnu/Dockerfile");
         let contents = std::fs::read_to_string(dockerfile).unwrap();
         assert_eq!(contents, GENERIC_LINUX_GNU_DOCKERFILE);
+    }
+
+    /// Regression guard for the release that broke on
+    /// `v0.0.1-prerelease.39`: adding a `rust-toolchain.toml` to the repo made
+    /// every cross target fail with an `error[E0463]` for a missing `core`, because
+    /// rustup switched away from the builder image's toolchain (the one with
+    /// the targets installed) and nothing re-added the target.
+    #[test]
+    fn the_target_is_installed_before_the_cross_build_runs() {
+        let request = BuildRequest {
+            builder_dir: "builders/linux-gnu",
+            source_dir: ".",
+            triple: "aarch64-unknown-linux-gnu",
+            package: "paws-cli",
+            binary_name: "paws",
+            builder_version: "v1",
+        };
+        let args = cross_build_pipeline_args(
+            "ghcr.io/example/builders:linux-gnu",
+            &request,
+            "target/aarch64-unknown-linux-gnu/release/paws",
+            "/host/out/paws",
+        );
+
+        let rustup = args
+            .iter()
+            .position(|a| a == "--args=rustup,target,add,aarch64-unknown-linux-gnu")
+            .expect("the target must be installed inside the container");
+        let build = args
+            .iter()
+            .position(|a| a.starts_with("--args=cargo,build,--release"))
+            .expect("the cross build must run");
+        assert!(
+            rustup < build,
+            "rustup target add must precede cargo build, got {args:?}"
+        );
+
+        // The export chain still terminates the pipeline.
+        assert_eq!(args[args.len() - 4], "file");
+        assert_eq!(args[args.len() - 2], "export");
+        assert_eq!(args[args.len() - 1], "--path=/host/out/paws");
     }
 
     #[tokio::test]
