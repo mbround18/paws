@@ -705,8 +705,22 @@ pub struct ReleaseArgs {
     /// Rust target triple to build, e.g. "x86_64-unknown-linux-gnu".
     /// Must be one of `paws_release::known_targets()` — each maps to a
     /// `./builders/<dir>` Dockerfile the build runs through Dagger.
+    ///
+    /// Optional only so `--list-targets` can be asked without naming one;
+    /// a real build still requires it and fails clearly if it is missing.
     #[arg(long)]
-    pub target: String,
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Print every target triple `paws release` knows how to build, one per
+    /// line, and exit.
+    ///
+    /// Exists so the release workflow and `scripts/verify-release.sh` can ask
+    /// the binary what the full target set is instead of keeping their own
+    /// copies of the list — the same drift that let `paws workflow generate`
+    /// fall six toolchains behind `paws ci`.
+    #[arg(long)]
+    #[serde(default)]
+    pub list_targets: bool,
     /// Host path to the source tree to build.
     #[arg(long, default_value = ".")]
     #[serde(default = "field_defaults::dot")]
