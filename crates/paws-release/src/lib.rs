@@ -411,6 +411,24 @@ pub async fn package_zip(working_dir: &Path, archive_path: &Path, files: &[Strin
     Ok(())
 }
 
+/// Release ids in a `GET /releases` payload whose `tag_name` is `tag`.
+///
+/// Split out as a pure function so the duplicate-detection rule is testable
+/// without standing up a fixture server.
+fn releases_matching_tag(body: &serde_json::Value, tag: &str) -> Vec<u64> {
+    body.as_array()
+        .map(|releases| {
+            releases
+                .iter()
+                .filter(|release| {
+                    release.get("tag_name").and_then(serde_json::Value::as_str) == Some(tag)
+                })
+                .filter_map(|release| release.get("id").and_then(serde_json::Value::as_u64))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Whether a `POST /releases`' `422 Unprocessable Entity` body is GitHub's
 /// specific "a release for this tag already exists" error, as opposed to
 /// some other validation failure — checked as a plain substring rather than
@@ -568,9 +586,128 @@ impl GitHubReleaseClient {
             .json()
             .await
             .context("failed to parse created-release response")?;
-        body.get("id")
+        let created = body
+            .get("id")
             .and_then(serde_json::Value::as_u64)
-            .context("created-release response missing id")
+            .context("created-release response missing id")?;
+
+        self.converge_on_one_release(tag, created).await
+    }
+
+    /// Collapses a create-race down to a single release for `tag`.
+    ///
+    /// `paws release` runs once per target, in parallel, and each leg calls
+    /// [`get_or_create_release`](Self::get_or_create_release). GitHub does
+    /// *not* reject a second release for a tag that already exists as a git
+    /// tag — which every `paws` release does, since the tag is pushed before
+    /// the build — so two legs that miss each other's `GET` both create one
+    /// and both get a 201. The assets then split across two releases and each
+    /// leg reports success, because from its own side nothing failed. That is
+    /// exactly what happened on `v0.0.1-prerelease.40`: 6 assets on one
+    /// release, 1 on the other.
+    ///
+    /// The rule is "lowest id wins", which every racing leg computes the same
+    /// way without coordinating: whoever is not the winner deletes the empty
+    /// release it just made and adopts the winner. Deleting a release does not
+    /// delete the git tag.
+    ///
+    /// Retried briefly because a just-created release is not always visible to
+    /// the list endpoint immediately — a single check can miss the very
+    /// duplicate it exists to find.
+    async fn converge_on_one_release(&self, tag: &str, created: u64) -> Result<u64> {
+        const ATTEMPTS: usize = 3;
+        for attempt in 0..ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            }
+            let ids = self.release_ids_for_tag(tag).await?;
+            let Some(&winner) = ids.iter().min() else {
+                continue;
+            };
+            if ids.len() < 2 {
+                continue;
+            }
+            if winner == created {
+                // We are the winner; the other legs will drop theirs.
+                return Ok(created);
+            }
+            // Ours is a duplicate. It has no assets yet — this runs before
+            // anything is uploaded — so removing it loses nothing.
+            self.delete_release(created).await.with_context(|| {
+                format!("failed to remove duplicate release {created} for tag {tag}")
+            })?;
+            println!(
+                "release: another job created release {winner} for {tag} first;                  dropped the duplicate {created} and will publish to {winner}"
+            );
+            return Ok(winner);
+        }
+        Ok(created)
+    }
+
+    /// Every release id pointing at `tag`. More than one means a create-race.
+    async fn release_ids_for_tag(&self, tag: &str) -> Result<Vec<u64>> {
+        let url = format!("{}/releases?per_page=100", self.api_base());
+        let response = self
+            .auth_headers(self.client.get(&url))
+            .send()
+            .await
+            .context("failed to list releases")?;
+        if !response.status().is_success() {
+            anyhow::bail!("unexpected status listing releases: {}", response.status());
+        }
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("failed to parse release list")?;
+        Ok(releases_matching_tag(&body, tag))
+    }
+
+    async fn delete_release(&self, release_id: u64) -> Result<()> {
+        let url = format!("{}/releases/{release_id}", self.api_base());
+        let response = self
+            .auth_headers(self.client.delete(&url))
+            .send()
+            .await
+            .context("failed to delete release")?;
+        if !response.status().is_success() && response.status() != reqwest::StatusCode::NOT_FOUND {
+            anyhow::bail!("unexpected status deleting release: {}", response.status());
+        }
+        Ok(())
+    }
+
+    /// Confirms `asset_name` is visible on the release the *tag* resolves to.
+    ///
+    /// An upload can succeed and still leave the release users see incomplete:
+    /// if a create-race put the asset on a duplicate release, the uploading
+    /// job's own view is perfectly consistent and it reports success, while
+    /// `GET /releases/tags/{tag}` — the view `install.sh`, `actions/paws-up`
+    /// and the Releases page all use — is missing that platform.
+    ///
+    /// [`converge_on_one_release`](Self::converge_on_one_release) is what
+    /// prevents that; this is the check that the prevention worked, so the
+    /// failure mode is a red job rather than a release that looks fine until
+    /// someone on the missing platform tries to install it.
+    pub async fn verify_asset_published(&self, tag: &str, asset_name: &str) -> Result<()> {
+        let canonical = self
+            .fetch_release_by_tag(tag)
+            .await?
+            .with_context(|| format!("no release found for tag {tag} after uploading"))?;
+
+        if self
+            .find_existing_asset_id(canonical, asset_name)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let ids = self.release_ids_for_tag(tag).await.unwrap_or_default();
+        anyhow::bail!(
+            "{asset_name} was uploaded, but it is not on the release that tag {tag} resolves to \
+             (release {canonical}). Releases currently pointing at this tag: {ids:?}. A duplicate \
+             release would split the assets across two entries, leaving the published release \
+             missing this platform."
+        )
     }
 
     /// Uploads `file_path` as a release asset, replacing any existing asset
@@ -1214,6 +1351,119 @@ mod tests {
             socket.shutdown().await.ok();
         }
         requests
+    }
+
+    // --- release create-race (v0.0.1-prerelease.40) --------------------------
+
+    /// The rule every racing leg has to compute identically without talking to
+    /// the others: lowest id wins.
+    #[test]
+    fn duplicate_releases_for_a_tag_are_all_found() {
+        let body = serde_json::json!([
+            {"id": 381_570_157, "tag_name": "v0.0.1-prerelease.40"},
+            {"id": 381_570_156, "tag_name": "v0.0.1-prerelease.40"},
+            {"id": 381_570_100, "tag_name": "v0.0.1-prerelease.39"},
+            {"tag_name": "v0.0.1-prerelease.40"},
+        ]);
+        let mut ids = releases_matching_tag(&body, "v0.0.1-prerelease.40");
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec![381_570_156, 381_570_157],
+            "both releases on the tag must be seen, and the one with no id ignored"
+        );
+        assert_eq!(
+            ids.iter().min(),
+            Some(&381_570_156),
+            "the lowest id is the winner every leg converges on"
+        );
+    }
+
+    #[test]
+    fn a_tag_with_one_release_reports_no_duplicate() {
+        let body = serde_json::json!([
+            {"id": 7, "tag_name": "v1.0.0"},
+            {"id": 8, "tag_name": "v1.0.1"},
+        ]);
+        assert_eq!(releases_matching_tag(&body, "v1.0.0"), vec![7]);
+        assert!(releases_matching_tag(&body, "v9.9.9").is_empty());
+    }
+
+    #[test]
+    fn a_non_array_release_listing_yields_nothing_rather_than_panicking() {
+        let body = serde_json::json!({"message": "Not Found"});
+        assert!(releases_matching_tag(&body, "v1.0.0").is_empty());
+    }
+
+    /// The failure this makes loud: the upload succeeded, but against a
+    /// duplicate release, so the release the tag resolves to is missing that
+    /// platform. Previously every leg reported success and the gap only showed
+    /// up when someone tried to install.
+    #[tokio::test]
+    async fn verify_asset_published_fails_when_the_asset_is_on_another_release() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_fixture_responses(
+            listener,
+            vec![
+                // GET /releases/tags/{tag} -> the canonical release
+                serde_json::json!({"id": 381_570_156}),
+                // GET /releases/{id}/assets -> the platform is absent
+                serde_json::json!([
+                    {"id": 1, "name": "paws-x86_64-apple-darwin.zip"}
+                ]),
+                // GET /releases -> two releases share the tag
+                serde_json::json!([
+                    {"id": 381_570_156, "tag_name": "v0.0.1-prerelease.40"},
+                    {"id": 381_570_157, "tag_name": "v0.0.1-prerelease.40"},
+                ]),
+            ],
+        ));
+
+        let client =
+            GitHubReleaseClient::new("octo".to_string(), "repo".to_string(), "t".to_string())
+                .with_base_url_for_tests(format!("http://{addr}"));
+        let error = client
+            .verify_asset_published("v0.0.1-prerelease.40", "paws-x86_64-unknown-linux-musl.zip")
+            .await
+            .expect_err("a split release must not be reported as a success");
+        let error = error.to_string();
+
+        assert!(
+            error.contains("paws-x86_64-unknown-linux-musl.zip"),
+            "the error should name the missing asset: {error}"
+        );
+        assert!(
+            error.contains("381570157"),
+            "the error should name the duplicate releases so the cause is obvious: {error}"
+        );
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn verify_asset_published_passes_when_the_asset_is_on_the_tags_release() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_fixture_responses(
+            listener,
+            vec![
+                serde_json::json!({"id": 42}),
+                serde_json::json!([
+                    {"id": 9, "name": "paws-x86_64-unknown-linux-musl.zip"}
+                ]),
+            ],
+        ));
+
+        let client =
+            GitHubReleaseClient::new("octo".to_string(), "repo".to_string(), "t".to_string())
+                .with_base_url_for_tests(format!("http://{addr}"));
+        client
+            .verify_asset_published("v1.0.0", "paws-x86_64-unknown-linux-musl.zip")
+            .await
+            .expect("the asset is on the release the tag resolves to");
+
+        server.await.unwrap();
     }
 
     #[tokio::test]

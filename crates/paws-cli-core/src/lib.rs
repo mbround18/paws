@@ -1883,6 +1883,10 @@ pub async fn run_release(args: ReleaseArgs) -> anyhow::Result<()> {
     let client = GitHubReleaseClient::new(owner.to_string(), repo.to_string(), token);
     let release_id = client.get_or_create_release(&tag, prerelease).await?;
     client.upload_asset(release_id, &archive_path).await?;
+    // A successful upload is not the same as a published asset: a
+    // create-race can land it on a duplicate release while this job's own
+    // view stays consistent. Check the release the tag actually resolves to.
+    client.verify_asset_published(&tag, &archive).await?;
     println!("release: uploaded {archive} to {repository}@{tag}");
 
     Ok(())
