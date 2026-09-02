@@ -38,8 +38,13 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace
 
+      # No `-D warnings` here on purpose: lint levels live in
+      # `[workspace.lints]` (Cargo.toml), so a local `cargo clippy` is exactly
+      # this gate. Passing `-D warnings` would re-promote every `warn`-level
+      # lint — notably the deliberately non-blocking `nursery` group — into a
+      # hard error and undo that distinction.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets
 
       # SC-004 + docs/adr/0001: zero direct `Command::new("dagger"/"docker"/"cross")`
       # call sites outside crates/paws-dagger (paws-docker's e2e tests excepted).

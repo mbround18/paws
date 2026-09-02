@@ -44,11 +44,21 @@ repository = "https://github.com/MBRound18/paws"
 # Groups carry `priority = -1` so the individual `allow`s below override them.
 # Each opt-out names why: the rule is that a lint is either enforced or has a
 # written reason not to be, never silently off.
+#
+# CI runs a bare `cargo clippy` on purpose: these levels are the gate. Adding
+# `-D warnings` back on the command line would re-promote every `warn` here
+# (notably `nursery`) to a hard error and undo the distinction.
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
-nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
+# `warn`, not `deny`: nursery lints are unstable by definition, and this repo
+# pins `channel = "stable"` rather than an exact version — so a Rust release
+# can add or change a nursery lint and fail a build that has not changed.
+# Keeping them visible locally is worth it; letting them block a release is
+# not. Every nursery finding to date is fixed, so this is about future
+# releases, not a backlog.
+nursery = { level = "warn", priority = -1 }
 
 # --- opt-outs, with reasons -------------------------------------------------
 
