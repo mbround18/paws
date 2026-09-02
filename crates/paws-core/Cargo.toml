@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 anyhow.workspace = true
 # Only `paws-cli-core` needs `Toolchain` to be a clap value / JSON-schema
 # type; keeping these optional means the 25 crates that just want the shared

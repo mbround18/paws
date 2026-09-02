@@ -399,6 +399,49 @@ const AUDIT_SCANNER_REGISTRY: &[(ScannerName, ScannerFamily, &[LanguageFamily], 
     ),
 ];
 
+/// The `paws.toml` `[tools]` key that pins each scanner's version.
+///
+/// Separate from [`ScannerName::as_str`] only where the tool's own name
+/// differs from the enum spelling; kept explicit so a rename of one does not
+/// silently change the config key users have already written.
+impl ScannerName {
+    pub const fn tool_key(self) -> &'static str {
+        match self {
+            Self::Semgrep => "semgrep",
+            Self::Gitleaks => "gitleaks",
+            Self::CargoAudit => "cargo-audit",
+        }
+    }
+}
+
+/// Repoints each scanner at a pinned version from `paws.toml`'s `[tools]`.
+///
+/// The registry's images carry a default tag (`returntocorp/semgrep:1.81.0`);
+/// this replaces the tag only, keeping the repository. A scanner with no entry
+/// is left exactly as the registry declares it, so an empty `[tools]` changes
+/// nothing.
+pub fn apply_tool_versions(
+    scanners: &mut [ScannerConfig],
+    versions: &std::collections::BTreeMap<String, String>,
+) {
+    for scanner in scanners.iter_mut() {
+        let Some(version) = versions.get(scanner.name.tool_key()) else {
+            continue;
+        };
+        let version = version.trim();
+        if version.is_empty() {
+            continue;
+        }
+        // Split on the last `:` so a registry host with a port
+        // (`registry.internal:5000/semgrep:1.81.0`) keeps its port.
+        let repository = scanner
+            .image
+            .rsplit_once(':')
+            .map_or(scanner.image.as_str(), |(repo, _)| repo);
+        scanner.image = format!("{repository}:{version}");
+    }
+}
+
 /// Ported from `selectAuditScanners`.
 pub fn select_audit_scanners(
     detection: &DetectionResult,
@@ -1030,6 +1073,68 @@ mod tests {
     /// `None`. This asserts the other half — that the mapping stays a real
     /// decision per toolchain, and that anything mapped is a family the
     /// scanner registry actually knows about.
+    #[test]
+    fn a_pinned_tool_version_replaces_only_the_tag() {
+        let mut scanners = vec![
+            ScannerConfig {
+                name: ScannerName::Semgrep,
+                family: ScannerFamily::CrossLanguage,
+                applies_to: vec![LanguageFamily::Rust],
+                should_run: true,
+                step_name: "semgrep".to_string(),
+                image: "returntocorp/semgrep:1.81.0".to_string(),
+            },
+            ScannerConfig {
+                name: ScannerName::Gitleaks,
+                family: ScannerFamily::CrossLanguage,
+                applies_to: vec![LanguageFamily::Rust],
+                should_run: true,
+                step_name: "gitleaks".to_string(),
+                image: "zricethezav/gitleaks:v8.24.2".to_string(),
+            },
+        ];
+        let versions = std::collections::BTreeMap::from([
+            ("semgrep".to_string(), "1.99.0".to_string()),
+            // No gitleaks entry: it must be left alone.
+        ]);
+        apply_tool_versions(&mut scanners, &versions);
+        assert_eq!(scanners[0].image, "returntocorp/semgrep:1.99.0");
+        assert_eq!(scanners[1].image, "zricethezav/gitleaks:v8.24.2");
+    }
+
+    /// A private registry with a port has a `:` that is not the tag separator.
+    #[test]
+    fn a_registry_port_survives_a_version_pin() {
+        let mut scanners = vec![ScannerConfig {
+            name: ScannerName::Semgrep,
+            family: ScannerFamily::CrossLanguage,
+            applies_to: vec![LanguageFamily::Rust],
+            should_run: true,
+            step_name: "semgrep".to_string(),
+            image: "registry.internal:5000/semgrep:1.81.0".to_string(),
+        }];
+        apply_tool_versions(
+            &mut scanners,
+            &std::collections::BTreeMap::from([("semgrep".to_string(), "1.99.0".to_string())]),
+        );
+        assert_eq!(scanners[0].image, "registry.internal:5000/semgrep:1.99.0");
+    }
+
+    #[test]
+    fn an_empty_tools_table_changes_nothing() {
+        let original = ScannerConfig {
+            name: ScannerName::CargoAudit,
+            family: ScannerFamily::Language(LanguageFamily::Rust),
+            applies_to: vec![LanguageFamily::Rust],
+            should_run: true,
+            step_name: "cargo-audit".to_string(),
+            image: "rust:1-bookworm".to_string(),
+        };
+        let mut scanners = vec![original.clone()];
+        apply_tool_versions(&mut scanners, &std::collections::BTreeMap::new());
+        assert_eq!(scanners[0].image, original.image);
+    }
+
     #[test]
     fn every_toolchain_has_a_decided_language_family() {
         for info in paws_core::TOOLCHAINS {

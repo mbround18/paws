@@ -72,7 +72,13 @@ pub fn detect_project(dir: &Path) -> Result<ElixirProject> {
 /// for `source_dir`: Hex/rebar install, `mix deps.get`, `mix compile
 /// --warnings-as-errors`, `mix test`.
 pub fn dagger_pipeline_args(source_dir: &str) -> Vec<String> {
-    Pipeline::from_image(BASE_IMAGE)
+    dagger_pipeline_args_with_image(source_dir, BASE_IMAGE)
+}
+
+/// [`dagger_pipeline_args`] against an explicit image — see
+/// `paws_core::Toolchain::image_for`.
+pub fn dagger_pipeline_args_with_image(source_dir: &str, image: &str) -> Vec<String> {
+    Pipeline::from_image(image)
         .mount("/src", source_dir)
         .workdir("/src")
         .exec(["mix", "local.hex", "--force"])

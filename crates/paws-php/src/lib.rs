@@ -70,7 +70,17 @@ pub fn detect_project(dir: &Path) -> Result<PhpProject> {
 /// failed for a packaging concern that has nothing to do with whether its
 /// build is correct.
 pub fn dagger_pipeline_args(project: &PhpProject, source_dir: &str) -> Vec<String> {
-    Pipeline::from_image(BASE_IMAGE)
+    dagger_pipeline_args_with_image(project, source_dir, BASE_IMAGE)
+}
+
+/// [`dagger_pipeline_args`] against an explicit image — see
+/// `paws_core::Toolchain::image_for`.
+pub fn dagger_pipeline_args_with_image(
+    project: &PhpProject,
+    source_dir: &str,
+    image: &str,
+) -> Vec<String> {
+    Pipeline::from_image(image)
         .mount("/src", source_dir)
         .workdir("/src")
         .exec(["composer", "validate", "--strict", "--no-check-publish"])

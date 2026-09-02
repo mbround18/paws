@@ -65,12 +65,22 @@ pub fn dagger_pipeline_args_with_version(
     source_dir: &str,
     python_version: &str,
 ) -> Vec<String> {
+    dagger_pipeline_args_with_image(project, source_dir, &base_image(python_version))
+}
+
+/// [`dagger_pipeline_args`] against an explicit image — see
+/// `paws_core::Toolchain::image_for`.
+pub fn dagger_pipeline_args_with_image(
+    project: &PythonProject,
+    source_dir: &str,
+    image: &str,
+) -> Vec<String> {
     let mut sync = vec!["uv", "sync", "--all-groups"];
     if project.has_lockfile {
         sync.push("--frozen");
     }
 
-    Pipeline::from_image(&base_image(python_version))
+    Pipeline::from_image(image)
         .mount("/src", source_dir)
         .workdir("/src")
         .exec(sync)

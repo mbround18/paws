@@ -173,7 +173,57 @@ Each toolchain detects its own project layout rather than needing extra flags: N
 four major package managers (npm, yarn, pnpm, bun) with Vite/Next.js framework detection and
 automatic Playwright e2e handling, `uv`-based Python, Maven vs Gradle for Java, the Ruby test
 runner (`rake` vs `rspec`), and whether a PHPUnit or `Microsoft.NET.Test.Sdk` suite exists at all
-before trying to run one. `paws docker` and `paws helm` are stack-agnostic —
+before trying to run one. ### Toolchain versions
+
+`paws` reads the version file your ecosystem already uses, so `paws ci` builds
+against the same toolchain a local build does — no extra configuration:
+
+| Toolchain | Files read (in order) |
+| --- | --- |
+| `rust`, `esp32` | `rust-toolchain.toml`, `rust-toolchain`, `.tool-versions` |
+| `node`, `tauri` | `.nvmrc`, `.node-version`, `.tool-versions` |
+| `python` | `.python-version`, `.tool-versions` |
+| `go` | `go.mod`'s `go` directive, `.go-version`, `.tool-versions` |
+| `ruby` | `.ruby-version`, `.tool-versions` |
+| `php`, `dotnet`, `elixir`, `java`, `kotlin` | their conventional file, `.tool-versions` |
+
+Precedence, highest first:
+
+1. `--toolchain-version` on the command line
+2. the ecosystem's own version file
+3. `paws.toml`
+4. paws's built-in default
+
+A native version file deliberately outranks `paws.toml`: `rustup` and `nvm`
+already obey those files, so if `paws` disagreed, `paws ci` would build against
+a different compiler than `cargo build` in the same directory. Every run prints
+what it resolved and why:
+
+```
+$ paws ci --toolchain rust
+ci: rust 1.90.0 (rust-toolchain.toml)
+```
+
+### `paws.toml`
+
+Optional, and only needed for toolchains with no native version file — or to
+pin the tools `paws` itself installs and runs:
+
+```toml
+[toolchains]
+ruby = "3.3.0"
+dotnet = "9.0"
+
+[tools]
+dagger = "0.18.10"    # what `paws init` installs
+semgrep = "1.99.0"    # scanner images `paws audit` runs
+```
+
+Pinning `dagger` matters more than it looks: unpinned, `paws init` installs
+whatever the install script currently serves, so two runs weeks apart can leave
+different engines behind.
+
+`paws docker` and `paws helm` are stack-agnostic —
 they work from a `Dockerfile`/`docker-compose.yml` or a `charts/*/Chart.yaml` layout respectively,
 regardless of what language the project underneath is written in. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full target stack list (JVM, Go, .NET, mobile, and

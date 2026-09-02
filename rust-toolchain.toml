@@ -1,8 +1,0 @@
-# Pins the toolchain the edition-2024 workspace is developed and gated
-# against, so a local build, a CI run, and a release build all use the same
-# compiler and the same clippy lint set. Without this, `cargo clippy -D
-# warnings` could pass on one machine and fail on another purely because a
-# newer clippy added a lint.
-[toolchain]
-channel = "stable"
-components = ["rustfmt", "clippy"]

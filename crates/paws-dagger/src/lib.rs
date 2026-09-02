@@ -878,6 +878,19 @@ pub async fn ensure_available() -> Result<()> {
 /// is also appended there so a later step's `dagger` calls resolve without
 /// the caller having to touch `PATH` itself.
 pub async fn install_cli() -> Result<std::path::PathBuf> {
+    install_cli_with_version(None).await
+}
+
+/// [`install_cli`] pinned to a specific `dagger` release.
+///
+/// Unpinned, `install.sh` serves whatever is current, so two `paws init` runs
+/// weeks apart can leave different engines behind and a pipeline that worked
+/// last month can fail with no local change. A `[tools] dagger = "..."` entry
+/// in `paws.toml` makes that reproducible.
+///
+/// The version travels as `$DAGGER_VERSION`, which is the install script's own
+/// documented knob — this does not reimplement the installer.
+pub async fn install_cli_with_version(version: Option<&str>) -> Result<std::path::PathBuf> {
     let home =
         std::env::var("HOME").context("HOME is not set - can't determine an install directory")?;
     let install_dir = std::path::PathBuf::from(home).join(".local").join("bin");
@@ -885,10 +898,15 @@ pub async fn install_cli() -> Result<std::path::PathBuf> {
         .await
         .context("failed to create the dagger install directory")?;
 
-    let output = Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
         .arg("curl -fsSL https://dl.dagger.io/dagger/install.sh | sh")
-        .env("BIN_DIR", &install_dir)
+        .env("BIN_DIR", &install_dir);
+    if let Some(version) = version.map(str::trim).filter(|v| !v.is_empty()) {
+        command.env("DAGGER_VERSION", version);
+    }
+    let output = command
         .output()
         .await
         .context("failed to run the dagger install script")?;

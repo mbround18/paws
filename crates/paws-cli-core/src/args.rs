@@ -291,6 +291,18 @@ pub struct CiArgs {
     #[arg(long)]
     #[serde(default)]
     pub toolchain: Option<Toolchain>,
+    /// Build against a specific version of `--toolchain`, e.g.
+    /// `--toolchain rust --toolchain-version 1.90.0`.
+    ///
+    /// Omitted, `paws` reads the ecosystem's own version file
+    /// (`rust-toolchain.toml`, `.nvmrc`, `.python-version`, `.ruby-version`,
+    /// `go.mod`, `.tool-versions`, ...), then a `[toolchains]` entry in
+    /// `paws.toml`, then its built-in default — and prints which one it used.
+    /// Reading those files is what keeps `paws ci` on the same toolchain a
+    /// local build uses.
+    #[arg(long)]
+    #[serde(default)]
+    pub toolchain_version: Option<String>,
     /// Print per-ecosystem provisioning start/elapsed timing to stderr.
     #[arg(long)]
     #[serde(default)]
