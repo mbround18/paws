@@ -79,6 +79,11 @@ fn claude_desktop_config_path() -> anyhow::Result<std::path::PathBuf> {
     }
 }
 
+// `async` with nothing to await, deliberately: every `run_*` entry point
+// shares one signature so `execute`'s dispatch and `paws-mcp`'s tool
+// handlers can call them uniformly. Dropping it here would make this the
+// one command both callers have to special-case.
+#[allow(clippy::unused_async)]
 pub async fn run_mcp_setup(args: McpSetupArgs) -> anyhow::Result<()> {
     let client = args.client.as_deref().unwrap_or("claude-code");
     match client {

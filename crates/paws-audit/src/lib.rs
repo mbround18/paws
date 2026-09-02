@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 
+use paws_core::{Pipeline, Toolchain};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -36,14 +37,47 @@ pub enum LanguageFamily {
 }
 
 impl LanguageFamily {
-    pub fn as_str(&self) -> &'static str {
+    /// The scanner family a `paws ci` toolchain's code belongs to, or `None`
+    /// when this crate has no scanner suite that applies to it.
+    ///
+    /// The two enums stay distinct on purpose — `LanguageFamily` covers
+    /// things that are scanned but never built (`Docker`, `Generic`), and
+    /// several buildable toolchains have no scanner yet — but every mapping
+    /// lives here rather than being re-decided at each call site, and
+    /// `every_toolchain_has_a_decided_language_family` fails if a new
+    /// toolchain is added without someone choosing an answer.
+    pub const fn for_toolchain(toolchain: Toolchain) -> Option<Self> {
+        match toolchain {
+            // An ESP32 firmware crate is a Cargo project; `cargo audit`
+            // applies to its dependency tree exactly as it does to any other.
+            Toolchain::Rust | Toolchain::Esp32 => Some(Self::Rust),
+            // Tauri and its Android variant are Node projects with a Rust
+            // core; the Node half is what the JS scanners see.
+            Toolchain::Node | Toolchain::Tauri | Toolchain::TauriAndroid => Some(Self::Node),
+            Toolchain::Python => Some(Self::Python),
+            Toolchain::Go => Some(Self::Go),
+            // Buildable, but no scanner suite is wired for these yet. The
+            // cross-language scanners (semgrep, gitleaks) still run on the
+            // repo via signal-based detection; this is about per-language
+            // dependency auditing only.
+            Toolchain::Java
+            | Toolchain::Kotlin
+            | Toolchain::Ruby
+            | Toolchain::Php
+            | Toolchain::Dotnet
+            | Toolchain::Elixir
+            | Toolchain::Flatpak => None,
+        }
+    }
+
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            LanguageFamily::Rust => "rust",
-            LanguageFamily::Node => "node",
-            LanguageFamily::Python => "python",
-            LanguageFamily::Go => "go",
-            LanguageFamily::Docker => "docker",
-            LanguageFamily::Generic => "generic",
+            Self::Rust => "rust",
+            Self::Node => "node",
+            Self::Python => "python",
+            Self::Go => "go",
+            Self::Docker => "docker",
+            Self::Generic => "generic",
         }
     }
 }
@@ -116,10 +150,10 @@ pub enum ScannerFamily {
 }
 
 impl ScannerFamily {
-    fn as_str(&self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
-            ScannerFamily::Language(family) => family.as_str(),
-            ScannerFamily::CrossLanguage => "cross-language",
+            Self::Language(family) => family.as_str(),
+            Self::CrossLanguage => "cross-language",
         }
     }
 }
@@ -163,11 +197,11 @@ pub enum ScannerName {
 }
 
 impl ScannerName {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            ScannerName::Semgrep => "semgrep",
-            ScannerName::Gitleaks => "gitleaks",
-            ScannerName::CargoAudit => "cargo-audit",
+            Self::Semgrep => "semgrep",
+            Self::Gitleaks => "gitleaks",
+            Self::CargoAudit => "cargo-audit",
         }
     }
 }
@@ -395,7 +429,7 @@ pub fn select_audit_scanners(
 /// Where a scanner's JSON report ends up inside its own container — needed
 /// both to build the run script (below) and to know what path to read back
 /// afterward.
-fn scanner_output_path(name: ScannerName) -> &'static str {
+const fn scanner_output_path(name: ScannerName) -> &'static str {
     match name {
         ScannerName::Semgrep => "/tmp/semgrep.json",
         ScannerName::Gitleaks => "/tmp/gitleaks.json",
@@ -412,7 +446,7 @@ fn scanner_output_path(name: ScannerName) -> &'static str {
 /// `--expect=ANY` on the `with-exec` that runs it (see
 /// [`scanner_pipeline_prefix`]) so a real failure doesn't also fail the whole
 /// `dagger core` call, just leaves the exit code to reflect it.
-fn scanner_script(name: ScannerName) -> &'static str {
+const fn scanner_script(name: ScannerName) -> &'static str {
     match name {
         ScannerName::Semgrep => {
             "set -eu\n\
@@ -443,32 +477,19 @@ fn scanner_script(name: ScannerName) -> &'static str {
 /// argument ... parse error ... bare " in non-quoted-field`) before switching to
 /// `with-new-file` + `sh <path>`, which sidesteps the CSV parsing entirely.
 fn scanner_pipeline_prefix(source_dir: &str, scanner: &ScannerConfig) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "container".into(),
-        "from".into(),
-        format!("--address={}", scanner.image),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={source_dir}"),
-        "with-workdir".into(),
-        "--path=/src".into(),
-    ];
-    if scanner.name == ScannerName::Semgrep {
-        args.extend([
-            "with-env-variable".into(),
-            "--name=SEMGREP_CONFIG".into(),
-            "--value=auto".into(),
-        ]);
-    }
-    args.extend([
-        "with-new-file".into(),
-        "--path=/scan.sh".into(),
-        format!("--contents={}", scanner_script(scanner.name)),
-        "with-exec".into(),
-        "--expect=ANY".into(),
-        "--args=sh,/scan.sh".into(),
-    ]);
-    args
+    Pipeline::from_image(&scanner.image)
+        .mount("/src", source_dir)
+        .workdir("/src")
+        .env_if(
+            scanner.name == ScannerName::Semgrep,
+            "SEMGREP_CONFIG",
+            "auto",
+        )
+        .new_file("/scan.sh", scanner_script(scanner.name))
+        // A scanner exits non-zero exactly when it finds something, so the
+        // report still has to be read afterwards.
+        .exec_expecting_any_exit(["sh", "/scan.sh"])
+        .into_args()
 }
 
 /// Builds the `dagger core <chain>` argument list that runs `scanner` and
@@ -544,7 +565,7 @@ pub fn normalize_scanner_status(exit_code: Option<i32>, findings_count: usize) -
     }
 }
 
-fn severity_rank(severity: Severity) -> u8 {
+const fn severity_rank(severity: Severity) -> u8 {
     severity as u8
 }
 
@@ -556,7 +577,7 @@ fn compare_top_findings(left: &TopFinding, right: &TopFinding) -> std::cmp::Orde
         .then_with(|| left.line.unwrap_or(0).cmp(&right.line.unwrap_or(0)))
 }
 
-fn scanner_status_rank(status: ScannerStatus) -> u8 {
+const fn scanner_status_rank(status: ScannerStatus) -> u8 {
     match status {
         ScannerStatus::Failed => 0,
         ScannerStatus::Findings => 1,
@@ -654,6 +675,14 @@ pub fn aggregate_audit_results(
     }
 }
 
+/// Counts are reported as `i64` because that is the JSON number type the
+/// summary serializes to. A `usize` that doesn't fit is not reachable from any
+/// real scanner report, but saturating says so explicitly instead of wrapping
+/// a count into a negative number the way `as` would.
+fn count_as_i64(count: usize) -> i64 {
+    i64::try_from(count).unwrap_or(i64::MAX)
+}
+
 /// Ported from `buildScanFindings`.
 pub fn build_scan_findings(summary: &AuditSummary) -> HashMap<String, i64> {
     let by_name = |name: &str| -> i64 {
@@ -661,35 +690,38 @@ pub fn build_scan_findings(summary: &AuditSummary) -> HashMap<String, i64> {
             .scanners
             .iter()
             .find(|s| s.name == name)
-            .map(|s| s.findings_count as i64)
-            .unwrap_or(0)
+            .map_or(0, |s| count_as_i64(s.findings_count))
     };
 
     let mut result = HashMap::new();
     result.insert("semgrep".to_string(), by_name("semgrep"));
     result.insert("gitleaks".to_string(), by_name("gitleaks"));
-    result.insert("total".to_string(), summary.total_findings as i64);
+    result.insert("total".to_string(), count_as_i64(summary.total_findings));
     result.insert(
         "detectedFamilyCount".to_string(),
-        summary
-            .detected_families
-            .iter()
-            .filter(|f| f.as_str() != "generic")
-            .count() as i64,
+        count_as_i64(
+            summary
+                .detected_families
+                .iter()
+                .filter(|f| f.as_str() != "generic")
+                .count(),
+        ),
     );
     result.insert("fallbackMode".to_string(), i64::from(summary.fallback_mode));
     result.insert(
         "scannerFailureCount".to_string(),
-        summary
-            .scanners
-            .iter()
-            .filter(|s| s.status == ScannerStatus::Failed)
-            .count() as i64,
+        count_as_i64(
+            summary
+                .scanners
+                .iter()
+                .filter(|s| s.status == ScannerStatus::Failed)
+                .count(),
+        ),
     );
     result
 }
 
-fn status_icon(status: ScannerStatus) -> &'static str {
+const fn status_icon(status: ScannerStatus) -> &'static str {
     match status {
         ScannerStatus::Pass => "OK",
         ScannerStatus::Findings => "WARN",
@@ -798,11 +830,11 @@ pub fn render_audit_intelligence_section(summary: &AuditSummary) -> String {
         );
     }
 
-    lines
-        .into_iter()
-        .filter(|l| !l.is_empty() || true)
-        .collect::<Vec<_>>()
-        .join("\n")
+    // The blank entries pushed above are deliberate paragraph breaks in the
+    // rendered summary, so nothing is filtered out here. (This used to run a
+    // `.filter(|l| !l.is_empty() || true)`, which is unconditionally true —
+    // a no-op that read as if it dropped empty lines.)
+    lines.join("\n")
 }
 
 fn normalize_severity(value: Option<&str>) -> Severity {
@@ -855,9 +887,9 @@ fn parse_semgrep_findings(raw_json: &str) -> (usize, Vec<TopFinding>) {
                 path,
                 line: start
                     .and_then(|s| s.get("line"))
-                    .and_then(|v| v.as_u64())
-                    .or_else(|| result.get("line").and_then(|v| v.as_u64()))
-                    .map(|v| v as u32),
+                    .and_then(serde_json::Value::as_u64)
+                    .or_else(|| result.get("line").and_then(serde_json::Value::as_u64))
+                    .and_then(|v| u32::try_from(v).ok()),
                 message: extra
                     .and_then(|e| e.get("message"))
                     .and_then(|v| v.as_str())
@@ -884,8 +916,11 @@ fn parse_gitleaks_findings(raw_json: &str) -> (usize, Vec<TopFinding>) {
             .find_map(|k| v.get(k).and_then(|x| x.as_str()).map(String::from))
     };
     let num_field = |v: &serde_json::Value, keys: &[&str]| -> Option<u32> {
-        keys.iter()
-            .find_map(|k| v.get(k).and_then(|x| x.as_u64()).map(|n| n as u32))
+        keys.iter().find_map(|k| {
+            v.get(k)
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+        })
     };
 
     let mut top_findings: Vec<TopFinding> = results
@@ -918,7 +953,7 @@ fn parse_gitleaks_findings(raw_json: &str) -> (usize, Vec<TopFinding>) {
 }
 
 /// `cargo audit --json`'s shape: `{"vulnerabilities":{"list":[{"advisory":{"id",
-/// "title","severity"?},"package":{"name","version"}}, ...]}}`. RustSec
+/// "title","severity"?},"package":{"name","version"}}, ...]}}`. `RustSec`
 /// advisories rarely carry a plain `severity` string (CVSS scoring is optional
 /// metadata most advisories don't set) — a known-vulnerable dependency
 /// defaults to `High` rather than `normalize_severity`'s usual `Info` default,
@@ -953,14 +988,16 @@ fn parse_cargo_audit_findings(raw_json: &str) -> (usize, Vec<TopFinding>) {
                     .and_then(|v| v.as_str())
                     .unwrap_or("RUSTSEC")
                     .to_string(),
-                severity: match advisory.get("severity").and_then(|v| v.as_str()) {
-                    Some(raw) => normalize_severity(Some(raw)),
-                    None => Severity::High,
-                },
-                path: match package_version {
-                    Some(version) => format!("{package_name}@{version}"),
-                    None => package_name.to_string(),
-                },
+                // An advisory with no severity field is treated as High:
+                // cargo-audit only reports things it considers actionable.
+                severity: advisory
+                    .get("severity")
+                    .and_then(|v| v.as_str())
+                    .map_or(Severity::High, |raw| normalize_severity(Some(raw))),
+                path: package_version.map_or_else(
+                    || package_name.to_string(),
+                    |version| format!("{package_name}@{version}"),
+                ),
                 line: None,
                 message: advisory
                     .get("title")
@@ -988,6 +1025,30 @@ pub fn parse_scanner_findings(scanner: ScannerName, raw_json: &str) -> (usize, V
 
 #[cfg(test)]
 mod tests {
+    /// The `match` in `LanguageFamily::for_toolchain` is exhaustive, so a
+    /// new `Toolchain` variant is a compile error there rather than a silent
+    /// `None`. This asserts the other half — that the mapping stays a real
+    /// decision per toolchain, and that anything mapped is a family the
+    /// scanner registry actually knows about.
+    #[test]
+    fn every_toolchain_has_a_decided_language_family() {
+        for info in paws_core::TOOLCHAINS {
+            if let Some(family) = LanguageFamily::for_toolchain(info.toolchain) {
+                assert!(
+                    LANGUAGE_FAMILIES.contains(&family),
+                    "{} maps to {family:?}, which is not a detectable family",
+                    info.name
+                );
+            }
+        }
+        assert_eq!(
+            LanguageFamily::for_toolchain(Toolchain::Esp32),
+            Some(LanguageFamily::Rust),
+            "an esp32 firmware crate is still a Cargo project for cargo-audit's purposes"
+        );
+        assert_eq!(LanguageFamily::for_toolchain(Toolchain::Java), None);
+    }
+
     use super::*;
 
     fn signals(present: &[&str]) -> RepositorySignals {

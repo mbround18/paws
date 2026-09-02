@@ -31,19 +31,19 @@ After step 3, restart/reload the MCP client (or start a new session) so it picks
 Build and test a language target (node, rust, python, go, java, kotlin, ruby, php, dotnet, elixir, tauri, tauri-android, flatpak, esp32)
 
 - `--source` — Directory to build, relative to the current one. Defaults to the current directory
-- `--toolchain` — Which toolchain to build: node, rust, python, go, java, kotlin, ruby, php, dotnet, elixir, tauri, tauri-android, flatpak, or esp32. For `node`, the package manager (npm/yarn/pnpm/bun) and framework (Vite, Next.js, or plain) are auto-detected from lockfiles/package.json — no separate flag needed — and a Playwright e2e project (`@playwright/test` dependency or a playwright.config.*) is detected automatically too, running `npx playwright install --with-deps && npx playwright test` instead of the plain build+test pipeline. For `esp32`, builds an ESP-IDF/`esp-idf-sys` Rust firmware project (fmt/clippy/build, plus `cargo test` against any host-testable sibling crate — the embedded target itself has no test story) against a dedicated `builders/esp32` image (`espup`-installed ESP Rust toolchain, `libclang`, `espflash`). `ruby` (Bundler), `php` (Composer), `dotnet` (the .NET SDK), and `elixir` (Mix) each detect their own project layout too: the Ruby test runner (`rake` vs `rspec`), and whether a PHPUnit suite or a `Microsoft.NET.Test.Sdk` test project exists at all before running one
+- `--toolchain` — Which toolchain to build. Clap lists the accepted values from `paws_core::TOOLCHAINS`, so `--help` can't fall behind what `paws ci` actually dispatches
 - `--verbose` — Print per-ecosystem provisioning start/elapsed timing to stderr
 - `--silent` — Suppress dagger's live build progress; only print output once the pipeline finishes (or on failure). Default is streamed live
 - `--targets` — Cross-compile to these GOOS/GOARCH pairs instead of the native build, e.g. "linux/amd64,darwin/arm64,windows/amd64" — only valid with `--toolchain go`. Binaries land in `dist/` under the project root; `go test` is skipped for every target (none of them can run in this build container, native or not)
 - `--coverage` — Also run `cargo llvm-cov` after the normal test step and print a coverage summary — only valid with `--toolchain rust`. Builds against a dedicated `builders/rust` image (pre-installed `cargo-llvm-cov`) instead of pulling `rust:1-bookworm` directly; the default (flag omitted) pipeline is unaffected. A no-op on a wasm project (`cargo test` is already skipped there for the same reason coverage can't be measured)
-- `--publish-artifacts` — After a successful build, upload the built bootloader (`bootloader.bin`) and firmware ELF as assets on the GitHub Release matching the current tag ($GITHUB_REF_NAME) — only valid with `--toolchain esp32` (mirrors `--coverage`'s existing `--toolchain rust`-only gating). Needs $GITHUB_TOKEN/$GH_TOKEN and $GITHUB_REPOSITORY set — no new env var name, reusing the same convention every other GitHub-Release-touching `paws` subcommand already reads (`paws semver --push`, `paws helm --publish`). A missing token/tag fails with a clear, actionable error rather than a bare API 401. Default (flag omitted): no GitHub API interaction at all, same "additive flag changes nothing by default" shape as `--coverage`
+- `--publish-artifacts` — After a successful build, upload the built bootloader (`bootloader.bin`) and firmware ELF as assets on the GitHub Release matching the current tag ($`GITHUB_REF_NAME`) — only valid with `--toolchain esp32` (mirrors `--coverage`'s existing `--toolchain rust`-only gating). Needs $`GITHUB_TOKEN/$GH_TOKEN` and $`GITHUB_REPOSITORY` set — no new env var name, reusing the same convention every other GitHub-Release-touching `paws` subcommand already reads (`paws semver --push`, `paws helm --publish`). A missing token/tag fails with a clear, actionable error rather than a bare API 401. Default (flag omitted): no GitHub API interaction at all, same "additive flag changes nothing by default" shape as `--coverage`
 
 ## paws docker
 
 Build and gate a container image the same way `docker-facts` + `docker-release` do
 
-- `--image` — Image name, e.g. "ghcr.io/example/app". Falls back to $GITHUB_REPOSITORY. A registry host here selects the registry to publish to — "ghcr.io/..." publishes to ghcr.io without also needing --registries. An unqualified name ("owner/app") is a Docker Hub reference, as docker itself reads it
-- `--version` — Version to tag with. Falls back to $GITHUB_SHA (short)
+- `--image` — Image name, e.g. "ghcr.io/example/app". Falls back to $`GITHUB_REPOSITORY`. A registry host here selects the registry to publish to — "ghcr.io/..." publishes to ghcr.io without also needing --registries. An unqualified name ("owner/app") is a Docker Hub reference, as docker itself reads it
+- `--version` — Version to tag with. Falls back to $`GITHUB_SHA` (short)
 - `--registries` — Additional registries to mirror tags into, comma-separated
 - `--dockerfile` — Path to the Dockerfile to build, relative to the repo root. Falls back to auto-detection (`Dockerfile` at the repo root, or a `compose.yml` service's own `dockerfile`/`context`)
 - `--context` — Build context directory, relative to the repo root. Falls back to auto-detection alongside `--dockerfile`
@@ -54,9 +54,9 @@ Build and gate a container image the same way `docker-facts` + `docker-release` 
 - `--prepend-target` — Prefix the image tag with `--target`'s name, e.g. `<target>-<version>` instead of just `<version>`. Only used with `--target`
 - `--labels` — PR labels to check against --canary-label, comma-separated
 - `--default-branch` (default: `main`) — The repo's default branch. A push directly to this branch, or any tag push, always pushes the image — --canary-label/--push only matter for everything else (feature branches, PRs)
-- `--dockerhub-username` — Docker Hub username to authenticate publishing with. Falls back to $DOCKERHUB_USERNAME. Required (here or via env) to actually push to docker.io — without it, `dockerRelease` builds but can't authenticate, so `push=true` still publishes nothing
-- `--ghcr-username` — GHCR username to authenticate publishing with. Falls back to $GHCR_USERNAME. Required (here or via env) to actually push to ghcr.io. The password is read from $GHCR_TOKEN, falling back to $GITHUB_TOKEN — which is what a GitHub Actions workflow already has
-- `--registry-username` — Username(s) for registries in --registries other than docker.io/ghcr.io (Artifactory, a private registry, etc.), as "<registry>=<username>" pairs, comma-separated — e.g. "myco.jfrog.io=deploy-bot". These are built and published natively through Dagger (`Container.withRegistryAuth`), not via the docker.io/ghcr.io-only `dockerRelease` call. The matching token/password is read from an env var derived from the registry: uppercased, every non-alphanumeric character replaced with `_`, suffixed `_TOKEN` — e.g. "myco.jfrog.io" reads $MYCO_JFROG_IO_TOKEN
+- `--dockerhub-username` — Docker Hub username to authenticate publishing with. Falls back to $`DOCKERHUB_USERNAME`. Required (here or via env) to actually push to docker.io — without it, `dockerRelease` builds but can't authenticate, so `push=true` still publishes nothing
+- `--ghcr-username` — GHCR username to authenticate publishing with. Falls back to $`GHCR_USERNAME`. Required (here or via env) to actually push to ghcr.io. The password is read from $`GHCR_TOKEN`, falling back to $`GITHUB_TOKEN` — which is what a GitHub Actions workflow already has
+- `--registry-username` — Username(s) for registries in --registries other than docker.io/ghcr.io (Artifactory, a private registry, etc.), as "<registry>=<username>" pairs, comma-separated — e.g. "myco.jfrog.io=deploy-bot". These are built and published natively through Dagger (`Container.withRegistryAuth`), not via the docker.io/ghcr.io-only `dockerRelease` call. The matching token/password is read from an env var derived from the registry: uppercased, every non-alphanumeric character replaced with `_`, suffixed `_TOKEN` — e.g. "myco.jfrog.io" reads $`MYCO_JFROG_IO_TOKEN`
 - `--silent` — Suppress dagger's live build/publish progress; only print output once each pipeline finishes (or on failure). Default is streamed live
 - `--tag-rollup` — Also publish `major` and `major.minor` rollup tags (e.g. `:3` and `:3.2` alongside `:v3.2.1`) for release-quality version tags — the pattern consumers pinning to a major version for stability need. Gated identically to `--with-latest`: only on a real (non-prerelease) version tag build. Off by default; omitting this flag produces byte-identical output to before this flag existed. This is a `paws`-native tag scheme, not a byte-for-byte port of `crazy-max/ghaction-docker-meta`'s semver tag output
 - `--tag-sha` — Also include a `sha-<sha>` tag unconditionally, alongside whatever other tags this build already produces — not only as the fallback primary tag when no version/ref-based tag applies (that fallback behavior is unaffected by this flag). Only produces a tag when `--version` is itself sha-shaped
@@ -94,7 +94,7 @@ Run the audit/compliance scanner suite
 Build rustdoc; optionally publish it with --provider (github-pages implemented; cloudflare-pages/s3 recognized but not implemented yet)
 
 - `--provider` — Comma-delimited publish destination(s): "github-pages", "cloudflare-pages", "s3". Omitted (the default): builds target/doc locally only, nothing published — same as before this flag existed. "cloudflare-pages"/"s3" are recognized but not implemented yet (see docs/ROADMAP.md); "github-pages" publishes for real, auto-selecting the Git Trees or Pages-deployment mechanism from the repository's live Pages configuration
-- `--repository` — "owner/repo" to publish to. Falls back to $GITHUB_REPOSITORY. Only used when --provider is given
+- `--repository` — "owner/repo" to publish to. Falls back to $`GITHUB_REPOSITORY`. Only used when --provider is given
 - `--branch` (default: `main`) — Branch to publish to (the "github-pages" provider only). Only used when --provider includes "github-pages"
 
 ## paws provision
@@ -112,7 +112,7 @@ Lint (and optionally package) Helm chart(s) — `charts/*/Chart.yaml` or a root 
 - `--package` — Also `helm package` every chart after linting, exported to `--output`
 - `--output` (default: `tmp`) — Host directory packaged `.tgz`s are exported to (only with `--package`)
 - `--publish` — Publish: a per-chart GitHub Release (tag `<chart>-<version>`, asset uploaded only if missing) plus a real Helm `index.yaml` pushed to `--pages-branch`, so `helm repo add` against this repo's GitHub Pages URL works. Does its own packaging internally (per-chart, not the flat `--output` directory); mutually exclusive with `--package`
-- `--repository` — "owner/repo" to publish releases/index.yaml to. Falls back to $GITHUB_REPOSITORY. Only used with `--publish`
+- `--repository` — "owner/repo" to publish releases/index.yaml to. Falls back to $`GITHUB_REPOSITORY`. Only used with `--publish`
 - `--pages-branch` (default: `gh-pages`) — Branch `index.yaml` is published to. Only used with `--publish`
 - `--index-path` (default: `index.yaml`) — Path to `index.yaml` on `--pages-branch`. Only used with `--publish`
 - `--silent` — Suppress dagger's live build progress; only print output once the pipeline finishes (or on failure). Default is streamed live
@@ -126,9 +126,9 @@ Cross-target build, package, and publish a release binary to GitHub Releases
 - `--package` (default: `paws-cli`) — Cargo package(s) to build, comma-separated (one [[bin]] each) — e.g. "agent,server". Paired 1:1 with --binary-name
 - `--binary-name` (default: `paws`) — Binary name(s) as declared in each package's [[bin]] section, comma-separated, paired 1:1 with --package. All built binaries are packaged into one archive
 - `--local-build` — Build locally via Dagger's `docker-build` against paws's embedded generic Rust-Linux builder instead of pulling paws's own prebuilt builder image. Use this outside paws's own repo (e.g. a target repo with no `builders/` directory) — only `paws_release::local_build_targets()` are supported
-- `--tag` — Release tag, e.g. "v0.0.1-prerelease.1". Falls back to $GITHUB_REF_NAME
+- `--tag` — Release tag, e.g. "v0.0.1-prerelease.1". Falls back to $`GITHUB_REF_NAME`
 - `--prerelease` — Mark the GitHub Release as a prerelease
-- `--repository` — "owner/repo". Falls back to $GITHUB_REPOSITORY
+- `--repository` — "owner/repo". Falls back to $`GITHUB_REPOSITORY`
 - `--no-upload` — Build and package only; skip the GitHub upload
 - `--skip-smoke-test` — Skip the post-build smoke test (not recommended — it's what catches a binary that builds but doesn't actually run)
 
@@ -157,7 +157,7 @@ Generate `llms.txt` from this CLI's own `--help` metadata
 - `--output` (default: `llms.txt`) — Path to write the generated file to
 - `--publish` — After generating, commit the file to GitHub via the Contents API (reuses `paws_release::GitHubReleaseClient`, the same mechanism `paws helm --publish` uses for `index.yaml` — no local git identity needed). Skips the commit if the generated content is unchanged
 - `--branch` (default: `main`) — Branch to publish to. Only used with `--publish`
-- `--repository` — "owner/repo" to publish to. Falls back to $GITHUB_REPOSITORY. Only used with `--publish`
+- `--repository` — "owner/repo" to publish to. Falls back to $`GITHUB_REPOSITORY`. Only used with `--publish`
 
 ## paws workflow
 
@@ -178,10 +178,10 @@ Credential helpers — mint tokens `paws` (or other tools) can use
 
 Mint a GitHub App installation access token and print it to stdout (nothing else goes to stdout, so `TOKEN=$(paws auth github-app)` works as a shell capture) — the same mechanism `actions/create-github-app-token` provides as a separate Action, done natively so no extra CI step is needed. Every other `paws` subcommand that needs a GitHub token (`semver --push`, `helm --publish`, `release`, `llms generate --publish`) already picks up App auth automatically via the same `$GH_APP_CLIENT_ID`/ `$GH_APP_PRIVATE_KEY` env vars — this subcommand exists for cases that want the raw token directly (e.g. handing it to another tool)
 
-- `--client-id` — The GitHub App's Client ID (the `Iv23...`-style string). Falls back to $GH_APP_CLIENT_ID
-- `--private-key` — The GitHub App's private key, PEM-encoded, given directly. Falls back to $GH_APP_PRIVATE_KEY. Mutually exclusive with --private-key-file in practice — if both are given, the file wins
-- `--private-key-file` — Path to a file containing the GitHub App's private key. Falls back to $GH_APP_PRIVATE_KEY_FILE
-- `--repository` — "owner/repo" the App is installed on. Falls back to $GITHUB_REPOSITORY
+- `--client-id` — The GitHub App's Client ID (the `Iv23...`-style string). Falls back to $`GH_APP_CLIENT_ID`
+- `--private-key` — The GitHub App's private key, PEM-encoded, given directly. Falls back to $`GH_APP_PRIVATE_KEY`. Mutually exclusive with --private-key-file in practice — if both are given, the file wins
+- `--private-key-file` — Path to a file containing the GitHub App's private key. Falls back to $`GH_APP_PRIVATE_KEY_FILE`
+- `--repository` — "owner/repo" the App is installed on. Falls back to $`GITHUB_REPOSITORY`
 
 ## paws publish
 
@@ -202,7 +202,7 @@ Generate a `CHANGELOG.md` entry from commit/PR history between two refs — a `p
 - `--prefix` — Prefix used to filter/resolve the previous tag, e.g. "chart-name-" — same meaning as `paws semver --prefix`, only used when --previous-ref is omitted
 - `--output` (default: `CHANGELOG.md`) — Path to the target CHANGELOG.md, relative to the current directory
 - `--commit` — Also commit the updated CHANGELOG.md back to --branch via the GitHub Contents API, with a commit message carrying a `[skip ci]` loop-avoidance marker. Off by default — without this flag, only the local file is written (and the rendered entry printed to stdout)
-- `--repository` — "owner/repo" to operate against. Falls back to $GITHUB_REPOSITORY
+- `--repository` — "owner/repo" to operate against. Falls back to $`GITHUB_REPOSITORY`
 - `--branch` (default: `main`) — Branch to commit to. Only used with --commit
 
 ## paws cache

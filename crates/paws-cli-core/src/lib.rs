@@ -1,79 +1,22 @@
+mod args;
+
+pub use args::*;
+
+use std::fmt::Write as _;
+
 use anyhow::Context;
-use clap::{Parser, Subcommand};
 use paws_audit::{RepositorySignals, select_audit_scanners};
+use paws_core::Toolchain;
 use paws_docker::{
     DockerFactsInput, GithubContext as DockerGithubContext, native_publish_pipeline_args,
     resolve_docker_facts,
 };
 use paws_provision::{Ecosystem, Installer, provision_with_timing, real_installer};
 use paws_release::{AssetUploadMode, GitHubReleaseClient, archive_name, package_zip};
-use paws_semver::{GitHubGraphQlTagSource, Increment, SemverRequest, compute_new_version};
+use paws_semver::{GitHubGraphQlTagSource, SemverRequest, compute_new_version};
 
 pub mod action_metadata;
 pub mod mcp_setup;
-
-/// Default values for `*Args` fields that carry a clap `default_value`
-/// other than the field type's own `Default::default()`. `clap::Args`
-/// applies these when a CLI flag is omitted; `serde::Deserialize` has no
-/// equivalent unless each field also names one of these via
-/// `#[serde(default = "...")]` — otherwise an MCP tool call that omits the
-/// field (exactly as a CLI invocation omitting the flag would) fails
-/// deserialization with "missing field", even though the CLI treats it as
-/// optional. Every field below this fixes was found failing exactly that
-/// way in `paws-mcp`'s own tests.
-mod field_defaults {
-    pub fn llms_txt() -> String {
-        "llms.txt".to_string()
-    }
-    pub fn main_branch() -> String {
-        "main".to_string()
-    }
-    pub fn canary() -> String {
-        "canary".to_string()
-    }
-    pub fn major() -> String {
-        "major".to_string()
-    }
-    pub fn minor() -> String {
-        "minor".to_string()
-    }
-    pub fn patch() -> String {
-        "patch".to_string()
-    }
-    pub fn paws_bot_name() -> String {
-        "paws-bot".to_string()
-    }
-    pub fn paws_bot_email() -> String {
-        "paws-bot@users.noreply.github.com".to_string()
-    }
-    pub fn dot() -> String {
-        ".".to_string()
-    }
-    pub fn tmp() -> String {
-        "tmp".to_string()
-    }
-    pub fn gh_pages() -> String {
-        "gh-pages".to_string()
-    }
-    pub fn index_yaml() -> String {
-        "index.yaml".to_string()
-    }
-    pub fn paws_cli_package() -> Vec<String> {
-        vec!["paws-cli".to_string()]
-    }
-    pub fn paws_binary_name() -> Vec<String> {
-        vec!["paws".to_string()]
-    }
-    pub fn github() -> String {
-        "github".to_string()
-    }
-    pub fn paws_workflow_path() -> String {
-        ".github/workflows/paws.yml".to_string()
-    }
-    pub fn changelog_path() -> String {
-        paws_core::DEFAULT_CHANGELOG_PATH.to_string()
-    }
-}
 
 /// Detects which of the ecosystems `paws-provision` knows about are needed in
 /// the current directory, purely from marker files (mirrors `paws-audit`'s
@@ -83,19 +26,26 @@ mod field_defaults {
 /// Takes the directory rather than assuming the process's own, so `--source`
 /// provisions for the project actually being built rather than for whatever
 /// happens to be at the repo root.
+///
+/// Walks `paws_core::TOOLCHAINS` rather than a marker table of its own. A
+/// toolchain contributes here only if it has both a filename marker and an
+/// installer, which is what keeps this to the ecosystems that can actually be
+/// provisioned without also guessing that every `Cargo.toml` is an ESP32
+/// firmware project.
 fn detect_needed_ecosystems(dir: &std::path::Path) -> Vec<Ecosystem> {
-    const MARKERS: &[(&str, Ecosystem)] = &[
-        ("Cargo.toml", Ecosystem::Rust),
-        ("package.json", Ecosystem::Node),
-        ("pyproject.toml", Ecosystem::Python),
-        ("go.mod", Ecosystem::Go),
-    ];
-
-    MARKERS
-        .iter()
-        .filter(|(marker, _)| dir.join(marker).exists())
-        .map(|(_, ecosystem)| *ecosystem)
-        .collect()
+    let mut found = Vec::new();
+    for info in paws_core::TOOLCHAINS {
+        let Some(ecosystem) = Ecosystem::for_toolchain(info.toolchain) else {
+            continue;
+        };
+        if found.contains(&ecosystem) {
+            continue;
+        }
+        if info.markers.iter().any(|marker| dir.join(marker).exists()) {
+            found.push(ecosystem);
+        }
+    }
+    found
 }
 
 /// Runs a `dagger core <args>` pipeline, streaming its live progress to the
@@ -202,666 +152,6 @@ fn collect_repository_signals() -> RepositorySignals {
         .collect()
 }
 
-/// paws: run-anywhere CI/CD pipelines, backed by Dagger.
-#[derive(Parser)]
-#[command(name = "paws", version, about)]
-pub struct Cli {
-    #[command(subcommand)]
-    pub command: Commands,
-}
-
-#[derive(Subcommand)]
-pub enum Commands {
-    /// Build and test a language target (node, rust, python, go, java, kotlin, ruby,
-    /// php, dotnet, elixir, tauri, tauri-android, flatpak, esp32).
-    Ci(CiArgs),
-    /// Build and gate a container image the same way `docker-facts` + `docker-release` do.
-    Docker(DockerArgs),
-    /// Compute the next semantic version from PR labels or an explicit increment,
-    /// matching `actions/semver`'s current behavior.
-    Semver(SemverArgs),
-    /// Install the `dagger` CLI (most other subcommands need it on PATH).
-    Init(InitArgs),
-    /// Run the audit/compliance scanner suite.
-    Audit(AuditArgs),
-    /// Build rustdoc; optionally publish it with --provider (github-pages
-    /// implemented; cloudflare-pages/s3 recognized but not implemented yet).
-    Docs(DocsArgs),
-    /// Provision toolchains concurrently (rust, node, python, ...).
-    Provision(ProvisionArgs),
-    /// Lint (and optionally package) Helm chart(s) — `charts/*/Chart.yaml`
-    /// or a root `Chart.yaml`.
-    Helm(HelmArgs),
-    /// Cross-target build, package, and publish a release binary to GitHub Releases.
-    Release(ReleaseArgs),
-    /// Model Context Protocol integration: expose every `paws` subcommand as
-    /// an MCP tool, calling the same Rust code the CLI calls — not a CLI
-    /// subprocess proxy.
-    #[command(subcommand)]
-    Mcp(McpCommand),
-    /// Generate `llms.txt`, a machine-readable summary of `paws`'s own
-    /// tooling surface (see <https://llmstxt.org>).
-    #[command(subcommand)]
-    Llms(LlmsCommand),
-    /// Generate a starter CI workflow for a *consumer* repo: detects its
-    /// ecosystem(s) and emits a workflow wiring in `paws-up` plus the
-    /// matching `paws` subcommands.
-    #[command(subcommand)]
-    Workflow(WorkflowCommand),
-    /// Credential helpers — mint tokens `paws` (or other tools) can use.
-    #[command(subcommand)]
-    Auth(AuthCommand),
-    /// Publish a package to its registry (`--target rust-crate` for
-    /// crates.io today).
-    Publish(PublishArgs),
-    /// Generate a `CHANGELOG.md` entry from commit/PR history between two
-    /// refs — a `paws`-native replacement for `mbround18/auto` (and
-    /// similar changelog actions), standalone so it can be run on its own
-    /// (e.g. to preview an entry) or chained after `paws semver --push`.
-    Changelog(ChangelogArgs),
-    /// Reports which Dagger build-cache backend (`dagger-cloud`,
-    /// `github-actions`, or none) `paws ci`/`paws docker` would select
-    /// right now, and why — the same detection they use internally, not a
-    /// separate guess. `--json` for scripting (e.g. a CI step asserting
-    /// the expected backend actually activated, without grepping build log
-    /// text for it).
-    Cache(CacheArgs),
-}
-
-#[derive(Subcommand)]
-pub enum AuthCommand {
-    /// Mint a GitHub App installation access token and print it to stdout
-    /// (nothing else goes to stdout, so `TOKEN=$(paws auth github-app)`
-    /// works as a shell capture) — the same mechanism
-    /// `actions/create-github-app-token` provides as a separate Action,
-    /// done natively so no extra CI step is needed. Every other `paws`
-    /// subcommand that needs a GitHub token (`semver --push`, `helm
-    /// --publish`, `release`, `llms generate --publish`) already picks up
-    /// App auth automatically via the same `$GH_APP_CLIENT_ID`/
-    /// `$GH_APP_PRIVATE_KEY` env vars — this subcommand exists for cases
-    /// that want the raw token directly (e.g. handing it to another tool).
-    GithubApp(GithubAppLoginArgs),
-}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct GithubAppLoginArgs {
-    /// The GitHub App's Client ID (the `Iv23...`-style string). Falls back
-    /// to $GH_APP_CLIENT_ID.
-    #[arg(long)]
-    #[serde(default)]
-    pub client_id: Option<String>,
-    /// The GitHub App's private key, PEM-encoded, given directly. Falls
-    /// back to $GH_APP_PRIVATE_KEY. Mutually exclusive with
-    /// --private-key-file in practice — if both are given, the file wins.
-    #[arg(long)]
-    #[serde(default)]
-    pub private_key: Option<String>,
-    /// Path to a file containing the GitHub App's private key. Falls back
-    /// to $GH_APP_PRIVATE_KEY_FILE.
-    #[arg(long)]
-    #[serde(default)]
-    pub private_key_file: Option<String>,
-    /// "owner/repo" the App is installed on. Falls back to
-    /// $GITHUB_REPOSITORY.
-    #[arg(long)]
-    #[serde(default)]
-    pub repository: Option<String>,
-}
-
-#[derive(Subcommand)]
-pub enum McpCommand {
-    /// Write/merge an MCP client config so `paws mcp serve` is discoverable.
-    Setup(McpSetupArgs),
-    /// Run the MCP server (stdio transport). Exposes every `paws` subcommand
-    /// as an MCP tool by calling this crate's `run_*` functions directly.
-    Serve(McpServeArgs),
-}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct McpSetupArgs {
-    /// Which MCP client config to write/merge into: "claude-code" (default,
-    /// project-local `.mcp.json`) or "claude-desktop" (global,
-    /// platform-specific `claude_desktop_config.json`).
-    #[arg(long)]
-    #[serde(default)]
-    pub client: Option<String>,
-}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct McpServeArgs {}
-
-#[derive(Subcommand)]
-pub enum LlmsCommand {
-    /// Generate `llms.txt` from this CLI's own `--help` metadata.
-    Generate(GenerateArgs),
-}
-
-#[derive(Subcommand)]
-pub enum WorkflowCommand {
-    /// Detect this repo's ecosystem(s) and generate a starter CI workflow.
-    Generate(WorkflowGenerateArgs),
-}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct WorkflowGenerateArgs {
-    /// Which CI origin to generate for. Only "github" is implemented today
-    /// — more origins (e.g. "gitlab") are planned; this keys off the same
-    /// idea as `paws_environment::Provider` (currently GitHub-only too)
-    /// rather than a separate abstraction.
-    #[arg(long, default_value = "github")]
-    #[serde(default = "field_defaults::github")]
-    pub provider: String,
-    /// Path to write the generated workflow file to.
-    #[arg(long, default_value = ".github/workflows/paws.yml")]
-    #[serde(default = "field_defaults::paws_workflow_path")]
-    pub output: String,
-}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct GenerateArgs {
-    /// Path to write the generated file to.
-    #[arg(long, default_value = "llms.txt")]
-    #[serde(default = "field_defaults::llms_txt")]
-    pub output: String,
-    /// After generating, commit the file to GitHub via the Contents API
-    /// (reuses `paws_release::GitHubReleaseClient`, the same mechanism
-    /// `paws helm --publish` uses for `index.yaml` — no local git identity
-    /// needed). Skips the commit if the generated content is unchanged.
-    #[arg(long)]
-    #[serde(default)]
-    pub publish: bool,
-    /// Branch to publish to. Only used with `--publish`.
-    #[arg(long, default_value = "main")]
-    #[serde(default = "field_defaults::main_branch")]
-    pub branch: String,
-    /// "owner/repo" to publish to. Falls back to $GITHUB_REPOSITORY. Only
-    /// used with `--publish`.
-    #[arg(long)]
-    #[serde(default)]
-    pub repository: Option<String>,
-}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct CiArgs {
-    /// Directory to build, relative to the current one. Defaults to the
-    /// current directory.
-    ///
-    /// Lets a monorepo build a package in a subdirectory without the caller
-    /// having to `cd` first — `paws ci --toolchain node --source web`.
-    #[arg(long)]
-    #[serde(default)]
-    pub source: Option<String>,
-    /// Which toolchain to build: node, rust, python, go, java, kotlin,
-    /// ruby, php, dotnet, elixir, tauri, tauri-android, flatpak, or esp32.
-    /// For `node`, the package manager
-    /// (npm/yarn/pnpm/bun) and framework (Vite, Next.js, or plain) are
-    /// auto-detected from lockfiles/package.json — no separate flag needed
-    /// — and a Playwright e2e project (`@playwright/test` dependency or a
-    /// playwright.config.*) is detected automatically too, running
-    /// `npx playwright install --with-deps && npx playwright test`
-    /// instead of the plain build+test pipeline. For `esp32`, builds an
-    /// ESP-IDF/`esp-idf-sys` Rust firmware project (fmt/clippy/build, plus
-    /// `cargo test` against any host-testable sibling crate — the embedded
-    /// target itself has no test story) against a dedicated `builders/esp32`
-    /// image (`espup`-installed ESP Rust toolchain, `libclang`, `espflash`).
-    /// `ruby` (Bundler), `php` (Composer), `dotnet` (the .NET SDK), and
-    /// `elixir` (Mix) each detect their own project layout too: the Ruby
-    /// test runner (`rake` vs `rspec`), and whether a PHPUnit suite or a
-    /// `Microsoft.NET.Test.Sdk` test project exists at all before running
-    /// one.
-    #[arg(long)]
-    #[serde(default)]
-    pub toolchain: Option<String>,
-    /// Print per-ecosystem provisioning start/elapsed timing to stderr.
-    #[arg(long)]
-    #[serde(default)]
-    pub verbose: bool,
-    /// Suppress dagger's live build progress; only print output once
-    /// the pipeline finishes (or on failure). Default is streamed live.
-    #[arg(long)]
-    #[serde(default)]
-    pub silent: bool,
-    /// Cross-compile to these GOOS/GOARCH pairs instead of the native
-    /// build, e.g. "linux/amd64,darwin/arm64,windows/amd64" — only valid
-    /// with `--toolchain go`. Binaries land in `dist/` under the project
-    /// root; `go test` is skipped for every target (none of them can run
-    /// in this build container, native or not).
-    #[arg(long, value_delimiter = ',')]
-    #[serde(default)]
-    pub targets: Vec<String>,
-    /// Also run `cargo llvm-cov` after the normal test step and print a
-    /// coverage summary — only valid with `--toolchain rust`. Builds
-    /// against a dedicated `builders/rust` image (pre-installed
-    /// `cargo-llvm-cov`) instead of pulling `rust:1-bookworm` directly;
-    /// the default (flag omitted) pipeline is unaffected. A no-op on a
-    /// wasm project (`cargo test` is already skipped there for the same
-    /// reason coverage can't be measured).
-    #[arg(long)]
-    #[serde(default)]
-    pub coverage: bool,
-    /// After a successful build, upload the built bootloader
-    /// (`bootloader.bin`) and firmware ELF as assets on the GitHub Release
-    /// matching the current tag ($GITHUB_REF_NAME) — only valid with
-    /// `--toolchain esp32` (mirrors `--coverage`'s existing `--toolchain
-    /// rust`-only gating). Needs $GITHUB_TOKEN/$GH_TOKEN and
-    /// $GITHUB_REPOSITORY set — no new env var name, reusing the same
-    /// convention every other GitHub-Release-touching `paws` subcommand
-    /// already reads (`paws semver --push`, `paws helm --publish`). A
-    /// missing token/tag fails with a clear, actionable error rather than a
-    /// bare API 401. Default (flag omitted): no GitHub API interaction at
-    /// all, same "additive flag changes nothing by default" shape as
-    /// `--coverage`.
-    #[arg(long)]
-    #[serde(default)]
-    pub publish_artifacts: bool,
-}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct DockerArgs {
-    /// Image name, e.g. "ghcr.io/example/app". Falls back to $GITHUB_REPOSITORY.
-    /// A registry host here selects the registry to publish to — "ghcr.io/..."
-    /// publishes to ghcr.io without also needing --registries. An unqualified
-    /// name ("owner/app") is a Docker Hub reference, as docker itself reads it.
-    #[arg(long)]
-    #[serde(default)]
-    pub image: Option<String>,
-    /// Version to tag with. Falls back to $GITHUB_SHA (short).
-    #[arg(long)]
-    #[serde(default)]
-    pub version: Option<String>,
-    /// Additional registries to mirror tags into, comma-separated.
-    #[arg(long, value_delimiter = ',')]
-    #[serde(default)]
-    pub registries: Vec<String>,
-    /// Path to the Dockerfile to build, relative to the repo root. Falls
-    /// back to auto-detection (`Dockerfile` at the repo root, or a
-    /// `compose.yml` service's own `dockerfile`/`context`).
-    #[arg(long)]
-    #[serde(default)]
-    pub dockerfile: Option<String>,
-    /// Build context directory, relative to the repo root. Falls back to
-    /// auto-detection alongside `--dockerfile`.
-    #[arg(long)]
-    #[serde(default)]
-    pub context: Option<String>,
-    /// PR label that, when present, pushes the image for that PR build too
-    /// (normally only a push to --default-branch or a tag push pushes).
-    #[arg(long, default_value = "canary")]
-    #[serde(default = "field_defaults::canary")]
-    pub canary_label: String,
-    /// Force push regardless of branch/tag/label gating.
-    #[arg(long)]
-    #[serde(default)]
-    pub push: bool,
-    /// Also tag and push `:latest` alongside `--version`, but only when
-    /// the build is actually pushing and the ref is a real (non-prerelease)
-    /// version tag — a plain branch/PR build never gets `:latest`
-    /// regardless of this flag.
-    #[arg(long)]
-    #[serde(default)]
-    pub with_latest: bool,
-    /// Build a specific stage of a multi-stage Dockerfile instead of the
-    /// final stage.
-    #[arg(long)]
-    #[serde(default)]
-    pub target: Option<String>,
-    /// Prefix the image tag with `--target`'s name, e.g. `<target>-<version>`
-    /// instead of just `<version>`. Only used with `--target`.
-    #[arg(long)]
-    #[serde(default)]
-    pub prepend_target: bool,
-    /// PR labels to check against --canary-label, comma-separated.
-    #[arg(long, value_delimiter = ',')]
-    #[serde(default)]
-    pub labels: Vec<String>,
-    /// The repo's default branch. A push directly to this branch, or any
-    /// tag push, always pushes the image — --canary-label/--push only
-    /// matter for everything else (feature branches, PRs).
-    #[arg(long, default_value = "main")]
-    #[serde(default = "field_defaults::main_branch")]
-    pub default_branch: String,
-    /// Docker Hub username to authenticate publishing with. Falls back to
-    /// $DOCKERHUB_USERNAME. Required (here or via env) to actually push
-    /// to docker.io — without it, `dockerRelease` builds but can't
-    /// authenticate, so `push=true` still publishes nothing.
-    #[arg(long)]
-    #[serde(default)]
-    pub dockerhub_username: Option<String>,
-    /// GHCR username to authenticate publishing with. Falls back to
-    /// $GHCR_USERNAME. Required (here or via env) to actually push to
-    /// ghcr.io. The password is read from $GHCR_TOKEN, falling back to
-    /// $GITHUB_TOKEN — which is what a GitHub Actions workflow already has.
-    #[arg(long)]
-    #[serde(default)]
-    pub ghcr_username: Option<String>,
-    /// Username(s) for registries in --registries other than
-    /// docker.io/ghcr.io (Artifactory, a private registry, etc.), as
-    /// "<registry>=<username>" pairs, comma-separated — e.g.
-    /// "myco.jfrog.io=deploy-bot". These are built and published
-    /// natively through Dagger (`Container.withRegistryAuth`), not via
-    /// the docker.io/ghcr.io-only `dockerRelease` call. The matching
-    /// token/password is read from an env var derived from the
-    /// registry: uppercased, every non-alphanumeric character replaced
-    /// with `_`, suffixed `_TOKEN` — e.g. "myco.jfrog.io" reads
-    /// $MYCO_JFROG_IO_TOKEN.
-    #[arg(long, value_delimiter = ',')]
-    #[serde(default)]
-    pub registry_username: Vec<String>,
-    /// Suppress dagger's live build/publish progress; only print output
-    /// once each pipeline finishes (or on failure). Default is streamed
-    /// live.
-    #[arg(long)]
-    #[serde(default)]
-    pub silent: bool,
-    /// Also publish `major` and `major.minor` rollup tags (e.g. `:3` and
-    /// `:3.2` alongside `:v3.2.1`) for release-quality version tags — the
-    /// pattern consumers pinning to a major version for stability need.
-    /// Gated identically to `--with-latest`: only on a real (non-prerelease)
-    /// version tag build. Off by default; omitting this flag produces
-    /// byte-identical output to before this flag existed. This is a
-    /// `paws`-native tag scheme, not a byte-for-byte port of
-    /// `crazy-max/ghaction-docker-meta`'s semver tag output.
-    #[arg(long)]
-    #[serde(default)]
-    pub tag_rollup: bool,
-    /// Also include a `sha-<sha>` tag unconditionally, alongside whatever
-    /// other tags this build already produces — not only as the fallback
-    /// primary tag when no version/ref-based tag applies (that fallback
-    /// behavior is unaffected by this flag). Only produces a tag when
-    /// `--version` is itself sha-shaped.
-    #[arg(long)]
-    #[serde(default)]
-    pub tag_sha: bool,
-    /// On a branch-push build (not a tag, not a PR, not a scheduled run),
-    /// also tag with the branch name (`/` and other non-tag-safe
-    /// characters replaced with `-`).
-    #[arg(long)]
-    #[serde(default)]
-    pub tag_branch: bool,
-    /// On a `pull_request`-triggered build, also tag with `pr-<number>`,
-    /// where the number is parsed from `$GITHUB_REF`
-    /// (`refs/pull/<number>/merge`) — no separate PR-number input needed.
-    #[arg(long)]
-    #[serde(default)]
-    pub tag_pr: bool,
-    /// On a `schedule`-triggered build, also tag with the literal tag
-    /// `schedule` (a stable, overwritable pointer, like `:latest` —  not a
-    /// timestamped/nightly-dated tag).
-    #[arg(long)]
-    #[serde(default)]
-    pub tag_schedule: bool,
-}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct PublishArgs {
-    /// Publish target — only "rust-crate" today (crates.io or another
-    /// Cargo registry).
-    #[arg(long)]
-    #[serde(default)]
-    pub target: Option<String>,
-    /// Path to the package to publish. Defaults to the current directory.
-    #[arg(long)]
-    #[serde(default)]
-    pub source: Option<String>,
-    /// Registry to publish to. Defaults to crates.io.
-    #[arg(long)]
-    #[serde(default)]
-    pub registry: Option<String>,
-    /// Build/test/package only — skip the actual publish step. Useful for
-    /// verifying a package is publish-ready without a registry token.
-    #[arg(long)]
-    #[serde(default)]
-    pub dry_run: bool,
-    /// Suppress dagger's live build progress; only print output once
-    /// the pipeline finishes (or on failure). Default is streamed live.
-    #[arg(long)]
-    #[serde(default)]
-    pub silent: bool,
-}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct ChangelogArgs {
-    /// The version this changelog entry is for, e.g. "v1.3.0".
-    #[arg(long)]
-    pub version: String,
-    /// Overrides the auto-resolved previous ref/tag that starts the commit
-    /// range. Falls back to the same prefix-aware last-tag resolution
-    /// `paws semver` already implements (see --prefix).
-    #[arg(long)]
-    #[serde(default)]
-    pub previous_ref: Option<String>,
-    /// Prefix used to filter/resolve the previous tag, e.g. "chart-name-"
-    /// — same meaning as `paws semver --prefix`, only used when
-    /// --previous-ref is omitted.
-    #[arg(long)]
-    #[serde(default)]
-    pub prefix: Option<String>,
-    /// Path to the target CHANGELOG.md, relative to the current directory.
-    #[arg(long, default_value = "CHANGELOG.md")]
-    #[serde(default = "field_defaults::changelog_path")]
-    pub output: String,
-    /// Also commit the updated CHANGELOG.md back to --branch via the
-    /// GitHub Contents API, with a commit message carrying a `[skip ci]`
-    /// loop-avoidance marker. Off by default — without this flag, only the
-    /// local file is written (and the rendered entry printed to stdout).
-    #[arg(long)]
-    #[serde(default)]
-    pub commit: bool,
-    /// "owner/repo" to operate against. Falls back to $GITHUB_REPOSITORY.
-    #[arg(long)]
-    #[serde(default)]
-    pub repository: Option<String>,
-    /// Branch to commit to. Only used with --commit.
-    #[arg(long, default_value = "main")]
-    #[serde(default = "field_defaults::main_branch")]
-    pub branch: String,
-}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct SemverArgs {
-    /// Base version to start from instead of the last matching tag.
-    #[arg(long)]
-    #[serde(default)]
-    pub base: Option<String>,
-    /// Prefix used to filter/build tag versions, e.g. "chart-name-".
-    #[arg(long)]
-    #[serde(default)]
-    pub prefix: Option<String>,
-    /// Explicit increment (major, minor, patch); skips label/branch inference.
-    #[arg(long)]
-    #[serde(default)]
-    pub increment: Option<Increment>,
-    /// PR/commit label name that triggers a major bump.
-    #[arg(long, default_value = "major")]
-    #[serde(default = "field_defaults::major")]
-    pub major_label: String,
-    /// PR/commit label name that triggers a minor bump.
-    #[arg(long, default_value = "minor")]
-    #[serde(default = "field_defaults::minor")]
-    pub minor_label: String,
-    /// PR/commit label name that triggers a patch bump.
-    #[arg(long, default_value = "patch")]
-    #[serde(default = "field_defaults::patch")]
-    pub patch_label: String,
-    /// PR/commit labels to check against major/minor/patch-label, comma-separated.
-    #[arg(long, value_delimiter = ',')]
-    #[serde(default)]
-    pub labels: Vec<String>,
-    /// Branch name used for fallback inference when no configured label matches.
-    #[arg(long, default_value = "main")]
-    #[serde(default = "field_defaults::main_branch")]
-    pub branch: String,
-    /// Whether this is a PR build (produces a `-pr.<sha>` prerelease).
-    #[arg(long)]
-    #[serde(default)]
-    pub pr: bool,
-    /// Create and push the computed version as an annotated git tag,
-    /// then create a matching GitHub Release with auto-generated notes
-    /// (GitHub's git/tags + git/refs + releases APIs — no local git
-    /// identity or worktree needed). Replaces a hand-rolled
-    /// `git tag`/`git push`/`gh release create` step in the calling
-    /// workflow.
-    #[arg(long)]
-    #[serde(default)]
-    pub push: bool,
-    /// Tagger identity attributed to the pushed tag.
-    #[arg(long, default_value = "paws-bot")]
-    #[serde(default = "field_defaults::paws_bot_name")]
-    pub tagger_name: String,
-    /// Email attributed to the pushed tag, alongside --tagger-name.
-    #[arg(long, default_value = "paws-bot@users.noreply.github.com")]
-    #[serde(default = "field_defaults::paws_bot_email")]
-    pub tagger_email: String,
-}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct InitArgs {}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct AuditArgs {}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct CacheArgs {
-    /// Print machine-readable JSON instead of the human-readable summary —
-    /// `{"backend": "...", "api_version": "...", "base_url": "..."}`
-    /// (`api_version`/`base_url` omitted for `dagger-cloud`/`none`).
-    #[arg(long)]
-    #[serde(default)]
-    pub json: bool,
-}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct DocsArgs {
-    /// Comma-delimited publish destination(s): "github-pages",
-    /// "cloudflare-pages", "s3". Omitted (the default): builds
-    /// target/doc locally only, nothing published — same as before this
-    /// flag existed. "cloudflare-pages"/"s3" are recognized but not
-    /// implemented yet (see docs/ROADMAP.md); "github-pages" publishes for
-    /// real, auto-selecting the Git Trees or Pages-deployment mechanism
-    /// from the repository's live Pages configuration.
-    #[arg(long, value_delimiter = ',')]
-    #[serde(default)]
-    pub provider: Vec<String>,
-    /// "owner/repo" to publish to. Falls back to $GITHUB_REPOSITORY. Only
-    /// used when --provider is given.
-    #[arg(long)]
-    #[serde(default)]
-    pub repository: Option<String>,
-    /// Branch to publish to (the "github-pages" provider only). Only used
-    /// when --provider includes "github-pages".
-    #[arg(long, default_value = "main")]
-    #[serde(default = "field_defaults::main_branch")]
-    pub branch: String,
-}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct ProvisionArgs {
-    /// Comma-separated ecosystems to install, e.g. "rust,node,python,go".
-    #[arg(long, value_delimiter = ',')]
-    #[serde(default)]
-    pub toolchains: Vec<String>,
-    /// Print per-ecosystem provisioning start/elapsed timing to stderr.
-    #[arg(long)]
-    #[serde(default)]
-    pub verbose: bool,
-}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct HelmArgs {
-    /// Host path to the source tree to scan for chart(s).
-    #[arg(long, default_value = ".")]
-    #[serde(default = "field_defaults::dot")]
-    pub source: String,
-    /// Also `helm package` every chart after linting, exported to `--output`.
-    #[arg(long)]
-    #[serde(default)]
-    pub package: bool,
-    /// Host directory packaged `.tgz`s are exported to (only with `--package`).
-    #[arg(long, default_value = "tmp")]
-    #[serde(default = "field_defaults::tmp")]
-    pub output: String,
-    /// Publish: a per-chart GitHub Release (tag `<chart>-<version>`,
-    /// asset uploaded only if missing) plus a real Helm `index.yaml`
-    /// pushed to `--pages-branch`, so `helm repo add` against this
-    /// repo's GitHub Pages URL works. Does its own packaging
-    /// internally (per-chart, not the flat `--output` directory);
-    /// mutually exclusive with `--package`.
-    #[arg(long)]
-    #[serde(default)]
-    pub publish: bool,
-    /// "owner/repo" to publish releases/index.yaml to. Falls back to
-    /// $GITHUB_REPOSITORY. Only used with `--publish`.
-    #[arg(long)]
-    #[serde(default)]
-    pub repository: Option<String>,
-    /// Branch `index.yaml` is published to. Only used with `--publish`.
-    #[arg(long, default_value = "gh-pages")]
-    #[serde(default = "field_defaults::gh_pages")]
-    pub pages_branch: String,
-    /// Path to `index.yaml` on `--pages-branch`. Only used with `--publish`.
-    #[arg(long, default_value = "index.yaml")]
-    #[serde(default = "field_defaults::index_yaml")]
-    pub index_path: String,
-    /// Suppress dagger's live build progress; only print output once
-    /// the pipeline finishes (or on failure). Default is streamed live.
-    #[arg(long)]
-    #[serde(default)]
-    pub silent: bool,
-}
-
-#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-pub struct ReleaseArgs {
-    /// Rust target triple to build, e.g. "x86_64-unknown-linux-gnu".
-    /// Must be one of `paws_release::known_targets()` — each maps to a
-    /// `./builders/<dir>` Dockerfile the build runs through Dagger.
-    #[arg(long)]
-    pub target: String,
-    /// Host path to the source tree to build.
-    #[arg(long, default_value = ".")]
-    #[serde(default = "field_defaults::dot")]
-    pub source: String,
-    /// Cargo package(s) to build, comma-separated (one [[bin]] each) —
-    /// e.g. "agent,server". Paired 1:1 with --binary-name.
-    #[arg(long, default_value = "paws-cli", value_delimiter = ',')]
-    #[serde(default = "field_defaults::paws_cli_package")]
-    pub package: Vec<String>,
-    /// Binary name(s) as declared in each package's [[bin]] section,
-    /// comma-separated, paired 1:1 with --package. All built binaries
-    /// are packaged into one archive.
-    #[arg(long, default_value = "paws", value_delimiter = ',')]
-    #[serde(default = "field_defaults::paws_binary_name")]
-    pub binary_name: Vec<String>,
-    /// Build locally via Dagger's `docker-build` against paws's embedded
-    /// generic Rust-Linux builder instead of pulling paws's own prebuilt
-    /// builder image. Use this outside paws's own repo (e.g. a target
-    /// repo with no `builders/` directory) — only
-    /// `paws_release::local_build_targets()` are supported.
-    #[arg(long)]
-    #[serde(default)]
-    pub local_build: bool,
-    /// Release tag, e.g. "v0.0.1-prerelease.1". Falls back to $GITHUB_REF_NAME.
-    #[arg(long)]
-    #[serde(default)]
-    pub tag: Option<String>,
-    /// Mark the GitHub Release as a prerelease.
-    #[arg(long)]
-    #[serde(default)]
-    pub prerelease: bool,
-    /// "owner/repo". Falls back to $GITHUB_REPOSITORY.
-    #[arg(long)]
-    #[serde(default)]
-    pub repository: Option<String>,
-    /// Build and package only; skip the GitHub upload.
-    #[arg(long)]
-    #[serde(default)]
-    pub no_upload: bool,
-    /// Skip the post-build smoke test (not recommended — it's what
-    /// catches a binary that builds but doesn't actually run).
-    #[arg(long)]
-    #[serde(default)]
-    pub skip_smoke_test: bool,
-}
-
 /// Dispatches every subcommand except `mcp serve`, which needs to depend on
 /// `paws-mcp` (a crate that itself depends on this crate's lib for its tool
 /// handlers) — keeping that edge out of `execute` avoids a build-graph cycle.
@@ -938,13 +228,13 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
         publish_artifacts,
     } = args;
 
-    if !targets.is_empty() && toolchain.as_deref() != Some("go") {
+    if !targets.is_empty() && toolchain != Some(Toolchain::Go) {
         anyhow::bail!("--targets is only valid with --toolchain go");
     }
-    if coverage && toolchain.as_deref() != Some("rust") {
+    if coverage && toolchain != Some(Toolchain::Rust) {
         anyhow::bail!("--coverage is only valid with --toolchain rust");
     }
-    if publish_artifacts && toolchain.as_deref() != Some("esp32") {
+    if publish_artifacts && toolchain != Some(Toolchain::Esp32) {
         anyhow::bail!("--publish-artifacts is only valid with --toolchain esp32");
     }
 
@@ -964,431 +254,491 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
     }
 
     paws_dagger::ensure_available().await?;
-    match toolchain.as_deref() {
-        Some("node") | Some("tauri") => {
-            let dir = source_dir.clone();
-            let is_tauri = paws_tauri::is_tauri_project(&dir);
-            if toolchain.as_deref() == Some("tauri") && !is_tauri {
-                anyhow::bail!(
-                    "--toolchain tauri given, but no src-tauri/tauri.conf.json found in {}",
-                    dir.display()
-                );
-            }
-
-            let project = paws_node::detect_project(&dir)
-                .context("failed to detect a Node project in the current directory")?;
-            let missing = project.missing_required_scripts();
-            if !is_tauri && !project.has_playwright && !missing.is_empty() {
-                anyhow::bail!(
-                    "package.json is missing required script(s): {} (found package manager: {}, framework: {})",
-                    missing.join(", "),
-                    project.package_manager.as_str(),
-                    project.framework.as_str()
-                );
-            }
-
-            if is_tauri {
-                println!(
-                    "ci: tauri project using {} ({})",
-                    project.package_manager.as_str(),
-                    dir.display()
-                );
-                let builder_dir = paws_tauri::write_builder_dockerfile()
-                    .context("failed to materialize the tauri-linux builder Dockerfile")?;
-                let args = paws_tauri::dagger_pipeline_args(
-                    &project,
-                    &dir.to_string_lossy(),
-                    &builder_dir.to_string_lossy(),
-                );
-                run_dagger_core(&args, silent).await?;
-                println!("ci: tauri build succeeded");
-            } else {
-                println!(
-                    "ci: {} project using {} ({}){}",
-                    project.framework.as_str(),
-                    project.package_manager.as_str(),
-                    dir.display(),
-                    if project.has_playwright {
-                        " + playwright"
-                    } else {
-                        ""
-                    }
-                );
-                let args = paws_node::dagger_pipeline_args(&project, &dir.to_string_lossy());
-                run_dagger_core(&args, silent).await?;
-                println!("ci: node build/test succeeded");
-            }
+    match toolchain {
+        Some(Toolchain::Node | Toolchain::Tauri) => {
+            ci_node_or_tauri(&source_dir, silent, toolchain).await?;
         }
-        Some("tauri-android") => {
-            let dir = source_dir.clone();
-            if !paws_tauri::is_tauri_project(&dir) {
-                anyhow::bail!(
-                    "--toolchain tauri-android given, but no src-tauri/tauri.conf.json found in {}",
-                    dir.display()
-                );
-            }
-            let project = paws_node::detect_project(&dir)
-                .context("failed to detect a Node project in the current directory")?;
-            println!(
-                "ci: tauri android project using {} ({})",
-                project.package_manager.as_str(),
-                dir.display()
-            );
-            let builder_dir = paws_tauri::write_android_builder_dockerfile()
-                .context("failed to materialize the tauri-android builder Dockerfile")?;
-            let args = paws_tauri::android_dagger_pipeline_args(
-                &project,
-                &dir.to_string_lossy(),
-                &builder_dir.to_string_lossy(),
-            );
-            run_dagger_core(&args, silent).await?;
-            println!("ci: tauri android build succeeded");
-        }
-        Some("python") => {
-            let dir = source_dir.clone();
-            let project = paws_python::detect_project(&dir)
-                .context("failed to detect a Python project in the current directory")?;
-            println!(
-                "ci: python project ({}) ({})",
-                if project.has_lockfile {
-                    "uv.lock present"
-                } else {
-                    "no uv.lock"
-                },
-                dir.display()
-            );
-            let args = paws_python::dagger_pipeline_args(&project, &dir.to_string_lossy());
-            run_dagger_core(&args, silent).await?;
-            println!("ci: python build/test succeeded");
-        }
-        Some("rust") => {
-            let dir = source_dir.clone();
-            if !paws_rust::is_rust_project(&dir) {
-                anyhow::bail!(
-                    "--toolchain rust given, but no Cargo.toml found in {}",
-                    dir.display()
-                );
-            }
-            let is_wasm = paws_rust::is_wasm_project(&dir);
-            println!(
-                "ci: rust project{}{} ({})",
-                if is_wasm {
-                    " (wasm32-unknown-unknown)"
-                } else {
-                    ""
-                },
-                if coverage && !is_wasm {
-                    " + coverage"
-                } else {
-                    ""
-                },
-                dir.display()
-            );
-            let builder_dir = if coverage && !is_wasm {
-                Some(
-                    paws_rust::write_builder_dockerfile()
-                        .context("failed to materialize the rust builder Dockerfile")?,
-                )
-            } else {
-                None
-            };
-            let builder_dir_str = builder_dir.as_ref().map(|d| d.to_string_lossy());
-            let args = paws_rust::dagger_pipeline_args(
-                &dir.to_string_lossy(),
-                is_wasm,
-                coverage,
-                builder_dir_str.as_deref(),
-            );
-            run_dagger_core(&args, silent).await?;
-            println!("ci: rust build/test succeeded");
-        }
-        Some("go") => {
-            let dir = source_dir.clone();
-            if !paws_go::is_go_project(&dir) {
-                anyhow::bail!(
-                    "--toolchain go given, but no go.mod found in {}",
-                    dir.display()
-                );
-            }
-            if targets.is_empty() {
-                let is_wasm = paws_go::is_wasm_project(&dir);
-                println!(
-                    "ci: go project{} ({})",
-                    if is_wasm { " (js/wasm)" } else { "" },
-                    dir.display()
-                );
-                let args = paws_go::dagger_pipeline_args(&dir.to_string_lossy(), is_wasm);
-                run_dagger_core(&args, silent).await?;
-                println!("ci: go build/test succeeded");
-            } else {
-                let parsed_targets = targets
-                    .iter()
-                    .map(|t| paws_go::Target::parse(t))
-                    .collect::<anyhow::Result<Vec<_>>>()?;
-                let module = paws_go::module_name(&dir)?;
-                let dist_dir = dir.join("dist");
-                println!(
-                    "ci: go project ({}) cross-compiling to {}",
-                    dir.display(),
-                    targets.join(", ")
-                );
-                let args = paws_go::cross_dagger_pipeline_args(
-                    &dir.to_string_lossy(),
-                    &module,
-                    &parsed_targets,
-                    &dist_dir.to_string_lossy(),
-                );
-                run_dagger_core(&args, silent).await?;
-                println!(
-                    "ci: go cross-compile succeeded — binaries in {}",
-                    dist_dir.display()
-                );
-            }
-        }
-        Some("java") => {
-            let dir = source_dir.clone();
-            let build_system = paws_java::detect_project(&dir)
-                .context("failed to detect a Java project in the current directory")?;
-            println!(
-                "ci: java project using {} ({})",
-                build_system.as_str(),
-                dir.display()
-            );
-            let builder_dir = paws_java::write_builder_dockerfile()
-                .context("failed to materialize the java builder Dockerfile")?;
-            let args = paws_java::dagger_pipeline_args(
-                build_system,
-                &dir.to_string_lossy(),
-                &builder_dir.to_string_lossy(),
-            );
-            run_dagger_core(&args, silent).await?;
-            println!("ci: java build/test succeeded");
-        }
-        Some("kotlin") => {
-            let dir = source_dir.clone();
-            paws_kotlin::detect_project(&dir)
-                .context("failed to detect a Kotlin project in the current directory")?;
-            println!("ci: kotlin project ({})", dir.display());
-            let builder_dir = paws_kotlin::write_builder_dockerfile()
-                .context("failed to materialize the java builder Dockerfile")?;
-            let args = paws_kotlin::dagger_pipeline_args(
-                &dir.to_string_lossy(),
-                &builder_dir.to_string_lossy(),
-            );
-            run_dagger_core(&args, silent).await?;
-            println!("ci: kotlin build/test succeeded");
-        }
-        Some("ruby") => {
-            let dir = source_dir.clone();
-            let project = paws_ruby::detect_project(&dir)
-                .context("failed to detect a Ruby project in the current directory")?;
-            println!(
-                "ci: ruby project testing via {} ({})",
-                project.test_runner.as_str(),
-                dir.display()
-            );
-            let args = paws_ruby::dagger_pipeline_args(&project, &dir.to_string_lossy());
-            run_dagger_core(&args, silent).await?;
-            println!("ci: ruby install/test succeeded");
-        }
-        Some("php") => {
-            let dir = source_dir.clone();
-            let project = paws_php::detect_project(&dir)
-                .context("failed to detect a PHP project in the current directory")?;
-            println!(
-                "ci: php project ({}){}",
-                dir.display(),
-                if project.has_phpunit {
-                    ""
-                } else {
-                    " — no phpunit config, skipping tests"
-                }
-            );
-            let args = paws_php::dagger_pipeline_args(&project, &dir.to_string_lossy());
-            run_dagger_core(&args, silent).await?;
-            println!("ci: php install/test succeeded");
-        }
-        Some("dotnet") => {
-            let dir = source_dir.clone();
-            let project = paws_dotnet::detect_project(&dir)
-                .context("failed to detect a .NET project in the current directory")?;
-            println!(
-                "ci: dotnet project ({}){}",
-                dir.display(),
-                if project.has_tests {
-                    ""
-                } else {
-                    " — no test project, skipping dotnet test"
-                }
-            );
-            let args = paws_dotnet::dagger_pipeline_args(&project, &dir.to_string_lossy());
-            run_dagger_core(&args, silent).await?;
-            println!("ci: dotnet build/test succeeded");
-        }
-        Some("elixir") => {
-            let dir = source_dir.clone();
-            let project = paws_elixir::detect_project(&dir)
-                .context("failed to detect an Elixir project in the current directory")?;
-            println!(
-                "ci: elixir project ({}){}",
-                dir.display(),
-                if project.has_lockfile {
-                    ""
-                } else {
-                    " — no mix.lock committed"
-                }
-            );
-            let args = paws_elixir::dagger_pipeline_args(&dir.to_string_lossy());
-            run_dagger_core(&args, silent).await?;
-            println!("ci: elixir build/test succeeded");
-        }
-        Some("flatpak") => {
-            let dir = source_dir.clone();
-            let project = paws_flatpak::detect_project(&dir)
-                .context("failed to detect a Flatpak manifest in the current directory")?;
-            println!(
-                "ci: flatpak project {} ({})",
-                project.app_id,
-                project.manifest_path.display()
-            );
-            let builder_dir = paws_flatpak::write_builder_dockerfile()
-                .context("failed to materialize the flatpak builder Dockerfile")?;
-            let args = paws_flatpak::dagger_pipeline_args(
-                &project,
-                &dir.to_string_lossy(),
-                &builder_dir.to_string_lossy(),
-            );
-            run_dagger_core(&args, silent).await?;
-            println!("ci: flatpak build succeeded");
-        }
-        Some("esp32") => {
-            let dir = source_dir.clone();
-            if !paws_esp32::is_esp32_project(&dir) {
-                anyhow::bail!(
-                    "--toolchain esp32 given, but no esp-idf-sys/esp-idf-svc dependency or \
-                     *-espidf .cargo/config.toml target found in {}",
-                    dir.display()
-                );
-            }
-
-            // ha-kiosk's own firmware/ crate is deliberately NOT a
-            // workspace member of its own build (a heavy, differently-
-            // toolchained embedded target pinned to its own
-            // rust-toolchain.toml — see that repo's root Cargo.toml) but
-            // does sit as a sibling directory next to a real workspace
-            // (firmware-core/, flasher/) — so the search for a
-            // host-testable sibling (Design Decision 3) starts one level
-            // up from the ESP32 project itself, not inside it. Reuses
-            // `paws_publish::find_workspace_root` (same as the `rust-crate`
-            // publish path below) rather than a bare `dir.parent()` guess —
-            // it actually verifies an ancestor declares `[workspace]`
-            // instead of assuming the parent directory is one.
-            let workspace_root = paws_publish::find_workspace_root(&dir);
-            let host_test_dir = workspace_root
-                .as_deref()
-                .and_then(paws_esp32::find_host_testable_sibling);
-
-            let (mount_dir, project_subpath, host_test_subpath) =
-                match (&workspace_root, &host_test_dir) {
-                    (Some(root), Some(sibling)) => {
-                        // `strip_prefix`, not `.file_name()` — a workspace
-                        // member declared with a nested path (e.g.
-                        // `members = ["crates/firmware-core"]`) has to keep
-                        // its full path relative to `root`, or the
-                        // container's `with-workdir` points at a directory
-                        // that doesn't exist.
-                        let project_subpath = dir
-                            .strip_prefix(root)
-                            .unwrap_or(&dir)
-                            .to_string_lossy()
-                            .into_owned();
-                        let sibling_subpath = sibling
-                            .strip_prefix(root)
-                            .unwrap_or(sibling)
-                            .to_string_lossy()
-                            .into_owned();
-                        (root.clone(), project_subpath, Some(sibling_subpath))
-                    }
-                    _ => (dir.clone(), ".".to_string(), None),
-                };
-
-            println!(
-                "ci: esp32 project{} ({})",
-                if host_test_subpath.is_some() {
-                    " + host-testable sibling test"
-                } else {
-                    ""
-                },
-                dir.display()
-            );
-            let builder_dir = paws_esp32::write_builder_dockerfile()
-                .context("failed to materialize the esp32 builder Dockerfile")?;
-            let args = paws_esp32::dagger_pipeline_args(
-                &mount_dir.to_string_lossy(),
-                &project_subpath,
-                &builder_dir.to_string_lossy(),
-                host_test_subpath.as_deref(),
-            );
-            run_dagger_core(&args, silent).await?;
-            println!("ci: esp32 build/test succeeded");
-
-            if publish_artifacts {
-                let repository = std::env::var("GITHUB_REPOSITORY")
-                    .context("--publish-artifacts requires $GITHUB_REPOSITORY to be set")?;
-                let (owner, repo) = repository.split_once('/').ok_or_else(|| {
-                    anyhow::anyhow!("$GITHUB_REPOSITORY must be \"owner/repo\", got {repository}")
-                })?;
-                let token = std::env::var("GITHUB_TOKEN")
-                    .or_else(|_| std::env::var("GH_TOKEN"))
-                    .context("--publish-artifacts requires $GITHUB_TOKEN or $GH_TOKEN to be set")?;
-                let tag = std::env::var("GITHUB_REF_NAME").context(
-                    "--publish-artifacts requires $GITHUB_REF_NAME to be set (the tag to \
-                     publish assets to)",
-                )?;
-
-                let triple = paws_esp32::target_triple(&dir)?;
-                let binary_name = paws_esp32::binary_name(&dir)?;
-                let release_dir = dir.join("target").join(&triple).join("release");
-
-                // The build in `dagger_pipeline_args` above ran entirely
-                // inside the ephemeral Dagger container — `cargo build
-                // --release` never wrote anything to this host's
-                // `release_dir`. Re-run the same build (Dagger's own
-                // content-addressed caching makes the fmt/clippy/build
-                // steps effectively free the second time) as a separate
-                // `dagger core` chain whose terminal call actually exports
-                // that directory back to the host (see
-                // `dagger_export_pipeline_args`'s doc comment for why this
-                // can't just be appended onto the pipeline above).
-                tokio::fs::create_dir_all(&release_dir)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to create {} for the esp32 export",
-                            release_dir.display()
-                        )
-                    })?;
-                let export_args = paws_esp32::dagger_export_pipeline_args(
-                    &mount_dir.to_string_lossy(),
-                    &project_subpath,
-                    &builder_dir.to_string_lossy(),
-                    &triple,
-                    &release_dir.to_string_lossy(),
-                );
-                run_dagger_core(&export_args, silent).await?;
-
-                let client = GitHubReleaseClient::new(owner.to_string(), repo.to_string(), token);
-                let release_id = client.get_or_create_release(&tag, false).await?;
-                paws_esp32::publish_artifacts(&client, release_id, &release_dir, &binary_name)
-                    .await
-                    .context("failed to publish esp32 build artifacts")?;
-                println!("ci: esp32 artifacts published to the {tag} release");
-            }
-        }
-        Some(other) => anyhow::bail!(
-            "unsupported --toolchain '{other}'; expected 'node', 'rust', 'python', 'go', 'java', 'kotlin', 'ruby', 'php', 'dotnet', 'elixir', 'tauri', 'tauri-android', 'flatpak', or 'esp32'"
-        ),
+        Some(Toolchain::TauriAndroid) => ci_tauri_android(&source_dir, silent).await?,
+        Some(Toolchain::Python) => ci_python(&source_dir, silent).await?,
+        Some(Toolchain::Rust) => ci_rust(&source_dir, silent, coverage).await?,
+        Some(Toolchain::Go) => ci_go(&source_dir, silent, &targets).await?,
+        Some(Toolchain::Java) => ci_java(&source_dir, silent).await?,
+        Some(Toolchain::Kotlin) => ci_kotlin(&source_dir, silent).await?,
+        Some(Toolchain::Ruby) => ci_ruby(&source_dir, silent).await?,
+        Some(Toolchain::Php) => ci_php(&source_dir, silent).await?,
+        Some(Toolchain::Dotnet) => ci_dotnet(&source_dir, silent).await?,
+        Some(Toolchain::Elixir) => ci_elixir(&source_dir, silent).await?,
+        Some(Toolchain::Flatpak) => ci_flatpak(&source_dir, silent).await?,
+        Some(Toolchain::Esp32) => ci_esp32(&source_dir, silent, publish_artifacts).await?,
         None => anyhow::bail!("--toolchain is required (e.g. --toolchain node)"),
+    }
+    Ok(())
+}
+
+/// `paws ci` for Node and Tauri desktop builds.
+async fn ci_node_or_tauri(
+    source_dir: &std::path::Path,
+    silent: bool,
+    toolchain: Option<Toolchain>,
+) -> anyhow::Result<()> {
+    let dir = source_dir.to_path_buf();
+    let is_tauri = paws_tauri::is_tauri_project(&dir);
+    if toolchain == Some(Toolchain::Tauri) && !is_tauri {
+        anyhow::bail!(
+            "--toolchain tauri given, but no src-tauri/tauri.conf.json found in {}",
+            dir.display()
+        );
+    }
+
+    let project = paws_node::detect_project(&dir)
+        .context("failed to detect a Node project in the current directory")?;
+    let missing = project.missing_required_scripts();
+    if !is_tauri && !project.has_playwright && !missing.is_empty() {
+        anyhow::bail!(
+            "package.json is missing required script(s): {} (found package manager: {}, framework: {})",
+            missing.join(", "),
+            project.package_manager.as_str(),
+            project.framework.as_str()
+        );
+    }
+
+    if is_tauri {
+        println!(
+            "ci: tauri project using {} ({})",
+            project.package_manager.as_str(),
+            dir.display()
+        );
+        let builder_dir = paws_tauri::write_builder_dockerfile()
+            .context("failed to materialize the tauri-linux builder Dockerfile")?;
+        let args = paws_tauri::dagger_pipeline_args(
+            &project,
+            &dir.to_string_lossy(),
+            &builder_dir.to_string_lossy(),
+        );
+        run_dagger_core(&args, silent).await?;
+        println!("ci: tauri build succeeded");
+    } else {
+        println!(
+            "ci: {} project using {} ({}){}",
+            project.framework.as_str(),
+            project.package_manager.as_str(),
+            dir.display(),
+            if project.has_playwright {
+                " + playwright"
+            } else {
+                ""
+            }
+        );
+        let args = paws_node::dagger_pipeline_args(&project, &dir.to_string_lossy());
+        run_dagger_core(&args, silent).await?;
+        println!("ci: node build/test succeeded");
+    }
+    Ok(())
+}
+
+/// `paws ci` for Tauri Android builds.
+async fn ci_tauri_android(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()> {
+    let dir = source_dir.to_path_buf();
+    if !paws_tauri::is_tauri_project(&dir) {
+        anyhow::bail!(
+            "--toolchain tauri-android given, but no src-tauri/tauri.conf.json found in {}",
+            dir.display()
+        );
+    }
+    let project = paws_node::detect_project(&dir)
+        .context("failed to detect a Node project in the current directory")?;
+    println!(
+        "ci: tauri android project using {} ({})",
+        project.package_manager.as_str(),
+        dir.display()
+    );
+    let builder_dir = paws_tauri::write_android_builder_dockerfile()
+        .context("failed to materialize the tauri-android builder Dockerfile")?;
+    let args = paws_tauri::android_dagger_pipeline_args(
+        &project,
+        &dir.to_string_lossy(),
+        &builder_dir.to_string_lossy(),
+    );
+    run_dagger_core(&args, silent).await?;
+    println!("ci: tauri android build succeeded");
+    Ok(())
+}
+
+/// `paws ci` for uv-based Python projects.
+async fn ci_python(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()> {
+    let dir = source_dir.to_path_buf();
+    let project = paws_python::detect_project(&dir)
+        .context("failed to detect a Python project in the current directory")?;
+    println!(
+        "ci: python project ({}) ({})",
+        if project.has_lockfile {
+            "uv.lock present"
+        } else {
+            "no uv.lock"
+        },
+        dir.display()
+    );
+    let args = paws_python::dagger_pipeline_args(&project, &dir.to_string_lossy());
+    run_dagger_core(&args, silent).await?;
+    println!("ci: python build/test succeeded");
+    Ok(())
+}
+
+/// `paws ci` for Cargo projects, with optional llvm-cov coverage.
+async fn ci_rust(source_dir: &std::path::Path, silent: bool, coverage: bool) -> anyhow::Result<()> {
+    let dir = source_dir.to_path_buf();
+    if !paws_rust::is_rust_project(&dir) {
+        anyhow::bail!(
+            "--toolchain rust given, but no Cargo.toml found in {}",
+            dir.display()
+        );
+    }
+    let is_wasm = paws_rust::is_wasm_project(&dir);
+    println!(
+        "ci: rust project{}{} ({})",
+        if is_wasm {
+            " (wasm32-unknown-unknown)"
+        } else {
+            ""
+        },
+        if coverage && !is_wasm {
+            " + coverage"
+        } else {
+            ""
+        },
+        dir.display()
+    );
+    let builder_dir = if coverage && !is_wasm {
+        Some(
+            paws_rust::write_builder_dockerfile()
+                .context("failed to materialize the rust builder Dockerfile")?,
+        )
+    } else {
+        None
+    };
+    let builder_dir_str = builder_dir.as_ref().map(|d| d.to_string_lossy());
+    let args = paws_rust::dagger_pipeline_args(
+        &dir.to_string_lossy(),
+        is_wasm,
+        coverage,
+        builder_dir_str.as_deref(),
+    );
+    run_dagger_core(&args, silent).await?;
+    println!("ci: rust build/test succeeded");
+    Ok(())
+}
+
+/// `paws ci` for Go projects, native or cross-compiled.
+async fn ci_go(
+    source_dir: &std::path::Path,
+    silent: bool,
+    targets: &[String],
+) -> anyhow::Result<()> {
+    let dir = source_dir.to_path_buf();
+    if !paws_go::is_go_project(&dir) {
+        anyhow::bail!(
+            "--toolchain go given, but no go.mod found in {}",
+            dir.display()
+        );
+    }
+    if targets.is_empty() {
+        let is_wasm = paws_go::is_wasm_project(&dir);
+        println!(
+            "ci: go project{} ({})",
+            if is_wasm { " (js/wasm)" } else { "" },
+            dir.display()
+        );
+        let args = paws_go::dagger_pipeline_args(&dir.to_string_lossy(), is_wasm);
+        run_dagger_core(&args, silent).await?;
+        println!("ci: go build/test succeeded");
+    } else {
+        let parsed_targets = targets
+            .iter()
+            .map(|t| paws_go::Target::parse(t))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let module = paws_go::module_name(&dir)?;
+        let dist_dir = dir.join("dist");
+        println!(
+            "ci: go project ({}) cross-compiling to {}",
+            dir.display(),
+            targets.join(", ")
+        );
+        let args = paws_go::cross_dagger_pipeline_args(
+            &dir.to_string_lossy(),
+            &module,
+            &parsed_targets,
+            &dist_dir.to_string_lossy(),
+        );
+        run_dagger_core(&args, silent).await?;
+        println!(
+            "ci: go cross-compile succeeded — binaries in {}",
+            dist_dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// `paws ci` for Maven and Gradle projects.
+async fn ci_java(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()> {
+    let dir = source_dir.to_path_buf();
+    let build_system = paws_java::detect_project(&dir)
+        .context("failed to detect a Java project in the current directory")?;
+    println!(
+        "ci: java project using {} ({})",
+        build_system.as_str(),
+        dir.display()
+    );
+    let builder_dir = paws_java::write_builder_dockerfile()
+        .context("failed to materialize the java builder Dockerfile")?;
+    let args = paws_java::dagger_pipeline_args(
+        build_system,
+        &dir.to_string_lossy(),
+        &builder_dir.to_string_lossy(),
+    );
+    run_dagger_core(&args, silent).await?;
+    println!("ci: java build/test succeeded");
+    Ok(())
+}
+
+/// `paws ci` for Gradle-built Kotlin projects.
+async fn ci_kotlin(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()> {
+    let dir = source_dir.to_path_buf();
+    paws_kotlin::detect_project(&dir)
+        .context("failed to detect a Kotlin project in the current directory")?;
+    println!("ci: kotlin project ({})", dir.display());
+    let builder_dir = paws_kotlin::write_builder_dockerfile()
+        .context("failed to materialize the java builder Dockerfile")?;
+    let args =
+        paws_kotlin::dagger_pipeline_args(&dir.to_string_lossy(), &builder_dir.to_string_lossy());
+    run_dagger_core(&args, silent).await?;
+    println!("ci: kotlin build/test succeeded");
+    Ok(())
+}
+
+/// `paws ci` for Bundler projects.
+async fn ci_ruby(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()> {
+    let dir = source_dir.to_path_buf();
+    let project = paws_ruby::detect_project(&dir)
+        .context("failed to detect a Ruby project in the current directory")?;
+    println!(
+        "ci: ruby project testing via {} ({})",
+        project.test_runner.as_str(),
+        dir.display()
+    );
+    let args = paws_ruby::dagger_pipeline_args(&project, &dir.to_string_lossy());
+    run_dagger_core(&args, silent).await?;
+    println!("ci: ruby install/test succeeded");
+    Ok(())
+}
+
+/// `paws ci` for Composer projects.
+async fn ci_php(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()> {
+    let dir = source_dir.to_path_buf();
+    let project = paws_php::detect_project(&dir)
+        .context("failed to detect a PHP project in the current directory")?;
+    println!(
+        "ci: php project ({}){}",
+        dir.display(),
+        if project.has_phpunit {
+            ""
+        } else {
+            " — no phpunit config, skipping tests"
+        }
+    );
+    let args = paws_php::dagger_pipeline_args(&project, &dir.to_string_lossy());
+    run_dagger_core(&args, silent).await?;
+    println!("ci: php install/test succeeded");
+    Ok(())
+}
+
+/// `paws ci` for .NET SDK projects.
+async fn ci_dotnet(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()> {
+    let dir = source_dir.to_path_buf();
+    let project = paws_dotnet::detect_project(&dir)
+        .context("failed to detect a .NET project in the current directory")?;
+    println!(
+        "ci: dotnet project ({}){}",
+        dir.display(),
+        if project.has_tests {
+            ""
+        } else {
+            " — no test project, skipping dotnet test"
+        }
+    );
+    let args = paws_dotnet::dagger_pipeline_args(&project, &dir.to_string_lossy());
+    run_dagger_core(&args, silent).await?;
+    println!("ci: dotnet build/test succeeded");
+    Ok(())
+}
+
+/// `paws ci` for Mix projects.
+async fn ci_elixir(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()> {
+    let dir = source_dir.to_path_buf();
+    let project = paws_elixir::detect_project(&dir)
+        .context("failed to detect an Elixir project in the current directory")?;
+    println!(
+        "ci: elixir project ({}){}",
+        dir.display(),
+        if project.has_lockfile {
+            ""
+        } else {
+            " — no mix.lock committed"
+        }
+    );
+    let args = paws_elixir::dagger_pipeline_args(&dir.to_string_lossy());
+    run_dagger_core(&args, silent).await?;
+    println!("ci: elixir build/test succeeded");
+    Ok(())
+}
+
+/// `paws ci` for Flatpak manifests.
+async fn ci_flatpak(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()> {
+    let dir = source_dir.to_path_buf();
+    let project = paws_flatpak::detect_project(&dir)
+        .context("failed to detect a Flatpak manifest in the current directory")?;
+    println!(
+        "ci: flatpak project {} ({})",
+        project.app_id,
+        project.manifest_path.display()
+    );
+    let builder_dir = paws_flatpak::write_builder_dockerfile()
+        .context("failed to materialize the flatpak builder Dockerfile")?;
+    let args = paws_flatpak::dagger_pipeline_args(
+        &project,
+        &dir.to_string_lossy(),
+        &builder_dir.to_string_lossy(),
+    );
+    run_dagger_core(&args, silent).await?;
+    println!("ci: flatpak build succeeded");
+    Ok(())
+}
+
+/// `paws ci` for ESP-IDF firmware, with optional artifact publishing.
+async fn ci_esp32(
+    source_dir: &std::path::Path,
+    silent: bool,
+    publish_artifacts: bool,
+) -> anyhow::Result<()> {
+    let dir = source_dir.to_path_buf();
+    if !paws_esp32::is_esp32_project(&dir) {
+        anyhow::bail!(
+            "--toolchain esp32 given, but no esp-idf-sys/esp-idf-svc dependency or \
+                 *-espidf .cargo/config.toml target found in {}",
+            dir.display()
+        );
+    }
+
+    // ha-kiosk's own firmware/ crate is deliberately NOT a
+    // workspace member of its own build (a heavy, differently-
+    // toolchained embedded target pinned to its own
+    // rust-toolchain.toml — see that repo's root Cargo.toml) but
+    // does sit as a sibling directory next to a real workspace
+    // (firmware-core/, flasher/) — so the search for a
+    // host-testable sibling (Design Decision 3) starts one level
+    // up from the ESP32 project itself, not inside it. Reuses
+    // `paws_publish::find_workspace_root` (same as the `rust-crate`
+    // publish path below) rather than a bare `dir.parent()` guess —
+    // it actually verifies an ancestor declares `[workspace]`
+    // instead of assuming the parent directory is one.
+    let workspace_root = paws_publish::find_workspace_root(&dir);
+    let host_test_dir = workspace_root
+        .as_deref()
+        .and_then(paws_esp32::find_host_testable_sibling);
+
+    let (mount_dir, project_subpath, host_test_subpath) = match (&workspace_root, &host_test_dir) {
+        (Some(root), Some(sibling)) => {
+            // `strip_prefix`, not `.file_name()` — a workspace
+            // member declared with a nested path (e.g.
+            // `members = ["crates/firmware-core"]`) has to keep
+            // its full path relative to `root`, or the
+            // container's `with-workdir` points at a directory
+            // that doesn't exist.
+            let project_subpath = dir
+                .strip_prefix(root)
+                .unwrap_or(&dir)
+                .to_string_lossy()
+                .into_owned();
+            let sibling_subpath = sibling
+                .strip_prefix(root)
+                .unwrap_or(sibling)
+                .to_string_lossy()
+                .into_owned();
+            (root.clone(), project_subpath, Some(sibling_subpath))
+        }
+        _ => (dir.clone(), ".".to_string(), None),
+    };
+
+    println!(
+        "ci: esp32 project{} ({})",
+        if host_test_subpath.is_some() {
+            " + host-testable sibling test"
+        } else {
+            ""
+        },
+        dir.display()
+    );
+    let builder_dir = paws_esp32::write_builder_dockerfile()
+        .context("failed to materialize the esp32 builder Dockerfile")?;
+    let args = paws_esp32::dagger_pipeline_args(
+        &mount_dir.to_string_lossy(),
+        &project_subpath,
+        &builder_dir.to_string_lossy(),
+        host_test_subpath.as_deref(),
+    );
+    run_dagger_core(&args, silent).await?;
+    println!("ci: esp32 build/test succeeded");
+
+    if publish_artifacts {
+        let repository = std::env::var("GITHUB_REPOSITORY")
+            .context("--publish-artifacts requires $GITHUB_REPOSITORY to be set")?;
+        let (owner, repo) = repository.split_once('/').ok_or_else(|| {
+            anyhow::anyhow!("$GITHUB_REPOSITORY must be \"owner/repo\", got {repository}")
+        })?;
+        let token = std::env::var("GITHUB_TOKEN")
+            .or_else(|_| std::env::var("GH_TOKEN"))
+            .context("--publish-artifacts requires $GITHUB_TOKEN or $GH_TOKEN to be set")?;
+        let tag = std::env::var("GITHUB_REF_NAME").context(
+            "--publish-artifacts requires $GITHUB_REF_NAME to be set (the tag to \
+                 publish assets to)",
+        )?;
+
+        let triple = paws_esp32::target_triple(&dir)?;
+        let binary_name = paws_esp32::binary_name(&dir)?;
+        let release_dir = dir.join("target").join(&triple).join("release");
+
+        // The build in `dagger_pipeline_args` above ran entirely
+        // inside the ephemeral Dagger container — `cargo build
+        // --release` never wrote anything to this host's
+        // `release_dir`. Re-run the same build (Dagger's own
+        // content-addressed caching makes the fmt/clippy/build
+        // steps effectively free the second time) as a separate
+        // `dagger core` chain whose terminal call actually exports
+        // that directory back to the host (see
+        // `dagger_export_pipeline_args`'s doc comment for why this
+        // can't just be appended onto the pipeline above).
+        tokio::fs::create_dir_all(&release_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to create {} for the esp32 export",
+                    release_dir.display()
+                )
+            })?;
+        let export_args = paws_esp32::dagger_export_pipeline_args(
+            &mount_dir.to_string_lossy(),
+            &project_subpath,
+            &builder_dir.to_string_lossy(),
+            &triple,
+            &release_dir.to_string_lossy(),
+        );
+        run_dagger_core(&export_args, silent).await?;
+
+        let client = GitHubReleaseClient::new(owner.to_string(), repo.to_string(), token);
+        let release_id = client.get_or_create_release(&tag, false).await?;
+        paws_esp32::publish_artifacts(&client, release_id, &release_dir, &binary_name)
+            .await
+            .context("failed to publish esp32 build artifacts")?;
+        println!("ci: esp32 artifacts published to the {tag} release");
     }
     Ok(())
 }
@@ -1404,6 +754,14 @@ pub async fn run_docker(args: DockerArgs) -> anyhow::Result<()> {
     result
 }
 
+// One linear transaction: resolve facts from flags + compose + the GitHub
+// environment, decide the tag matrix and whether to push, then build and
+// publish each target. Every step reads the previous step's output, and the
+// pure decision-making half already lives in `paws-docker`
+// (`resolve_docker_facts`, `generate_tag_matrix`, `plan_publish`) — what is
+// left here is the I/O sequence, which splitting would spread across private
+// helpers callable in exactly one order.
+#[allow(clippy::too_many_lines)]
 async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
     let DockerArgs {
         image,
@@ -1690,14 +1048,14 @@ pub async fn run_publish(args: PublishArgs) -> anyhow::Result<()> {
             // subdirectory — see paws_publish's module doc for the real
             // bug (confirmed against that repo's own actual CI failures)
             // this routes around.
-            let (mount_dir, workdir) = match paws_publish::find_workspace_root(&dir) {
-                Some(root) => {
+            let (mount_dir, workdir) = paws_publish::find_workspace_root(&dir).map_or_else(
+                || (dir.clone(), std::path::PathBuf::from("/src")),
+                |root| {
                     let relative = dir.strip_prefix(&root).unwrap_or(&dir);
                     let workdir = std::path::Path::new("/src").join(relative);
                     (root, workdir)
-                }
-                None => (dir.clone(), std::path::PathBuf::from("/src")),
-            };
+                },
+            );
             println!(
                 "publish: {name} -> {registry}{}",
                 if dry_run { " (dry run)" } else { "" }
@@ -1852,7 +1210,7 @@ pub async fn run_changelog(args: ChangelogArgs) -> anyhow::Result<()> {
     println!("{rendered}");
 
     if commit {
-        let client = paws_release::GitHubReleaseClient::new(owner, repo, token);
+        let client = GitHubReleaseClient::new(owner, repo, token);
         paws_changelog::commit_back(&client, &output, &branch)
             .await
             .with_context(|| format!("failed to commit {output}@{branch}"))?;
@@ -1862,6 +1220,11 @@ pub async fn run_changelog(args: ChangelogArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+// `async` with nothing to await, deliberately: every `run_*` entry point
+// shares one signature so `execute`'s dispatch and `paws-mcp`'s tool
+// handlers can call them uniformly. Dropping it here would make this the
+// one command both callers have to special-case.
+#[allow(clippy::unused_async)]
 pub async fn run_cache(args: CacheArgs) -> anyhow::Result<()> {
     let status = paws_cache::CacheStatus::detect();
     if args.json {
@@ -1888,7 +1251,20 @@ pub async fn run_init(_args: InitArgs) -> anyhow::Result<()> {
         let mut paths = vec![install_dir.clone()];
         paths.extend(std::env::split_paths(&existing));
         if let Ok(joined) = std::env::join_paths(paths) {
-            unsafe { std::env::set_var("PATH", joined) };
+            // SAFETY: `std::env::set_var` is unsafe in edition 2024 because a
+            // concurrent read from another thread is UB. This is the only
+            // env mutation in any `paws` subcommand, and it runs here before
+            // `run_init` has spawned or awaited anything that reads the
+            // environment — `install_cli` above has already returned, and
+            // `ensure_available` below is what consumes the new PATH.
+            //
+            // Narrowly allowed rather than workspace-wide: the point of
+            // `unsafe_code = "deny"` is that a second call site has to
+            // justify itself here too.
+            #[allow(unsafe_code)]
+            unsafe {
+                std::env::set_var("PATH", joined);
+            };
         }
     }
 
@@ -1937,7 +1313,9 @@ pub async fn run_audit(_args: AuditArgs) -> anyhow::Result<()> {
             &source, scanner,
         ))
         .await;
-        let duration_ms = started.elapsed().as_millis() as u64;
+        // A scanner run measured in milliseconds cannot approach u64::MAX;
+        // saturating says so rather than wrapping the way `as` would.
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         let result = match (raw_json, exit_code_output) {
             (Ok(raw_json), Ok(exit_code_raw)) => {
@@ -2131,6 +1509,10 @@ pub async fn run_provision(args: ProvisionArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+// Lint/package/publish for every discovered chart, in dependency order, then
+// one `index.yaml` update covering all of them. The per-chart work cannot be
+// lifted out without also lifting the accumulated index state it feeds.
+#[allow(clippy::too_many_lines)]
 pub async fn run_helm(args: HelmArgs) -> anyhow::Result<()> {
     let HelmArgs {
         source,
@@ -2290,6 +1672,10 @@ pub async fn run_helm(args: HelmArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+// Cross-compile, smoke-test, package, and upload one target — four phases
+// that each consume the previous phase's artifact path. `paws-release` owns
+// the logic for all four; this is the sequencing.
+#[allow(clippy::too_many_lines)]
 pub async fn run_release(args: ReleaseArgs) -> anyhow::Result<()> {
     let ReleaseArgs {
         target,
@@ -2423,22 +1809,21 @@ pub async fn run_release(args: ReleaseArgs) -> anyhow::Result<()> {
 /// list and can be unit tested without touching the filesystem at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct DetectedWorkflowInputs {
-    /// Directories holding a Rust project, relative to the repo root. "." is
-    /// the root itself.
-    rust: Vec<String>,
-    node: Vec<String>,
-    python: Vec<String>,
+    /// One entry per toolchain that was detected, in `paws_core::TOOLCHAINS`
+    /// order, holding the directories it was found in relative to the repo
+    /// root ("." is the root itself).
+    ///
+    /// A list rather than a field per language: this used to name `rust`,
+    /// `node` and `python` explicitly, which is why a repo full of Go or Ruby
+    /// generated an empty workflow long after `paws ci` learned to build both.
+    toolchains: Vec<(Toolchain, Vec<String>)>,
     docker: bool,
     helm: bool,
 }
 
 impl DetectedWorkflowInputs {
-    fn any(&self) -> bool {
-        !self.rust.is_empty()
-            || !self.node.is_empty()
-            || !self.python.is_empty()
-            || self.docker
-            || self.helm
+    const fn any(&self) -> bool {
+        !self.toolchains.is_empty() || self.docker || self.helm
     }
 }
 
@@ -2527,6 +1912,48 @@ fn discover_projects(root: &std::path::Path, marker: &str, max_depth: usize) -> 
     found
 }
 
+/// Every toolchain `paws workflow generate` can recognize from marker files
+/// alone, named for a message.
+fn workflow_detectable_toolchains() -> String {
+    let names: Vec<&str> = paws_core::TOOLCHAINS
+        .iter()
+        .filter(|info| !info.markers.is_empty())
+        .map(|info| info.name)
+        .collect();
+    names.join("/")
+}
+
+/// Finds every marker-detectable toolchain under `dir`, in registry order.
+///
+/// A toolchain is reported once with all the directories it was found in, so
+/// a monorepo with `web/` and `e2e/` gets two Node steps rather than two Node
+/// entries. Toolchains whose detection needs real logic have no markers and
+/// are skipped — see `ToolchainInfo::markers`.
+fn detect_workflow_toolchains(dir: &std::path::Path) -> Vec<(Toolchain, Vec<String>)> {
+    let mut detected = Vec::new();
+    for info in paws_core::TOOLCHAINS {
+        if info.markers.is_empty() {
+            continue;
+        }
+        let mut dirs = Vec::new();
+        for marker in info.markers {
+            for found in discover_projects(dir, marker, PROJECT_SEARCH_DEPTH) {
+                // A Gradle project has both `build.gradle` and
+                // `build.gradle.kts` in some layouts, and a Maven project
+                // beside it shares the same toolchain — one step per
+                // directory, not one per marker that matched it.
+                if !dirs.contains(&found) {
+                    dirs.push(found);
+                }
+            }
+        }
+        if !dirs.is_empty() {
+            detected.push((info.toolchain, dirs));
+        }
+    }
+    detected
+}
+
 /// Renders a starter GitHub Actions workflow wiring `paws-up` plus one
 /// `paws ci --toolchain <x>`/`paws docker`/`paws helm` step per detected
 /// signal — `None` when nothing was detected, so the caller can skip
@@ -2546,21 +1973,18 @@ fn render_github_workflow(detected: &DetectedWorkflowInputs) -> Option<String> {
 
     // One step per project. A project outside the repo root gets --source, so
     // a monorepo does not need a working-directory on every step.
-    let mut step = |toolchain: &str, dirs: &[String]| {
+    for (toolchain, dirs) in &detected.toolchains {
         for dir in dirs {
-            if dir == "." {
-                out.push_str(&format!("      - run: paws ci --toolchain {toolchain}\n"));
+            let _ = if dir == "." {
+                writeln!(out, "      - run: paws ci --toolchain {toolchain}")
             } else {
-                out.push_str(&format!(
-                    "      - run: paws ci --toolchain {toolchain} --source {dir}\n"
-                ));
-            }
+                writeln!(
+                    out,
+                    "      - run: paws ci --toolchain {toolchain} --source {dir}"
+                )
+            };
         }
-    };
-
-    step("rust", &detected.rust);
-    step("node", &detected.node);
-    step("python", &detected.python);
+    }
     if detected.docker {
         out.push_str(
             "      # Build-only by default — add --push plus registry credentials \
@@ -2588,10 +2012,11 @@ pub async fn run_workflow_generate(args: WorkflowGenerateArgs) -> anyhow::Result
     let dir = std::env::current_dir()?;
     let detected = DetectedWorkflowInputs {
         // Discovered rather than read from the flat root-only signal map, so
-        // a project in a subdirectory gets its own step.
-        rust: discover_projects(&dir, "Cargo.toml", PROJECT_SEARCH_DEPTH),
-        node: discover_projects(&dir, "package.json", PROJECT_SEARCH_DEPTH),
-        python: discover_projects(&dir, "pyproject.toml", PROJECT_SEARCH_DEPTH),
+        // a project in a subdirectory gets its own step. Every toolchain with
+        // a filename marker participates; the ones without one (esp32,
+        // flatpak, kotlin, dotnet, tauri) need their own crate's detection
+        // logic and are left to an explicit `--toolchain`.
+        toolchains: detect_workflow_toolchains(&dir),
         docker: [
             "Dockerfile",
             "docker-compose.yml",
@@ -2606,8 +2031,9 @@ pub async fn run_workflow_generate(args: WorkflowGenerateArgs) -> anyhow::Result
 
     let Some(rendered) = render_github_workflow(&detected) else {
         println!(
-            "workflow: no recognizable project markers found here (checked Rust/Node/Python/\
-             Docker/Helm); nothing to generate."
+            "workflow: no recognizable project markers found here (checked {}, Docker and \
+             Helm); nothing to generate.",
+            workflow_detectable_toolchains()
         );
         return Ok(());
     };
@@ -2626,7 +2052,7 @@ pub async fn run_workflow_generate(args: WorkflowGenerateArgs) -> anyhow::Result
     let mut kinds: Vec<String> = Vec::new();
     // Name the directories, not just the ecosystems: in a monorepo "node" alone
     // does not tell you which projects were picked up.
-    let mut describe = |toolchain: &str, dirs: &[String]| {
+    for (toolchain, dirs) in &detected.toolchains {
         for dir in dirs {
             kinds.push(if dir == "." {
                 toolchain.to_string()
@@ -2634,10 +2060,7 @@ pub async fn run_workflow_generate(args: WorkflowGenerateArgs) -> anyhow::Result
                 format!("{toolchain}:{dir}")
             });
         }
-    };
-    describe("rust", &detected.rust);
-    describe("node", &detected.node);
-    describe("python", &detected.python);
+    }
     if detected.docker {
         kinds.push("docker".to_string());
     }
@@ -2647,6 +2070,46 @@ pub async fn run_workflow_generate(args: WorkflowGenerateArgs) -> anyhow::Result
     println!("workflow: generated {output} ({})", kinds.join(", "));
 
     Ok(())
+}
+
+/// Renders one `clap::Command` (and its subcommands) as an `llms.txt`
+/// section. Module-level rather than nested inside `render_llms_txt`: it
+/// recurses, and an item declared after statements reads as if it were
+/// scoped to the code above it.
+fn render_command(cmd: &clap::Command, prefix: &str, out: &mut String) {
+    let name = format!("{prefix}{}", cmd.get_name());
+    let _ = write!(out, "## paws {name}\n\n");
+    if let Some(about) = cmd.get_about() {
+        let _ = write!(out, "{about}\n\n");
+    }
+
+    let flags: Vec<_> = cmd
+        .get_arguments()
+        .filter(|a| a.get_long().is_some())
+        .collect();
+    if !flags.is_empty() {
+        for flag in flags {
+            let long = flag.get_long().unwrap_or_default();
+            let help = flag.get_help().map(ToString::to_string).unwrap_or_default();
+            let default = flag
+                .get_default_values()
+                .first()
+                .map(|v| v.to_string_lossy().to_string());
+            match default {
+                Some(default) if !default.is_empty() => {
+                    let _ = writeln!(out, "- `--{long}` (default: `{default}`) — {help}");
+                }
+                _ => {
+                    let _ = writeln!(out, "- `--{long}` — {help}");
+                }
+            }
+        }
+        out.push('\n');
+    }
+
+    for sub in cmd.get_subcommands() {
+        render_command(sub, &format!("{name} "), out);
+    }
 }
 
 /// Renders `llms.txt` (the <https://llmstxt.org> convention) purely from
@@ -2659,9 +2122,12 @@ pub fn render_llms_txt() -> String {
     let mut out = String::new();
 
     out.push_str("# paws\n\n");
-    let about = root.get_about().map(|s| s.to_string()).unwrap_or_default();
+    let about = root
+        .get_about()
+        .map(ToString::to_string)
+        .unwrap_or_default();
     if !about.is_empty() {
-        out.push_str(&format!("> {about}\n\n"));
+        let _ = write!(out, "> {about}\n\n");
     }
     out.push_str(
         "paws is a run-anywhere CI/CD CLI backed by Dagger. Every subcommand below is also \
@@ -2700,47 +2166,11 @@ pub fn render_llms_txt() -> String {
          Actions\" section below) — it's the same install, packaged as a composite Action.\n\n",
     );
 
-    fn render_command(cmd: &clap::Command, prefix: &str, out: &mut String) {
-        let name = format!("{prefix}{}", cmd.get_name());
-        out.push_str(&format!("## paws {name}\n\n"));
-        if let Some(about) = cmd.get_about() {
-            out.push_str(&format!("{about}\n\n"));
-        }
-
-        let flags: Vec<_> = cmd
-            .get_arguments()
-            .filter(|a| a.get_long().is_some())
-            .collect();
-        if !flags.is_empty() {
-            for flag in flags {
-                let long = flag.get_long().unwrap_or_default();
-                let help = flag.get_help().map(|h| h.to_string()).unwrap_or_default();
-                let default = flag
-                    .get_default_values()
-                    .first()
-                    .map(|v| v.to_string_lossy().to_string());
-                match default {
-                    Some(default) if !default.is_empty() => {
-                        out.push_str(&format!("- `--{long}` (default: `{default}`) — {help}\n"));
-                    }
-                    _ => {
-                        out.push_str(&format!("- `--{long}` — {help}\n"));
-                    }
-                }
-            }
-            out.push('\n');
-        }
-
-        for sub in cmd.get_subcommands() {
-            render_command(sub, &format!("{name} "), out);
-        }
-    }
-
     for sub in root.get_subcommands() {
         render_command(sub, "", &mut out);
     }
 
-    if let Ok(actions) = crate::action_metadata::discover_actions()
+    if let Ok(actions) = action_metadata::discover_actions()
         && !actions.is_empty()
     {
         out.push_str("## GitHub Actions\n\n");
@@ -2750,18 +2180,18 @@ pub fn render_llms_txt() -> String {
              a starter workflow using these automatically.\n\n",
         );
         for action in &actions {
-            out.push_str(&format!("### {}\n\n", action.id));
+            let _ = write!(out, "### {}\n\n", action.id);
             if !action.description.is_empty() {
-                out.push_str(&format!("{}\n\n", action.description));
+                let _ = write!(out, "{}\n\n", action.description);
             }
 
             out.push_str("```yaml\n");
-            out.push_str(&format!("- uses: {}\n", action.usage));
+            let _ = writeln!(out, "- uses: {}", action.usage);
             if !action.inputs.is_empty() {
                 out.push_str("  with:\n");
                 for input in &action.inputs {
                     let value = input.default.clone().unwrap_or_else(|| "...".to_string());
-                    out.push_str(&format!("    {}: {value}\n", input.name));
+                    let _ = writeln!(out, "    {}: {value}", input.name);
                 }
             }
             out.push_str("```\n\n");
@@ -2779,17 +2209,18 @@ pub fn render_llms_txt() -> String {
                         .as_ref()
                         .map(|d| format!(", default: `{d}`"))
                         .unwrap_or_default();
-                    out.push_str(&format!(
-                        "- `{}` ({requiredness}{default}) — {}\n",
+                    let _ = writeln!(
+                        out,
+                        "- `{}` ({requiredness}{default}) — {}",
                         input.name, input.description
-                    ));
+                    );
                 }
                 out.push('\n');
             }
             if !action.outputs.is_empty() {
                 out.push_str("**Outputs**\n\n");
                 for output in &action.outputs {
-                    out.push_str(&format!("- `{}` — {}\n", output.name, output.description));
+                    let _ = writeln!(out, "- `{}` — {}", output.name, output.description);
                 }
                 out.push('\n');
             }
@@ -2805,10 +2236,7 @@ pub fn render_llms_txt() -> String {
 /// "skip" (prevents committing on every push to `main`, including the
 /// commit the publish itself just created, from retriggering forever).
 fn should_publish(existing: Option<&[u8]>, generated: &[u8]) -> bool {
-    match existing {
-        None => true,
-        Some(existing) => existing != generated,
-    }
+    existing.is_none_or(|existing| existing != generated)
 }
 
 pub async fn run_llms_generate(args: GenerateArgs) -> anyhow::Result<()> {
@@ -2930,6 +2358,10 @@ pub async fn run_auth_github_app(args: GithubAppLoginArgs) -> anyhow::Result<()>
 }
 
 #[cfg(test)]
+// `std::env::set_var`/`remove_var` are unsafe in edition 2024, and these
+// tests exist precisely to exercise env-var-driven behavior. Access is
+// serialized within this module, which is what makes it sound.
+#[allow(unsafe_code)]
 mod tests {
     use clap::CommandFactory;
 
@@ -2949,7 +2381,7 @@ mod tests {
     async fn coverage_is_rejected_outside_toolchain_rust() {
         let args = CiArgs {
             source: None,
-            toolchain: Some("node".to_string()),
+            toolchain: Some(Toolchain::Node),
             verbose: false,
             silent: true,
             targets: vec![],
@@ -2990,7 +2422,7 @@ mod tests {
     async fn publish_artifacts_is_rejected_outside_toolchain_esp32() {
         let args = CiArgs {
             source: None,
-            toolchain: Some("rust".to_string()),
+            toolchain: Some(Toolchain::Rust),
             verbose: false,
             silent: true,
             targets: vec![],
@@ -3209,7 +2641,7 @@ mod tests {
 
     #[test]
     fn llms_txt_covers_every_subcommand() {
-        let rendered = super::render_llms_txt();
+        let rendered = render_llms_txt();
         for name in [
             "ci",
             "docker",
@@ -3235,7 +2667,7 @@ mod tests {
 
     #[test]
     fn llms_txt_documents_the_paws_up_github_action() {
-        let rendered = super::render_llms_txt();
+        let rendered = render_llms_txt();
         assert!(rendered.contains("## GitHub Actions"));
         assert!(rendered.contains("### paws-up"));
         assert!(rendered.contains("mbround18/paws/actions/paws-up@main"));
@@ -3250,7 +2682,7 @@ mod tests {
     /// start" before "here's every flag").
     #[test]
     fn llms_txt_has_an_ai_agent_bootstrap_section_before_the_command_reference() {
-        let rendered = super::render_llms_txt();
+        let rendered = render_llms_txt();
         let bootstrap_pos = rendered
             .find("## Quickstart for an AI agent")
             .expect("expected an AI-agent quickstart section");
@@ -3279,7 +2711,7 @@ mod tests {
     #[test]
     fn workflow_render_includes_only_detected_ecosystems() {
         let detected = DetectedWorkflowInputs {
-            rust: vec![".".to_string()],
+            toolchains: vec![(Toolchain::Rust, vec![".".to_string()])],
             docker: true,
             ..Default::default()
         };
@@ -3297,8 +2729,10 @@ mod tests {
     #[test]
     fn workflow_render_points_subdirectory_projects_at_their_source() {
         let detected = DetectedWorkflowInputs {
-            rust: vec![".".to_string()],
-            node: vec!["web".to_string(), "e2e".to_string()],
+            toolchains: vec![
+                (Toolchain::Rust, vec![".".to_string()]),
+                (Toolchain::Node, vec!["web".to_string(), "e2e".to_string()]),
+            ],
             ..Default::default()
         };
         let rendered = render_github_workflow(&detected).expect("something was detected");
@@ -3311,6 +2745,97 @@ mod tests {
         assert!(rendered.contains("paws ci --toolchain node --source web"));
         assert!(rendered.contains("paws ci --toolchain node --source e2e"));
         assert_eq!(rendered.matches("--toolchain node").count(), 2);
+    }
+
+    /// The README advertised five toolchains while `paws ci` dispatched
+    /// fourteen — the front page undersold the tool for months because
+    /// nothing tied the two together. `docs/ROADMAP.md` is deliberately not
+    /// checked here: it is a narrative document about what is *verified*
+    /// where, not a mirror of the accepted values.
+    #[test]
+    fn the_readme_names_every_toolchain_paws_ci_accepts() {
+        let readme = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md"),
+        )
+        .expect("README.md sits at the repo root");
+
+        let missing: Vec<&str> = paws_core::TOOLCHAINS
+            .iter()
+            .map(|info| info.name)
+            .filter(|name| !readme.contains(*name))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "README.md does not mention {missing:?} — `paws ci` accepts them, so the \
+             \"Language / stack support\" section needs updating"
+        );
+    }
+
+    /// The gap this registry closed: `paws ci` grew from 3 toolchains to 14
+    /// while `paws workflow generate` still only knew Rust/Node/Python, so a
+    /// Go or Ruby repo generated a workflow that built nothing. Anything with
+    /// a filename marker must now produce a step.
+    #[test]
+    fn workflow_generation_covers_every_marker_detectable_toolchain() {
+        let dir = project_scratch("every-toolchain");
+        let mut expected = Vec::new();
+        for info in paws_core::TOOLCHAINS {
+            let Some(marker) = info.markers.first() else {
+                continue;
+            };
+            // Each in its own directory: several toolchains would otherwise
+            // be detected at the root and the assertion could not tell which
+            // marker produced which step.
+            let project = dir.join(info.name);
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join(marker), "").unwrap();
+            expected.push(info.toolchain);
+        }
+
+        let detected = detect_workflow_toolchains(&dir);
+        let found: Vec<Toolchain> = detected.iter().map(|(t, _)| *t).collect();
+        assert_eq!(
+            found, expected,
+            "every marker-detectable toolchain is found"
+        );
+
+        let rendered = render_github_workflow(&DetectedWorkflowInputs {
+            toolchains: detected,
+            ..Default::default()
+        })
+        .expect("markers were planted");
+        for toolchain in expected {
+            assert!(
+                rendered.contains(&format!(
+                    "paws ci --toolchain {toolchain} --source {toolchain}"
+                )),
+                "generated workflow should build the {toolchain} project, got:\n{rendered}"
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Toolchains whose detection needs their own crate's logic must stay out
+    /// of marker-based generation — `esp32` shares `Cargo.toml` with `rust`
+    /// and `tauri` shares `package.json` with `node`, so guessing either from
+    /// a filename would emit two steps for one project.
+    #[test]
+    fn specialization_toolchains_are_not_guessed_from_markers() {
+        for toolchain in [
+            Toolchain::Esp32,
+            Toolchain::Tauri,
+            Toolchain::TauriAndroid,
+            Toolchain::Flatpak,
+            Toolchain::Kotlin,
+            Toolchain::Dotnet,
+        ] {
+            assert!(
+                toolchain.markers().is_empty(),
+                "{toolchain} must not be marker-detectable"
+            );
+        }
     }
 
     // --- project discovery -------------------------------------------------
@@ -3558,11 +3083,15 @@ mod tests {
             std::fs::write(dir.join(marker), "").unwrap();
         }
 
+        // Order follows `paws_core::TOOLCHAINS`, which is also the order
+        // `--toolchain`'s help lists them in. It carries no meaning for
+        // provisioning itself — `provision_with_timing` runs every ecosystem
+        // as an independent task with no ordering between them (FR-013).
         assert_eq!(
             detect_needed_ecosystems(&dir),
             vec![
-                Ecosystem::Rust,
                 Ecosystem::Node,
+                Ecosystem::Rust,
                 Ecosystem::Python,
                 Ecosystem::Go
             ]

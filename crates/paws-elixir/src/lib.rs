@@ -26,6 +26,7 @@
 //! deps.get`/`compile`/`test` at an umbrella root already fan out across
 //! every app in `apps/`.
 
+use paws_core::Pipeline;
 use std::path::Path;
 
 use anyhow::Result;
@@ -71,34 +72,15 @@ pub fn detect_project(dir: &Path) -> Result<ElixirProject> {
 /// for `source_dir`: Hex/rebar install, `mix deps.get`, `mix compile
 /// --warnings-as-errors`, `mix test`.
 pub fn dagger_pipeline_args(source_dir: &str) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "container".into(),
-        "from".into(),
-        format!("--address={BASE_IMAGE}"),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={source_dir}"),
-        "with-workdir".into(),
-        "--path=/src".into(),
-    ];
-
-    let mut push_exec = |command_args: Vec<String>| {
-        args.push("with-exec".into());
-        args.push(format!("--args={}", command_args.join(",")));
-    };
-
-    push_exec(vec!["mix".into(), "local.hex".into(), "--force".into()]);
-    push_exec(vec!["mix".into(), "local.rebar".into(), "--force".into()]);
-    push_exec(vec!["mix".into(), "deps.get".into()]);
-    push_exec(vec![
-        "mix".into(),
-        "compile".into(),
-        "--warnings-as-errors".into(),
-    ]);
-    push_exec(vec!["mix".into(), "test".into()]);
-
-    args.push("stdout".into());
-    args
+    Pipeline::from_image(BASE_IMAGE)
+        .mount("/src", source_dir)
+        .workdir("/src")
+        .exec(["mix", "local.hex", "--force"])
+        .exec(["mix", "local.rebar", "--force"])
+        .exec(["mix", "deps.get"])
+        .exec(["mix", "compile", "--warnings-as-errors"])
+        .exec(["mix", "test"])
+        .stdout()
 }
 
 #[cfg(test)]
@@ -107,11 +89,7 @@ mod tests {
     use std::fs;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("paws-elixir-test-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        paws_core::test_support::scratch_dir("elixir", name)
     }
 
     #[test]

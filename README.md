@@ -28,7 +28,7 @@ provider-specific scripting.
 | Command | What it does |
 | --- | --- |
 | `paws init` | Install the `dagger` CLI, which most other subcommands need on `PATH` |
-| `paws ci` | Build, lint, and test a Node, Rust, Python, Tauri, or Flatpak project |
+| `paws ci` | Build, lint, and test a project in any of 14 toolchains — Rust, Node, Python, Go, Java, Kotlin, Ruby, PHP, .NET, Elixir, Tauri (desktop + Android), Flatpak, or ESP32 firmware |
 | `paws semver` | Compute the next version from PR labels, branch name, or an explicit bump; `--push` tags and pushes it |
 | `paws docker` | Build/tag/publish a container image to docker.io, ghcr.io, and (natively) any other registry |
 | `paws changelog` | Generate a `CHANGELOG.md` entry from commit/PR history between two refs; `--commit` writes it back to the repo |
@@ -163,9 +163,17 @@ subcommand-by-subcommand walkthrough with real example output.
 
 ## Language / stack support
 
-`paws ci` fully supports Rust, Node across all four major package managers (npm, yarn, pnpm, bun)
-with Vite/Next.js framework detection, `uv`-based Python, and Tauri desktop/Android builds — plain
-JS/TS, React, and SSR frameworks all covered. `paws docker` and `paws helm` are stack-agnostic —
+`paws ci --toolchain <x>` accepts fourteen values today: `rust`, `node`, `python`, `go`, `java`,
+`kotlin`, `ruby`, `php`, `dotnet`, `elixir`, `tauri`, `tauri-android`, `flatpak`, and `esp32`.
+`paws ci --help` prints that list from the same registry the dispatch itself reads
+(`paws_core::TOOLCHAINS`), so it is always current — this paragraph is the summary, `--help` is
+the source of truth.
+
+Each toolchain detects its own project layout rather than needing extra flags: Node across all
+four major package managers (npm, yarn, pnpm, bun) with Vite/Next.js framework detection and
+automatic Playwright e2e handling, `uv`-based Python, Maven vs Gradle for Java, the Ruby test
+runner (`rake` vs `rspec`), and whether a PHPUnit or `Microsoft.NET.Test.Sdk` suite exists at all
+before trying to run one. `paws docker` and `paws helm` are stack-agnostic —
 they work from a `Dockerfile`/`docker-compose.yml` or a `charts/*/Chart.yaml` layout respectively,
 regardless of what language the project underneath is written in. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full target stack list (JVM, Go, .NET, mobile, and

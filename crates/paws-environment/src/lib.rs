@@ -21,6 +21,19 @@ pub struct GitHubAppCredentials {
     pub private_key_pem: String,
 }
 
+/// Hand-written, not derived: `private_key_pem` is the App's signing key. A
+/// derived `Debug` would print it in full the first time anyone `{:?}`s this
+/// struct into a log or an `anyhow` context, which is exactly the kind of
+/// leak that only shows up after the log has already shipped.
+impl std::fmt::Debug for GitHubAppCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubAppCredentials")
+            .field("client_id", &self.client_id)
+            .field("private_key_pem", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(serde::Serialize)]
 struct AppJwtClaims {
     iat: i64,
@@ -46,10 +59,16 @@ struct AppJwtClaims {
 fn sign_app_jwt(creds: &GitHubAppCredentials) -> Result<String> {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 
-    let now = std::time::SystemTime::now()
+    // `jsonwebtoken`'s claim fields are `i64`. `as_secs()` is a `u64`, so a
+    // plain `as` would wrap silently — `try_into` turns the (impossible until
+    // year 292277026596) overflow into an error instead of a negative `iat`
+    // that GitHub would reject with an opaque 401.
+    let now: i64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .context("system clock is before the Unix epoch")?
-        .as_secs() as i64;
+        .as_secs()
+        .try_into()
+        .context("system clock is too far in the future to express as a JWT timestamp")?;
     let claims = AppJwtClaims {
         // 60s in the past to tolerate clock drift between this machine and
         // GitHub's, per GitHub's own JWT-generation guidance.
@@ -97,7 +116,7 @@ pub async fn mint_github_app_installation_token(
     .context("failed to parse GitHub's repository-installation response")?;
     let installation_id = installation
         .get("id")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .context("GitHub's repository-installation response had no \"id\" field")?;
 
     let access_token: serde_json::Value = auth_headers(client.post(format!(
@@ -114,7 +133,7 @@ pub async fn mint_github_app_installation_token(
     access_token
         .get("token")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
         .context("GitHub's installation access-token response had no \"token\" field")
 }
 
@@ -316,8 +335,33 @@ async fn create_release_github(ctx: &CiContext, tag: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+// `std::env::set_var`/`remove_var` are unsafe in edition 2024, and these
+// tests exist precisely to exercise env-var-driven detection. Every call is
+// serialized behind `ENV_LOCK` below, which is what makes it sound.
+#[allow(unsafe_code)]
 mod tests {
+    /// `missing_debug_implementations` forced a choice here, and the choice was
+    /// a redacting impl rather than a derive. This pins it: a derived `Debug`
+    /// would print the App's signing key in full.
+    #[test]
+    fn debug_never_prints_the_private_key() {
+        let creds = GitHubAppCredentials {
+            client_id: "Iv23liExampleClientId".to_string(),
+            private_key_pem: "-----BEGIN RSA PRIVATE KEY-----\nSUPERSECRETKEYMATERIAL\n"
+                .to_string(),
+        };
+        let rendered = format!("{creds:?}");
+        assert!(
+            !rendered.contains("SUPERSECRETKEYMATERIAL"),
+            "private key leaked into Debug output: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"));
+        // The non-secret half stays useful for debugging.
+        assert!(rendered.contains("Iv23liExampleClientId"));
+    }
+
     use super::*;
+    use base64::Engine as _;
 
     #[test]
     fn default_tag_author_is_paws_bot() {
@@ -382,7 +426,6 @@ nyLOmeNH7f0X0tWR6B87/0i02mQpvK4v1N7MsvUIpQDM8g6zqqq8bRe9uCdTdw17
         // test is about the signing path not panicking/erroring, and about
         // the claims shape being right, not about verifying our own
         // signature) by base64-decoding the JWT's middle segment.
-        use base64::Engine;
         let payload_b64 = jwt.split('.').nth(1).expect("JWT has a payload segment");
         let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload_b64)

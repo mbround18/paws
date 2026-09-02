@@ -21,6 +21,7 @@
 //! host) this pipeline has no story for, the same reason the Swift/Flutter
 //! rows are still open.
 
+use paws_core::Pipeline;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -44,7 +45,7 @@ fn base_image(sdk_version: &str) -> String {
 fn is_project_file(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
-        Some("csproj") | Some("fsproj") | Some("vbproj")
+        Some("csproj" | "fsproj" | "vbproj")
     )
 }
 
@@ -55,7 +56,7 @@ fn is_project_file(path: &Path) -> bool {
 fn is_solution_file(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
-        Some("sln") | Some("slnx")
+        Some("sln" | "slnx")
     )
 }
 
@@ -71,19 +72,7 @@ fn entries(dir: &Path) -> Vec<PathBuf> {
 /// contains generated project files) — same walking strategy as
 /// `paws_go::go_files`/`paws_kotlin::kotlin_files`.
 fn project_files(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for path in entries(dir) {
-        if path.is_dir() {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.starts_with('.') || name == "bin" || name == "obj" {
-                continue;
-            }
-            files.extend(project_files(&path));
-        } else if is_project_file(&path) {
-            files.push(path);
-        }
-    }
-    files
+    paws_core::find_files(dir, is_project_file)
 }
 
 #[derive(Debug)]
@@ -91,7 +80,7 @@ pub struct DotnetProject {
     /// Whether a test project exists — a project file with a
     /// `Microsoft.NET.Test.Sdk` package reference, which is what makes
     /// `dotnet test` able to discover and run anything at all (xUnit,
-    /// NUnit, and MSTest templates all bring it in). A structural check on
+    /// `NUnit`, and `MSTest` templates all bring it in). A structural check on
     /// real content, not a `*.Tests` name convention.
     pub has_tests: bool,
 }
@@ -138,11 +127,9 @@ pub fn detect_project(dir: &Path) -> Result<DotnetProject> {
         );
     }
 
-    let has_tests = project_files(dir).iter().any(|p| {
-        std::fs::read_to_string(p)
-            .map(|s| s.contains("Microsoft.NET.Test.Sdk"))
-            .unwrap_or(false)
-    });
+    let has_tests = project_files(dir)
+        .iter()
+        .any(|p| std::fs::read_to_string(p).is_ok_and(|s| s.contains("Microsoft.NET.Test.Sdk")));
 
     Ok(DotnetProject { has_tests })
 }
@@ -160,50 +147,20 @@ pub fn dagger_pipeline_args_with_version(
     source_dir: &str,
     sdk_version: &str,
 ) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "container".into(),
-        "from".into(),
-        format!("--address={}", base_image(sdk_version)),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={source_dir}"),
-        "with-workdir".into(),
-        "--path=/src".into(),
+    Pipeline::from_image(&base_image(sdk_version))
+        .mount("/src", source_dir)
+        .workdir("/src")
         // First-run telemetry/welcome output is pure noise in a CI log and
         // the SDK writes a sentinel file for it on every fresh container.
-        "with-env-variable".into(),
-        "--name=DOTNET_NOLOGO".into(),
-        "--value=1".into(),
-        "with-env-variable".into(),
-        "--name=DOTNET_CLI_TELEMETRY_OPTOUT".into(),
-        "--value=1".into(),
-    ];
-
-    let mut push_exec = |command_args: Vec<String>| {
-        args.push("with-exec".into());
-        args.push(format!("--args={}", command_args.join(",")));
-    };
-
-    push_exec(vec!["dotnet".into(), "restore".into()]);
-    push_exec(vec![
-        "dotnet".into(),
-        "build".into(),
-        "--no-restore".into(),
-        "-c".into(),
-        "Release".into(),
-    ]);
-    if project.has_tests {
-        push_exec(vec![
-            "dotnet".into(),
-            "test".into(),
-            "--no-build".into(),
-            "-c".into(),
-            "Release".into(),
-        ]);
-    }
-
-    args.push("stdout".into());
-    args
+        .env("DOTNET_NOLOGO", "1")
+        .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+        .exec(["dotnet", "restore"])
+        .exec(["dotnet", "build", "--no-restore", "-c", "Release"])
+        .exec_if(
+            project.has_tests,
+            ["dotnet", "test", "--no-build", "-c", "Release"],
+        )
+        .stdout()
 }
 
 #[cfg(test)]
@@ -211,12 +168,8 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("paws-dotnet-test-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(name: &str) -> PathBuf {
+        paws_core::test_support::scratch_dir("dotnet", name)
     }
 
     #[test]

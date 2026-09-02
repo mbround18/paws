@@ -36,6 +36,7 @@
 //! — verified for real that `dagger core`'s `directory ... export` chain
 //! exports a populated build directory correctly, not just single files.
 
+use paws_core::Pipeline;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -54,23 +55,7 @@ pub fn is_go_project(dir: &Path) -> bool {
 /// source rather than a single manifest the way `paws-rust`'s
 /// `Cargo.toml`-only scan can.
 fn go_files(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return files;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name == "vendor" || name.starts_with('.') {
-                continue;
-            }
-            files.extend(go_files(&path));
-        } else if path.extension().and_then(|e| e.to_str()) == Some("go") {
-            files.push(path);
-        }
-    }
-    files
+    paws_core::find_files_with_extension(dir, &["go"])
 }
 
 /// A Go/WebAssembly project imports `syscall/js` — the standard package for
@@ -79,11 +64,9 @@ fn go_files(dir: &Path) -> Vec<PathBuf> {
 /// appears in a real import statement) — the same detection style
 /// `paws_rust::is_wasm_project` uses for `wasm-bindgen`/`wasm-pack`.
 pub fn is_wasm_project(dir: &Path) -> bool {
-    go_files(dir).iter().any(|f| {
-        std::fs::read_to_string(f)
-            .map(|s| s.contains("\"syscall/js\""))
-            .unwrap_or(false)
-    })
+    go_files(dir)
+        .iter()
+        .any(|f| std::fs::read_to_string(f).is_ok_and(|s| s.contains("\"syscall/js\"")))
 }
 
 /// Builds the `dagger core <chain>` argument list (see `paws_dagger::core`)
@@ -100,46 +83,23 @@ pub fn is_wasm_project(dir: &Path) -> bool {
 /// included, so a `syscall/js`-guarded file is invisible without them —
 /// and `go test` is skipped (see this module's doc comment on why).
 pub fn dagger_pipeline_args(source_dir: &str, is_wasm: bool) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "container".into(),
-        "from".into(),
-        format!("--address={BASE_IMAGE}"),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={source_dir}"),
-        "with-workdir".into(),
-        "--path=/src".into(),
-    ];
+    let pipeline = Pipeline::from_image(BASE_IMAGE)
+        .mount("/src", source_dir)
+        .workdir("/src")
+        .env_if(is_wasm, "GOOS", "js")
+        .env_if(is_wasm, "GOARCH", "wasm");
 
     if is_wasm {
-        args.extend([
-            "with-env-variable".into(),
-            "--name=GOOS".into(),
-            "--value=js".into(),
-        ]);
-        args.extend([
-            "with-env-variable".into(),
-            "--name=GOARCH".into(),
-            "--value=wasm".into(),
-        ]);
-    }
-
-    let mut push_exec = |command_args: &[&str]| {
-        args.push("with-exec".into());
-        args.push(format!("--args={}", command_args.join(",")));
-    };
-
-    if is_wasm {
-        push_exec(&["go", "vet", "./..."]);
-        push_exec(&["go", "build", "-o", "app.wasm", "./..."]);
+        pipeline
+            .exec(["go", "vet", "./..."])
+            .exec(["go", "build", "-o", "app.wasm", "./..."])
     } else {
-        push_exec(&["go", "build", "./..."]);
-        push_exec(&["go", "vet", "./..."]);
-        push_exec(&["go", "test", "./..."]);
+        pipeline
+            .exec(["go", "build", "./..."])
+            .exec(["go", "vet", "./..."])
+            .exec(["go", "test", "./..."])
     }
-
-    args.push("stdout".into());
-    args
+    .stdout()
 }
 
 /// One cross-compile target, e.g. `linux/amd64`.
@@ -162,7 +122,7 @@ impl Target {
                 "invalid target {spec:?}, expected \"<GOOS>/<GOARCH>\" (e.g. \"linux/amd64\")"
             );
         }
-        Ok(Target {
+        Ok(Self {
             goos: goos.to_string(),
             goarch: goarch.to_string(),
         })
@@ -207,48 +167,25 @@ pub fn cross_dagger_pipeline_args(
     targets: &[Target],
     host_dist_dir: &str,
 ) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "container".into(),
-        "from".into(),
-        format!("--address={BASE_IMAGE}"),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={source_dir}"),
-        "with-workdir".into(),
-        "--path=/src".into(),
-    ];
+    let mut pipeline = Pipeline::from_image(BASE_IMAGE)
+        .mount("/src", source_dir)
+        .workdir("/src");
 
     for target in targets {
-        args.extend([
-            "with-env-variable".into(),
-            "--name=GOOS".into(),
-            format!("--value={}", target.goos),
-        ]);
-        args.extend([
-            "with-env-variable".into(),
-            "--name=GOARCH".into(),
-            format!("--value={}", target.goarch),
-        ]);
         let out_path = format!(
             "dist/{module}-{}-{}{}",
             target.goos,
             target.goarch,
             target.binary_suffix()
         );
-        args.extend(["with-exec".into(), "--args=go,vet,./...".into()]);
-        args.extend([
-            "with-exec".into(),
-            format!("--args=go,build,-o,{out_path},./..."),
-        ]);
+        pipeline = pipeline
+            .env("GOOS", &target.goos)
+            .env("GOARCH", &target.goarch)
+            .exec(["go", "vet", "./..."])
+            .exec(["go", "build", "-o", &out_path, "./..."]);
     }
 
-    args.extend([
-        "directory".into(),
-        "--path=dist".into(),
-        "export".into(),
-        format!("--path={host_dist_dir}"),
-    ]);
-    args
+    pipeline.export_directory("dist", host_dist_dir)
 }
 
 #[cfg(test)]
@@ -256,11 +193,8 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("paws-go-test-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(name: &str) -> PathBuf {
+        paws_core::test_support::scratch_dir("go", name)
     }
 
     #[test]

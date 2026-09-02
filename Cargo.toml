@@ -37,6 +37,65 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/MBRound18/paws"
 
+# The gate CI enforces, declared once so a local `cargo clippy` is exactly as
+# strict as the pipeline. Before this, `-D warnings` lived only on the CI
+# invocation line, so a warning could pass locally and fail on push.
+#
+# Groups carry `priority = -1` so the individual `allow`s below override them.
+# Each opt-out names why: the rule is that a lint is either enforced or has a
+# written reason not to be, never silently off.
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+
+# --- opt-outs, with reasons -------------------------------------------------
+
+# `#[must_use]`/`# Errors`/`# Panics` doc lints exist for crates published as
+# libraries, where a caller reads rustdoc to learn the contract. Every crate
+# here is `publish = false` and consumed only by `paws-cli`/`paws-mcp` in this
+# workspace, so these would add ~55 doc stanzas that no external reader will
+# ever see. Revisit if any crate is ever actually published.
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+return_self_not_must_use = "allow"
+
+# This codebase deliberately writes long, explanatory first paragraphs on the
+# functions with real history behind them (why a pin exists, what broke). A
+# one-line summary rule would push that context further from the code.
+too_long_first_doc_paragraph = "allow"
+
+# Transitive duplicates in a tree this size aren't actionable from here, and
+# `deny.toml`'s `multiple-versions = "warn"` already reports them where they
+# belong — in the supply-chain check, not the compiler.
+multiple_crate_versions = "allow"
+
+# `CiArgs`/`DockerArgs` are clap flag bags: a CLI with eight boolean flags is
+# eight `bool` fields. Collapsing them into a state enum would make the clap
+# derive worse, not better.
+struct_excessive_bools = "allow"
+
+[workspace.lints.rust]
+# `deny`, not `forbid`: edition 2024 made `std::env::set_var` unsafe, and a
+# couple of test modules genuinely need it. Denying rather than forbidding
+# means each of those has to carry an explicit, commented `#[allow]` instead
+# of unsafe passing unremarked anywhere.
+unsafe_code = "deny"
+unused_must_use = "deny"
+# Elided lifetimes in paths (`Foo` where `Foo<'_>` is meant) hide borrows at
+# exactly the places a reader is trying to follow them.
+rust_2018_idioms = { level = "deny", priority = -1 }
+# A `pub` item not reachable from the crate root is either dead or a missing
+# `pub use` — both worth knowing about in a workspace this size.
+unreachable_pub = "deny"
+# `{:?}` on a value is the first thing anyone reaches for when debugging a
+# pipeline; a type without it forces a detour.
+missing_debug_implementations = "deny"
+unused_qualifications = "deny"
+trivial_casts = "deny"
+
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"

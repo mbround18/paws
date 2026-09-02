@@ -46,6 +46,14 @@ jobs:
       - name: SC-004 lint (container-engine call-site check)
         run: ./scripts/check-dagger-callsites.sh
 
+      # `paws audit` runs supply-chain scanning for consumer repos; this is the
+      # same discipline applied to paws's own dependency tree (deny.toml).
+      # Advisories, licenses, banned crates, and unexpected registries.
+      - name: Supply-chain check (cargo-deny)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
   # spec.md FR-008: `paws ci --toolchain node`, `--toolchain rust`, and
   # `--toolchain python` must each be exercised end-to-end against a real
   # fixture project, not just unit-tested. Separate job: needs the real

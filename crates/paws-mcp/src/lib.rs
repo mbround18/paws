@@ -27,7 +27,7 @@ use paws_cli_core::{
 async fn capture_output<F, Fut>(f: F) -> (anyhow::Result<()>, String)
 where
     F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<()>>,
+    Fut: Future<Output = anyhow::Result<()>>,
 {
     use std::io::Read;
 
@@ -194,6 +194,10 @@ impl PawsMcpServer {
     }
 }
 
+// The lint fires inside `rmcp`'s `#[tool_handler]` expansion, not on code
+// written here — the generated `ServerHandler` methods are `async` because
+// the trait requires it, and some have nothing to await.
+#[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for PawsMcpServer {
     fn get_info(&self) -> ServerInfo {

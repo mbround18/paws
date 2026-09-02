@@ -131,9 +131,8 @@ fn parse_build_args(args: Option<ComposeBuildArgs>) -> Vec<(String, String)> {
 /// (FR-012 items 2-3) are all load-bearing — a fixture test with two services
 /// (one matching, one not) exercises exactly this.
 pub fn parse_docker_compose(compose_path: &Path, image_name: &str) -> ComposeResolution {
-    let raw = match std::fs::read_to_string(compose_path) {
-        Ok(raw) => raw,
-        Err(_) => return ComposeResolution::default(),
+    let Ok(raw) = std::fs::read_to_string(compose_path) else {
+        return ComposeResolution::default();
     };
     // serde_yaml::Mapping preserves document order, matching the TS source's
     // `Object.values(compose.services)` iteration over insertion order.
@@ -290,7 +289,7 @@ fn parse_pr_number(git_ref: &str) -> Option<u64> {
 
 /// Parses a branch-push `git_ref` (`refs/heads/{branch}`) down to the
 /// branch name, for `--tag-branch` (FR-014) — same "derive from the
-/// existing git_ref field" approach as [`parse_pr_number`].
+/// existing `git_ref` field" approach as [`parse_pr_number`].
 fn parse_branch_name(git_ref: &str) -> Option<&str> {
     git_ref.strip_prefix("refs/heads/")
 }
@@ -338,17 +337,17 @@ impl TagKind {
     /// is applied.
     fn bare_value(&self) -> String {
         match self {
-            TagKind::Version(v) => v.clone(),
-            TagKind::Latest => "latest".to_string(),
-            TagKind::RollupMajor(m) => m.clone(),
-            TagKind::RollupMinor(m) => m.clone(),
-            TagKind::Sha(s) => format!("sha-{s}"),
-            TagKind::BranchRef(b) => sanitize_tag_component(b),
-            TagKind::PrRef(n) => format!("pr-{n}"),
+            // An explicit version and both rollup pointers are already the
+            // literal tag text; only the ref-derived kinds need shaping.
+            Self::Version(v) | Self::RollupMajor(v) | Self::RollupMinor(v) => v.clone(),
+            Self::Latest => "latest".to_string(),
+            Self::Sha(s) => format!("sha-{s}"),
+            Self::BranchRef(b) => sanitize_tag_component(b),
+            Self::PrRef(n) => format!("pr-{n}"),
             // Literal string, not a timestamp/nightly-date suffix — kept as
             // a stable, overwritable pointer like `latest` rather than an
             // ever-growing tag list (plan.md Design Decision 7).
-            TagKind::Schedule => "schedule".to_string(),
+            Self::Schedule => "schedule".to_string(),
         }
     }
 }
@@ -556,6 +555,12 @@ fn join_relative(base: &str, addition: &str) -> String {
 
 /// Ported from `resolveDockerParity`, tying compose discovery/resolution, push
 /// gating, and tag generation together (spec.md User Story 3).
+// `useless_let_if_seq` wants the compose block below rewritten as an
+// expression initializing `build_args`, but that block resolves four
+// interdependent values (context feeds dockerfile; target only fills when the
+// flag left it empty) — collapsing it into one `map_or_else` would hide that
+// ordering rather than clarify it.
+#[allow(clippy::useless_let_if_seq)]
 pub fn resolve_docker_facts(input: &DockerFactsInput, github: &GithubContext) -> DockerFacts {
     let dockerfile_input = input
         .dockerfile
@@ -567,7 +572,7 @@ pub fn resolve_docker_facts(input: &DockerFactsInput, github: &GithubContext) ->
         .unwrap_or_else(|| DEFAULT_CONTEXT.to_string());
 
     let mut context = context_input.clone();
-    let mut dockerfile = dockerfile_input.clone();
+    let mut dockerfile = dockerfile_input;
     let mut target = input.target.clone().unwrap_or_default();
     let mut build_args = Vec::new();
 
@@ -591,7 +596,7 @@ pub fn resolve_docker_facts(input: &DockerFactsInput, github: &GithubContext) ->
         if let Some(t) = &resolution.target
             && target.is_empty()
         {
-            target = t.clone();
+            target.clone_from(t);
         }
         build_args = resolution.build_args;
     }
@@ -650,7 +655,7 @@ pub const KNOWN_DOCKER_RELEASE_REGISTRIES: &[&str] = &["docker.io", "ghcr.io"];
 pub fn native_registries(registries: &[String]) -> Vec<&str> {
     registries
         .iter()
-        .map(|r| r.as_str())
+        .map(String::as_str)
         .filter(|r| !KNOWN_DOCKER_RELEASE_REGISTRIES.contains(r))
         .collect()
 }
@@ -673,7 +678,7 @@ pub fn registry_token_env_var(registry: &str) -> String {
 pub fn tags_for_registry<'a>(tags: &'a [String], registry: &str) -> Vec<&'a str> {
     let prefix = format!("{registry}/");
     tags.iter()
-        .map(|t| t.as_str())
+        .map(String::as_str)
         .filter(|t| t.starts_with(&prefix))
         .collect()
 }
@@ -692,10 +697,12 @@ pub enum TargetOrigin {
 
 impl TargetOrigin {
     /// The flag to cite when this target has no usable credential.
-    pub fn flag(self) -> &'static str {
+    pub const fn flag(self) -> &'static str {
         match self {
-            Self::DockerHub => "--image",
-            Self::Image => "--image",
+            // Both come from the same flag: a bare name means Docker Hub, a
+            // qualified one names its own registry, but `--image` is what the
+            // user would have to fix either way.
+            Self::DockerHub | Self::Image => "--image",
             Self::Registries => "--registries",
         }
     }
@@ -885,7 +892,8 @@ pub fn publish_summary(outcomes: &[PublishOutcome]) -> String {
     };
 
     if !skipped.is_empty() {
-        summary.push_str(&format!(" — skipped {}", skipped.join(", ")));
+        use std::fmt::Write as _;
+        let _ = write!(summary, " — skipped {}", skipped.join(", "));
     }
 
     summary
@@ -949,7 +957,7 @@ pub fn registry_of(image: &str) -> Option<&str> {
 /// never a Docker Hub reference, so those are excluded too.
 pub fn docker_hub_tags<'a>(tags: &'a [String], extra_registries: &[String]) -> Vec<&'a str> {
     tags.iter()
-        .map(|t| t.as_str())
+        .map(String::as_str)
         .filter(|t| {
             !extra_registries
                 .iter()
@@ -995,13 +1003,12 @@ fn dockerfile_relative_to_context(context: &str, dockerfile: &str) -> String {
         return dockerfile.to_string();
     }
     let df = dockerfile.trim_start_matches("./");
-    match df.strip_prefix(ctx).and_then(|rest| rest.strip_prefix('/')) {
-        Some(rest) => format!("./{rest}"),
-        None => dockerfile.to_string(),
-    }
+    df.strip_prefix(ctx)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .map_or_else(|| dockerfile.to_string(), |rest| format!("./{rest}"))
 }
 
-fn docker_build_pipeline_prefix(build: &BuildSpec) -> Vec<String> {
+fn docker_build_pipeline_prefix(build: &BuildSpec<'_>) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "host".into(),
         "directory".into(),
@@ -1035,15 +1042,15 @@ fn docker_build_pipeline_prefix(build: &BuildSpec) -> Vec<String> {
 /// call this crate no longer needs) used to always build regardless of
 /// whether it was about to publish; this preserves that same behavior
 /// without a registry in the loop at all.
-pub fn build_only_pipeline_args(build: &BuildSpec) -> Vec<String> {
+pub fn build_only_pipeline_args(build: &BuildSpec<'_>) -> Vec<String> {
     let mut args = docker_build_pipeline_prefix(build);
     args.push("sync".into());
     args
 }
 
 pub fn native_publish_pipeline_args(
-    build: &BuildSpec,
-    publish: &NativeRegistryPublish,
+    build: &BuildSpec<'_>,
+    publish: &NativeRegistryPublish<'_>,
 ) -> Vec<String> {
     let mut args = docker_build_pipeline_prefix(build);
     args.extend([
@@ -1684,7 +1691,7 @@ mod tests {
     fn published(registry: &str, tags: &[&str]) -> PublishOutcome {
         PublishOutcome::Published {
             registry: registry.to_string(),
-            tags: tags.iter().map(|t| t.to_string()).collect(),
+            tags: tags.iter().map(ToString::to_string).collect(),
         }
     }
 
@@ -1810,7 +1817,7 @@ mod tests {
     // mutation to exercise, which is why two planning bugs shipped.
 
     fn tags(values: &[&str]) -> Vec<String> {
-        values.iter().map(|v| v.to_string()).collect()
+        values.iter().map(ToString::to_string).collect()
     }
 
     fn plan<'a>(

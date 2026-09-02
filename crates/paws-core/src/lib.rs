@@ -1,6 +1,18 @@
 //! Shared contract types for paws pipelines: defaults, workflow definitions,
 //! and the config shapes every language-specific crate builds on.
 
+pub mod builders;
+pub mod fsutil;
+pub mod pipeline;
+#[cfg(any(test, feature = "testing"))]
+pub mod test_support;
+pub mod toolchain;
+
+pub use builders::write_builder_dockerfile;
+pub use fsutil::{find_files, find_files_with_extension};
+pub use pipeline::{Pipeline, builder_build_args};
+pub use toolchain::{TOOLCHAINS, Toolchain, ToolchainInfo};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

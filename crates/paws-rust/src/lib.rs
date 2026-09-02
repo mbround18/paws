@@ -12,9 +12,10 @@
 //! default on that image (`cargo fmt --version` fails with "'cargo-fmt' is
 //! not installed for the toolchain" until that component is added).
 
+use paws_core::Pipeline;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 pub const BASE_IMAGE: &str = "rust:1-bookworm";
 
@@ -36,12 +37,7 @@ const RUST_COVERAGE_DOCKERFILE: &str = include_str!("../../../builders/rust/Dock
 /// `builder_dir` argument — mirrors `paws-tauri`'s/`paws-java`'s own
 /// same-named function.
 pub fn write_builder_dockerfile() -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join("paws-builders").join("rust");
-    std::fs::create_dir_all(&dir)
-        .context("failed to create temp dir for the rust builder Dockerfile")?;
-    std::fs::write(dir.join("Dockerfile"), RUST_COVERAGE_DOCKERFILE)
-        .context("failed to write the rust builder Dockerfile")?;
-    Ok(dir)
+    paws_core::write_builder_dockerfile("rust", RUST_COVERAGE_DOCKERFILE)
 }
 
 /// The target `wasm-pack`/`wasm-bindgen` crates build for — used both to
@@ -108,65 +104,44 @@ pub fn dagger_pipeline_args(
     coverage: bool,
     builder_dir: Option<&str>,
 ) -> Vec<String> {
-    let mut args: Vec<String> = if coverage && !is_wasm {
+    let opening = if coverage && !is_wasm {
         let builder_dir = builder_dir
             .expect("builder_dir must be Some(..) when coverage is true (see doc comment)");
-        vec![
-            "host".into(),
-            "directory".into(),
-            format!("--path={builder_dir}"),
-            "docker-build".into(),
-            "with-mounted-directory".into(),
-            "--path=/src".into(),
-            format!("--source={source_dir}"),
-            "with-workdir".into(),
-            "--path=/src".into(),
-        ]
+        Pipeline::from_host_dockerfile(builder_dir)
     } else {
-        vec![
-            "container".into(),
-            "from".into(),
-            format!("--address={BASE_IMAGE}"),
-            "with-mounted-directory".into(),
-            "--path=/src".into(),
-            format!("--source={source_dir}"),
-            "with-workdir".into(),
-            "--path=/src".into(),
-        ]
+        Pipeline::from_image(BASE_IMAGE)
     };
 
-    let mut push_exec = |command_args: &[&str]| {
-        args.push("with-exec".into());
-        args.push(format!("--args={}", command_args.join(",")));
-    };
+    let pipeline = opening.mount("/src", source_dir).workdir("/src");
 
     if is_wasm {
-        push_exec(&["rustup", "target", "add", WASM_TARGET]);
-        push_exec(&["rustup", "component", "add", "rustfmt", "clippy"]);
-        push_exec(&["cargo", "fmt", "--", "--check"]);
-        push_exec(&[
-            "cargo",
-            "clippy",
-            "--target",
-            WASM_TARGET,
-            "--",
-            "-D",
-            "warnings",
-        ]);
-        push_exec(&["cargo", "build", "--target", WASM_TARGET, "--verbose"]);
+        pipeline
+            .exec(["rustup", "target", "add", WASM_TARGET])
+            .exec(["rustup", "component", "add", "rustfmt", "clippy"])
+            .exec(["cargo", "fmt", "--", "--check"])
+            .exec([
+                "cargo",
+                "clippy",
+                "--target",
+                WASM_TARGET,
+                "--",
+                "-D",
+                "warnings",
+            ])
+            .exec(["cargo", "build", "--target", WASM_TARGET, "--verbose"])
     } else {
-        push_exec(&["rustup", "component", "add", "rustfmt", "clippy"]);
-        push_exec(&["cargo", "fmt", "--", "--check"]);
-        push_exec(&["cargo", "clippy", "--", "-D", "warnings"]);
-        push_exec(&["cargo", "build", "--verbose"]);
-        push_exec(&["cargo", "test", "--verbose"]);
-        if coverage {
-            push_exec(&["cargo", "llvm-cov", "--workspace", "--summary-only"]);
-        }
+        pipeline
+            .exec(["rustup", "component", "add", "rustfmt", "clippy"])
+            .exec(["cargo", "fmt", "--", "--check"])
+            .exec(["cargo", "clippy", "--", "-D", "warnings"])
+            .exec(["cargo", "build", "--verbose"])
+            .exec(["cargo", "test", "--verbose"])
+            .exec_if(
+                coverage,
+                ["cargo", "llvm-cov", "--workspace", "--summary-only"],
+            )
     }
-
-    args.push("stdout".into());
-    args
+    .stdout()
 }
 
 #[cfg(test)]
@@ -174,12 +149,8 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("paws-rust-test-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(name: &str) -> PathBuf {
+        paws_core::test_support::scratch_dir("rust", name)
     }
 
     #[test]
@@ -200,7 +171,7 @@ mod tests {
     /// `cargo clippy -- -D warnings` invocation directly (not just asserting
     /// the string `dagger_pipeline_args` builds), matching how `paws-docs`'s
     /// own tests shell out to a real `cargo` subcommand.
-    fn write_clippy_fixture(dir: &std::path::Path, lib_contents: &str) {
+    fn write_clippy_fixture(dir: &Path, lib_contents: &str) {
         fs::write(
             dir.join("Cargo.toml"),
             "[workspace]\n\n[package]\nname = \"clippy-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",

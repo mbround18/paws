@@ -27,6 +27,7 @@
 //! sitting next to `firmware/`, not nested inside it — is actually present
 //! in the container to test.
 
+use paws_core::Pipeline;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -44,12 +45,7 @@ const ESP32_DOCKERFILE: &str = include_str!("../../../builders/esp32/Dockerfile"
 /// `builder_dir` argument — mirrors `paws-kotlin`'s/`paws-tauri`'s own
 /// same-named function.
 pub fn write_builder_dockerfile() -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join("paws-builders").join("esp32");
-    std::fs::create_dir_all(&dir)
-        .context("failed to create temp dir for the esp32 builder Dockerfile")?;
-    std::fs::write(dir.join("Dockerfile"), ESP32_DOCKERFILE)
-        .context("failed to write the esp32 builder Dockerfile")?;
-    Ok(dir)
+    paws_core::write_builder_dockerfile("esp32", ESP32_DOCKERFILE)
 }
 
 /// Whether `manifest` (a `Cargo.toml`'s raw text) names an ESP-IDF
@@ -203,35 +199,13 @@ fn relative_workdir(subpath: &str) -> String {
 /// pipelines can never drift into building/testing under different
 /// conditions (e.g. one linting and the other not).
 fn build_and_lint_prefix(mount_dir: &str, project_subpath: &str, builder_dir: &str) -> Vec<String> {
-    let created_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let build_args =
-        format!("BUILDER_VERSION=dev,BUILDER_REVISION=unknown,BUILDER_CREATED={created_unix}");
-
-    let mut args: Vec<String> = vec![
-        "host".into(),
-        "directory".into(),
-        format!("--path={builder_dir}"),
-        "docker-build".into(),
-        format!("--build-args={build_args}"),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={mount_dir}"),
-        "with-workdir".into(),
-        format!("--path={}", relative_workdir(project_subpath)),
-    ];
-
-    let push_exec = |args: &mut Vec<String>, command_args: &[&str]| {
-        args.push("with-exec".into());
-        args.push(format!("--args={}", command_args.join(",")));
-    };
-
-    push_exec(&mut args, &["cargo", "fmt", "--", "--check"]);
-    push_exec(&mut args, &["cargo", "clippy", "--", "-D", "warnings"]);
-    push_exec(&mut args, &["cargo", "build", "--release"]);
-    args
+    Pipeline::from_builder_image(builder_dir)
+        .mount("/src", mount_dir)
+        .workdir(&relative_workdir(project_subpath))
+        .exec(["cargo", "fmt", "--", "--check"])
+        .exec(["cargo", "clippy", "--", "-D", "warnings"])
+        .exec(["cargo", "build", "--release"])
+        .into_args()
 }
 
 pub fn dagger_pipeline_args(
@@ -240,17 +214,19 @@ pub fn dagger_pipeline_args(
     builder_dir: &str,
     host_test_subpath: Option<&str>,
 ) -> Vec<String> {
-    let mut args = build_and_lint_prefix(mount_dir, project_subpath, builder_dir);
+    let mut pipeline = Pipeline::from_raw(build_and_lint_prefix(
+        mount_dir,
+        project_subpath,
+        builder_dir,
+    ));
 
     if let Some(test_subpath) = host_test_subpath {
-        args.push("with-workdir".into());
-        args.push(format!("--path={}", relative_workdir(test_subpath)));
-        args.push("with-exec".into());
-        args.push("--args=cargo,test".into());
+        pipeline = pipeline
+            .workdir(&relative_workdir(test_subpath))
+            .exec(["cargo", "test"]);
     }
 
-    args.push("stdout".into());
-    args
+    pipeline.stdout()
 }
 
 /// Builds the `dagger core <chain>` argument list to (re-)build an ESP32
@@ -276,12 +252,12 @@ pub fn dagger_export_pipeline_args(
     target_triple: &str,
     host_release_dir: &str,
 ) -> Vec<String> {
-    let mut args = build_and_lint_prefix(mount_dir, project_subpath, builder_dir);
-    args.push("directory".into());
-    args.push(format!("--path=target/{target_triple}/release"));
-    args.push("export".into());
-    args.push(format!("--path={host_release_dir}"));
-    args
+    Pipeline::from_raw(build_and_lint_prefix(
+        mount_dir,
+        project_subpath,
+        builder_dir,
+    ))
+    .export_directory(&format!("target/{target_triple}/release"), host_release_dir)
 }
 
 /// Reads the `.cargo/config.toml`'s `build.target` triple (e.g.
@@ -328,7 +304,7 @@ pub fn binary_name(dir: &Path) -> Result<String> {
         let bin_block = after
             .lines()
             .take_while(|line| !line.trim_start().starts_with('['));
-        if let Some(name) = bin_block.map(|line| line.trim()).find_map(|line| {
+        if let Some(name) = bin_block.map(str::trim).find_map(|line| {
             line.strip_prefix("name")
                 .and_then(|rest| rest.trim_start().strip_prefix('='))
                 .map(|v| v.trim().trim_matches('"').trim_matches('\'').to_string())
@@ -410,11 +386,7 @@ mod tests {
     use std::fs;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("paws-esp32-test-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        paws_core::test_support::scratch_dir("esp32", name)
     }
 
     #[test]
