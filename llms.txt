@@ -123,6 +123,7 @@ Lint (and optionally package) Helm chart(s) — `charts/*/Chart.yaml` or a root 
 Cross-target build, package, and publish a release binary to GitHub Releases
 
 - `--target` — Rust target triple to build, e.g. "x86_64-unknown-linux-gnu". Must be one of `paws_release::known_targets()` — each maps to a `./builders/<dir>` Dockerfile the build runs through Dagger
+- `--list-targets` — Print every target triple `paws release` knows how to build, one per line, and exit
 - `--source` (default: `.`) — Host path to the source tree to build
 - `--package` (default: `paws-cli`) — Cargo package(s) to build, comma-separated (one [[bin]] each) — e.g. "agent,server". Paired 1:1 with --binary-name
 - `--binary-name` (default: `paws`) — Binary name(s) as declared in each package's [[bin]] section, comma-separated, paired 1:1 with --package. All built binaries are packaged into one archive

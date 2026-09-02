@@ -1764,6 +1764,7 @@ pub async fn run_helm(args: HelmArgs) -> anyhow::Result<()> {
 pub async fn run_release(args: ReleaseArgs) -> anyhow::Result<()> {
     let ReleaseArgs {
         target,
+        list_targets,
         source,
         package,
         binary_name,
@@ -1774,6 +1775,20 @@ pub async fn run_release(args: ReleaseArgs) -> anyhow::Result<()> {
         no_upload,
         skip_smoke_test,
     } = args;
+
+    // Answered before any other validation so it works with no other flags —
+    // it is a query, not a build.
+    if list_targets {
+        for target in paws_release::known_targets() {
+            println!("{}", target.triple);
+        }
+        return Ok(());
+    }
+
+    let target = target.context(
+        "--target is required (e.g. --target x86_64-unknown-linux-gnu); \
+         run `paws release --list-targets` to see every supported triple",
+    )?;
 
     anyhow::ensure!(
         package.len() == binary_name.len(),
