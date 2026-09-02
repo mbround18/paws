@@ -29,56 +29,29 @@
 //! Requires the project's own `gradlew` wrapper, same reasoning as
 //! `paws-java`.
 
+use paws_core::Pipeline;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 /// The `builders/java` Dockerfile, embedded independently from
 /// `paws-java`'s own copy — see this module's doc comment on why that
 /// duplication is deliberate.
 const JAVA_DOCKERFILE: &str = include_str!("../../../builders/java/Dockerfile");
 
-fn write_dockerfile(name: &str, contents: &str) -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join("paws-builders").join(name);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create temp dir for the {name} builder Dockerfile"))?;
-    std::fs::write(dir.join("Dockerfile"), contents)
-        .with_context(|| format!("failed to write the {name} builder Dockerfile"))?;
-    Ok(dir)
-}
-
 /// Writes the embedded `builders/java` Dockerfile to a temp directory and
 /// returns that directory's path, suitable for `dagger_pipeline_args`'s
-/// `builder_dir` argument. Dagger's own BuildKit layer caching means this
+/// `builder_dir` argument. Dagger's own `BuildKit` layer caching means this
 /// resolves to the same cached image `paws-java` already built in the same
 /// `paws ci` process/host, not a second independent build.
 pub fn write_builder_dockerfile() -> Result<PathBuf> {
-    write_dockerfile("java", JAVA_DOCKERFILE)
+    paws_core::write_builder_dockerfile("java", JAVA_DOCKERFILE)
 }
 
 /// Every `.kt`/`.kts` file under `dir`, recursing but skipping hidden
 /// directories — same walking strategy as `paws_go::go_files`.
 fn kotlin_files(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return files;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.starts_with('.') {
-                continue;
-            }
-            files.extend(kotlin_files(&path));
-        } else {
-            match path.extension().and_then(|e| e.to_str()) {
-                Some("kt") | Some("kts") => files.push(path),
-                _ => {}
-            }
-        }
-    }
-    files
+    paws_core::find_files_with_extension(dir, &["kt", "kts"])
 }
 
 /// A Kotlin project has real `.kt` source files (the purpose-built
@@ -118,28 +91,11 @@ pub fn detect_project(dir: &Path) -> Result<()> {
 /// then runs `sh gradlew build` — identical in shape to
 /// `paws_java::dagger_pipeline_args`'s Gradle path.
 pub fn dagger_pipeline_args(source_dir: &str, builder_dir: &str) -> Vec<String> {
-    let created_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let build_args =
-        format!("BUILDER_VERSION=dev,BUILDER_REVISION=unknown,BUILDER_CREATED={created_unix}");
-
-    vec![
-        "host".into(),
-        "directory".into(),
-        format!("--path={builder_dir}"),
-        "docker-build".into(),
-        format!("--build-args={build_args}"),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={source_dir}"),
-        "with-workdir".into(),
-        "--path=/src".into(),
-        "with-exec".into(),
-        "--args=sh,gradlew,build".into(),
-        "stdout".into(),
-    ]
+    Pipeline::from_builder_image(builder_dir)
+        .mount("/src", source_dir)
+        .workdir("/src")
+        .exec(["sh", "gradlew", "build"])
+        .stdout()
 }
 
 #[cfg(test)]
@@ -147,12 +103,8 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("paws-kotlin-test-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(name: &str) -> PathBuf {
+        paws_core::test_support::scratch_dir("kotlin", name)
     }
 
     #[test]

@@ -12,7 +12,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -28,12 +27,7 @@ const HELM_DOCKERFILE: &str = include_str!("../../../builders/helm/Dockerfile");
 /// returns that directory's path, suitable for [`lint_pipeline_args`]/
 /// [`package_pipeline_args`]'s `builder_dir` argument.
 pub fn write_builder_dockerfile() -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join("paws-builders").join("helm");
-    std::fs::create_dir_all(&dir)
-        .context("failed to create temp dir for the helm builder Dockerfile")?;
-    std::fs::write(dir.join("Dockerfile"), HELM_DOCKERFILE)
-        .context("failed to write the helm builder Dockerfile")?;
-    Ok(dir)
+    paws_core::write_builder_dockerfile("helm", HELM_DOCKERFILE)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +70,7 @@ impl HelmChart {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct HelmProject {
     /// Discovered charts, topologically ordered so a local dependency is
     /// always processed before whatever depends on it — matters for a
@@ -118,7 +113,7 @@ fn discover_chart_relative_dirs(dir: &Path) -> Vec<String> {
         return Vec::new();
     };
     let mut names: Vec<String> = entries
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| e.path().is_dir() && e.path().join("Chart.yaml").is_file())
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
@@ -176,14 +171,14 @@ fn load_chart(root: &Path, rel_dir: &str) -> Result<(HelmChart, Vec<String>)> {
         .filter_map(|d| d.repository.strip_prefix("file://"))
         .filter_map(|rel| Path::new(rel).file_name())
         .filter_map(|name| name.to_str())
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
         .collect();
 
     let remote_repositories: Vec<String> = dependencies
         .iter()
         .map(|d| d.repository.as_str())
         .filter(|repo| repo.starts_with("http://") || repo.starts_with("https://"))
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
         .collect();
 
     let name = rel_dir
@@ -298,25 +293,10 @@ pub fn detect_project(dir: &Path) -> Result<HelmProject> {
 }
 
 fn container_prefix(builder_dir: &str, source_dir: &str) -> Vec<String> {
-    let created_unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let build_args =
-        format!("BUILDER_VERSION=dev,BUILDER_REVISION=unknown,BUILDER_CREATED={created_unix}");
-
-    vec![
-        "host".into(),
-        "directory".into(),
-        format!("--path={builder_dir}"),
-        "docker-build".into(),
-        format!("--build-args={build_args}"),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={source_dir}"),
-        "with-workdir".into(),
-        "--path=/src".into(),
-    ]
+    paws_core::Pipeline::from_builder_image(builder_dir)
+        .mount("/src", source_dir)
+        .workdir("/src")
+        .into_args()
 }
 
 fn push_exec(args: &mut Vec<String>, command_args: &[&str]) {
@@ -424,7 +404,7 @@ pub fn package_pipeline_args(
 /// [`publish_pipeline_prefix`]/[`publish_packages_pipeline_args`]/
 /// [`publish_index_pipeline_args`] don't each carry five near-identical
 /// parameters individually.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct PublishTarget<'a> {
     /// GitHub owner/org the per-chart releases and `index.yaml` publish to.
     pub owner: &'a str,
@@ -467,7 +447,7 @@ fn publish_pipeline_prefix(
     project: &HelmProject,
     source_dir: &str,
     builder_dir: &str,
-    target: &PublishTarget,
+    target: &PublishTarget<'_>,
 ) -> Vec<String> {
     let PublishTarget {
         owner,
@@ -587,7 +567,7 @@ pub fn publish_packages_pipeline_args(
     project: &HelmProject,
     source_dir: &str,
     builder_dir: &str,
-    target: &PublishTarget,
+    target: &PublishTarget<'_>,
     host_packages_dir: &str,
 ) -> Vec<String> {
     let mut args = publish_pipeline_prefix(project, source_dir, builder_dir, target);
@@ -608,7 +588,7 @@ pub fn publish_index_pipeline_args(
     project: &HelmProject,
     source_dir: &str,
     builder_dir: &str,
-    target: &PublishTarget,
+    target: &PublishTarget<'_>,
     host_index_path: &str,
 ) -> Vec<String> {
     let mut args = publish_pipeline_prefix(project, source_dir, builder_dir, target);
@@ -627,11 +607,7 @@ mod tests {
     use std::fs;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("paws-helm-test-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        paws_core::test_support::scratch_dir("helm", name)
     }
 
     fn write_chart(root: &Path, rel_dir: &str, chart_yaml: &str) {

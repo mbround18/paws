@@ -7,11 +7,12 @@
 //! the "reimplementation from memory" the project's parity principle exists
 //! to avoid.
 
+use paws_core::Pipeline;
 use std::path::Path;
 
 use anyhow::Result;
 
-/// CPython has no LTS branding the way Node/Java do — just a rolling
+/// `CPython` has no LTS branding the way Node/Java do — just a rolling
 /// "current stable" minor version, each supported for ~5 years. `3.13` is
 /// that current stable as of this pin; unlike `node:lts-trixie`, there's no
 /// self-updating "latest" tag `astral/uv` publishes for this
@@ -24,6 +25,7 @@ fn base_image(python_version: &str) -> String {
     format!("astral/uv:python{python_version}-trixie-slim")
 }
 
+#[derive(Debug, Clone)]
 pub struct PythonProject {
     /// Whether `uv.lock` is committed. `uv sync --frozen` (matching
     /// `gh-reusable`'s pipeline) requires it and errors otherwise — verified
@@ -63,36 +65,18 @@ pub fn dagger_pipeline_args_with_version(
     source_dir: &str,
     python_version: &str,
 ) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "container".into(),
-        "from".into(),
-        format!("--address={}", base_image(python_version)),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={source_dir}"),
-        "with-workdir".into(),
-        "--path=/src".into(),
-    ];
-
-    let mut push_exec = |command_args: Vec<String>| {
-        args.push("with-exec".into());
-        args.push(format!("--args={}", command_args.join(",")));
-    };
-
-    let mut sync = vec![
-        "uv".to_string(),
-        "sync".to_string(),
-        "--all-groups".to_string(),
-    ];
+    let mut sync = vec!["uv", "sync", "--all-groups"];
     if project.has_lockfile {
-        sync.push("--frozen".to_string());
+        sync.push("--frozen");
     }
-    push_exec(sync);
-    push_exec(vec!["uv".into(), "build".into()]);
-    push_exec(vec!["uv".into(), "run".into(), "pytest".into()]);
 
-    args.push("stdout".into());
-    args
+    Pipeline::from_image(&base_image(python_version))
+        .mount("/src", source_dir)
+        .workdir("/src")
+        .exec(sync)
+        .exec(["uv", "build"])
+        .exec(["uv", "run", "pytest"])
+        .stdout()
 }
 
 #[cfg(test)]
@@ -101,11 +85,7 @@ mod tests {
     use std::fs;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("paws-python-test-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        paws_core::test_support::scratch_dir("python", name)
     }
 
     #[test]

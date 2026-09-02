@@ -6,7 +6,7 @@
 //! `dagger core <chain>` pipelines against `./builders/*` Dockerfiles) —
 //! never a direct `docker`/`cross` spawn. That keeps `paws-dagger` the single
 //! seam that talks to a container engine, gives every build Dagger's own
-//! BuildKit layer caching for free, and means a user running `paws release`
+//! `BuildKit` layer caching for free, and means a user running `paws release`
 //! only ever needs the `dagger` CLI, not Docker/`cross`/QEMU/Wine set up
 //! independently — Dagger's own `--platform` support covers cross-arch
 //! execution (backed by the host's QEMU `binfmt_misc` registration), and a
@@ -127,7 +127,7 @@ const GENERIC_LINUX_GNU_DOCKERFILE: &str = include_str!("../../../builders/linux
 /// [`GENERIC_LINUX_GNU_DOCKERFILE`] actually has a toolchain for. Deliberately
 /// narrow (linux-gnu only, no macOS/Windows) — a generic cross matrix is
 /// speculative until a second target repo actually needs it.
-pub fn local_build_targets() -> &'static [&'static str] {
+pub const fn local_build_targets() -> &'static [&'static str] {
     &["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 }
 
@@ -159,6 +159,7 @@ pub fn archive_name(binary_name: &str, version: &str, target: &str) -> String {
 }
 
 /// Inputs for [`build_binary`].
+#[derive(Debug, Clone, Copy)]
 pub struct BuildRequest<'a> {
     pub builder_dir: &'a str,
     /// Host path to the source tree to build (mounted read-write at `/src`).
@@ -408,6 +409,19 @@ pub struct GitHubReleaseClient {
     base_override: Option<String>,
 }
 
+/// Hand-written, not derived: `token` is a live GitHub credential and this
+/// client is a natural thing to `{:?}` into an error context when a release
+/// call fails.
+impl std::fmt::Debug for GitHubReleaseClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubReleaseClient")
+            .field("owner", &self.owner)
+            .field("repo", &self.repo)
+            .field("token", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
 impl GitHubReleaseClient {
     pub fn new(owner: String, repo: String, token: String) -> Self {
         Self {
@@ -466,7 +480,7 @@ impl GitHubReleaseClient {
             .await
             .context("failed to parse release response")?;
         body.get("id")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .context("release response missing id")
             .map(Some)
     }
@@ -527,7 +541,7 @@ impl GitHubReleaseClient {
             .await
             .context("failed to parse created-release response")?;
         body.get("id")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .context("created-release response missing id")
     }
 
@@ -628,7 +642,7 @@ impl GitHubReleaseClient {
             .iter()
             .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(file_name))
             .and_then(|a| a.get("id"))
-            .and_then(|v| v.as_u64()))
+            .and_then(serde_json::Value::as_u64))
     }
 
     /// Fetches `path` at `git_ref` via the Contents API — decoded file
@@ -800,6 +814,12 @@ impl GitHubReleaseClient {
     /// [`put_content`](Self::put_content) — a multi-hundred-file docs tree
     /// publishes as one commit/one ref-update, not one `put_content` call
     /// (and one push event) per file (FR-003, research.md R4).
+    // 113 lines, and deliberately one function: it is a single Git Trees
+    // transaction — blobs, then a tree, then a commit, then one ref update —
+    // where every step consumes the previous step's SHA. Splitting it would
+    // produce four private helpers that can only ever be called in this order,
+    // which hides the sequence rather than clarifying it.
+    #[allow(clippy::too_many_lines)]
     pub async fn publish_tree(
         &self,
         branch: &str,
@@ -925,11 +945,13 @@ impl GitHubReleaseClient {
 }
 
 /// [`GitHubReleaseClient::get_pages_config`]'s result on a configured repo.
+#[derive(Debug, Clone)]
 pub struct PagesConfig {
     pub build_type: String,
 }
 
 /// A file fetched via [`GitHubReleaseClient::get_content`].
+#[derive(Debug, Clone)]
 pub struct ContentFile {
     pub content: Vec<u8>,
     pub sha: String,
@@ -1058,12 +1080,7 @@ mod tests {
         // pipeline uses) — skip rather than fail when they're genuinely
         // absent, the same convention `paws-dagger`'s tests use for the
         // `dagger` CLI.
-        if tokio::process::Command::new("zip")
-            .arg("--version")
-            .output()
-            .await
-            .is_err()
-        {
+        if Command::new("zip").arg("--version").output().await.is_err() {
             return;
         }
 
@@ -1084,7 +1101,7 @@ mod tests {
 
         // Unzip and verify the binary landed at the archive root (flattened),
         // not nested under "nested/".
-        let list_output = tokio::process::Command::new("unzip")
+        let list_output = Command::new("unzip")
             .arg("-l")
             .arg(&archive_path)
             .output()

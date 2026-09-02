@@ -3,8 +3,26 @@ name = "paws-core"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+# paws ships as a binary, not as crates on crates.io. Marking it explicitly
+# keeps an accidental `cargo publish` from succeeding, and lets `cargo deny`
+# treat the intra-workspace `path` dependencies as the private edges they are.
+publish = false
+
+[lints]
+workspace = true
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+# Only `paws-cli-core` needs `Toolchain` to be a clap value / JSON-schema
+# type; keeping these optional means the 25 crates that just want the shared
+# contract types don't compile clap and schemars to get them.
+clap = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
+
+[features]
+default = []
+cli = ["dep:clap", "dep:schemars"]
+# Test-only scratch-directory helper, kept out of every release binary.
+testing = []

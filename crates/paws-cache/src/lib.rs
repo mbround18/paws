@@ -49,10 +49,10 @@ impl CacheStatus {
             Backend::DaggerCloud => "cache backend: dagger-cloud".to_string(),
             Backend::GithubActions => {
                 let version = self.api_version.as_deref().unwrap_or("unknown");
-                match &self.base_url {
-                    Some(url) => format!("cache backend: github-actions ({version})\n  {url}"),
-                    None => format!("cache backend: github-actions ({version})"),
-                }
+                self.base_url.as_ref().map_or_else(
+                    || format!("cache backend: github-actions ({version})"),
+                    |url| format!("cache backend: github-actions ({version})\n  {url}"),
+                )
             }
             Backend::None => "cache backend: none (full rebuild)".to_string(),
         }

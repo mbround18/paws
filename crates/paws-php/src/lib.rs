@@ -19,6 +19,7 @@
 //! everything — no `builders/*` image needed (see `docs/ROADMAP.md`'s "How
 //! a new stack gets added").
 
+use paws_core::Pipeline;
 use std::path::Path;
 
 use anyhow::Result;
@@ -33,11 +34,11 @@ pub const BASE_IMAGE: &str = "composer:2";
 
 #[derive(Debug)]
 pub struct PhpProject {
-    /// Whether a PHPUnit configuration (`phpunit.xml` or the conventional
+    /// Whether a `PHPUnit` configuration (`phpunit.xml` or the conventional
     /// `phpunit.xml.dist` an installable package ships) is committed. This
     /// is what decides whether a test step runs at all: without a config
     /// there's no test suite for `vendor/bin/phpunit` to discover, and it
-    /// would fail on the missing binary anyway when PHPUnit isn't a
+    /// would fail on the missing binary anyway when `PHPUnit` isn't a
     /// dev-dependency.
     pub has_phpunit: bool,
 }
@@ -62,48 +63,26 @@ pub fn detect_project(dir: &Path) -> Result<PhpProject> {
 /// malformed manifest or a `composer.lock` out of sync with
 /// `composer.json`, the PHP equivalent of the lockfile-drift check
 /// `paws-python`'s `--frozen` and `paws-ruby`'s `BUNDLE_FROZEN` perform),
-/// `composer install`, then PHPUnit when the project has a suite.
+/// `composer install`, then `PHPUnit` when the project has a suite.
 ///
 /// `--no-check-publish` is passed to `validate` so a private/unpublished
 /// project (no `description`/`license`, or a non-publishable `name`) isn't
 /// failed for a packaging concern that has nothing to do with whether its
 /// build is correct.
 pub fn dagger_pipeline_args(project: &PhpProject, source_dir: &str) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "container".into(),
-        "from".into(),
-        format!("--address={BASE_IMAGE}"),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={source_dir}"),
-        "with-workdir".into(),
-        "--path=/src".into(),
-    ];
-
-    let mut push_exec = |command_args: Vec<String>| {
-        args.push("with-exec".into());
-        args.push(format!("--args={}", command_args.join(",")));
-    };
-
-    push_exec(vec![
-        "composer".into(),
-        "validate".into(),
-        "--strict".into(),
-        "--no-check-publish".into(),
-    ]);
-    push_exec(vec![
-        "composer".into(),
-        "install".into(),
-        "--no-interaction".into(),
-        "--prefer-dist".into(),
-        "--no-progress".into(),
-    ]);
-    if project.has_phpunit {
-        push_exec(vec!["vendor/bin/phpunit".into()]);
-    }
-
-    args.push("stdout".into());
-    args
+    Pipeline::from_image(BASE_IMAGE)
+        .mount("/src", source_dir)
+        .workdir("/src")
+        .exec(["composer", "validate", "--strict", "--no-check-publish"])
+        .exec([
+            "composer",
+            "install",
+            "--no-interaction",
+            "--prefer-dist",
+            "--no-progress",
+        ])
+        .exec_if(project.has_phpunit, ["vendor/bin/phpunit"])
+        .stdout()
 }
 
 #[cfg(test)]
@@ -112,10 +91,7 @@ mod tests {
     use std::fs;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("paws-php-test-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        paws_core::test_support::scratch_dir("php", name)
     }
 
     #[test]

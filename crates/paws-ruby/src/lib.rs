@@ -13,11 +13,12 @@
 //! Gemfile alone doesn't imply a gemspec, and `paws publish` is where
 //! packaging belongs (see `crates/paws-publish`), not `paws ci`.
 //!
-//! No `builders/*` image: `ruby:trixie` already ships Ruby, RubyGems, and
+//! No `builders/*` image: `ruby:trixie` already ships Ruby, `RubyGems`, and
 //! Bundler with a full build toolchain for native gem extensions, so a
 //! plain public image pull is enough (the same call `paws-go`/`paws-python`
 //! make — see `docs/ROADMAP.md`'s "How a new stack gets added").
 
+use paws_core::Pipeline;
 use std::path::Path;
 
 use anyhow::Result;
@@ -45,17 +46,17 @@ pub enum TestRunner {
 }
 
 impl TestRunner {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            TestRunner::Rake => "rake",
-            TestRunner::RSpec => "rspec",
+            Self::Rake => "rake",
+            Self::RSpec => "rspec",
         }
     }
 
-    fn args(&self) -> Vec<String> {
+    fn args(self) -> Vec<String> {
         match self {
-            TestRunner::Rake => vec!["bundle".into(), "exec".into(), "rake".into()],
-            TestRunner::RSpec => vec!["bundle".into(), "exec".into(), "rspec".into()],
+            Self::Rake => vec!["bundle".into(), "exec".into(), "rake".into()],
+            Self::RSpec => vec!["bundle".into(), "exec".into(), "rspec".into()],
         }
     }
 }
@@ -104,35 +105,13 @@ pub fn detect_project(dir: &Path) -> Result<RubyProject> {
 /// for `project`: `bundle install` (frozen when a lockfile is committed),
 /// then the project's own test task.
 pub fn dagger_pipeline_args(project: &RubyProject, source_dir: &str) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "container".into(),
-        "from".into(),
-        format!("--address={BASE_IMAGE}"),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={source_dir}"),
-        "with-workdir".into(),
-        "--path=/src".into(),
-    ];
-
-    if project.has_lockfile {
-        args.extend([
-            "with-env-variable".into(),
-            "--name=BUNDLE_FROZEN".into(),
-            "--value=true".into(),
-        ]);
-    }
-
-    let mut push_exec = |command_args: Vec<String>| {
-        args.push("with-exec".into());
-        args.push(format!("--args={}", command_args.join(",")));
-    };
-
-    push_exec(vec!["bundle".into(), "install".into()]);
-    push_exec(project.test_runner.args());
-
-    args.push("stdout".into());
-    args
+    Pipeline::from_image(BASE_IMAGE)
+        .mount("/src", source_dir)
+        .workdir("/src")
+        .env_if(project.has_lockfile, "BUNDLE_FROZEN", "true")
+        .exec(["bundle", "install"])
+        .exec(project.test_runner.args())
+        .stdout()
 }
 
 #[cfg(test)]
@@ -141,11 +120,7 @@ mod tests {
     use std::fs;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("paws-ruby-test-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        paws_core::test_support::scratch_dir("ruby", name)
     }
 
     #[test]

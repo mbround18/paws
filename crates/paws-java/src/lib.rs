@@ -37,9 +37,10 @@
 //! project) — with `JAVA_HOME`/`PATH` defaulting to 21, so old and new
 //! Gradle pins both just work through the same image.
 
+use paws_core::Pipeline;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 /// The `builders/java` Dockerfile (JDK 21 + JDK 25 side by side; see this
 /// module's doc comment), embedded at compile time — `paws ci` runs from
@@ -51,20 +52,11 @@ use anyhow::{Context, Result};
 /// `paws-tauri`/`paws-flatpak` already established for their own builders.
 const JAVA_DOCKERFILE: &str = include_str!("../../../builders/java/Dockerfile");
 
-fn write_dockerfile(name: &str, contents: &str) -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join("paws-builders").join(name);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create temp dir for the {name} builder Dockerfile"))?;
-    std::fs::write(dir.join("Dockerfile"), contents)
-        .with_context(|| format!("failed to write the {name} builder Dockerfile"))?;
-    Ok(dir)
-}
-
 /// Writes the embedded `builders/java` Dockerfile to a temp directory and
 /// returns that directory's path, suitable for `dagger_pipeline_args`'s
 /// `builder_dir` argument.
 pub fn write_builder_dockerfile() -> Result<PathBuf> {
-    write_dockerfile("java", JAVA_DOCKERFILE)
+    paws_core::write_builder_dockerfile("java", JAVA_DOCKERFILE)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,24 +66,24 @@ pub enum BuildSystem {
 }
 
 impl BuildSystem {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            BuildSystem::Maven => "maven",
-            BuildSystem::Gradle => "gradle",
+            Self::Maven => "maven",
+            Self::Gradle => "gradle",
         }
     }
 
-    fn wrapper(&self) -> &'static str {
+    const fn wrapper(self) -> &'static str {
         match self {
-            BuildSystem::Maven => "mvnw",
-            BuildSystem::Gradle => "gradlew",
+            Self::Maven => "mvnw",
+            Self::Gradle => "gradlew",
         }
     }
 
-    fn build_command(&self) -> &'static [&'static str] {
+    const fn build_command(self) -> &'static [&'static str] {
         match self {
-            BuildSystem::Maven => &["-B", "verify"],
-            BuildSystem::Gradle => &["build"],
+            Self::Maven => &["-B", "verify"],
+            Self::Gradle => &["build"],
         }
     }
 }
@@ -136,7 +128,7 @@ pub fn detect_project(dir: &Path) -> Result<BuildSystem> {
 
 /// Builds the `dagger core <chain>` argument list (see `paws_dagger::core`)
 /// for `source_dir`: builds `builder_dir` (see [`write_builder_dockerfile`]
-/// — Dagger's own BuildKit layer caching means the slow JDK-25 `COPY` only
+/// — Dagger's own `BuildKit` layer caching means the slow JDK-25 `COPY` only
 /// actually runs once per unchanged Dockerfile, not on every `paws ci`
 /// invocation), then runs `sh mvnw -B verify` (Maven) or `sh gradlew build`
 /// (Gradle).
@@ -145,33 +137,14 @@ pub fn dagger_pipeline_args(
     source_dir: &str,
     builder_dir: &str,
 ) -> Vec<String> {
-    let created_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let build_args =
-        format!("BUILDER_VERSION=dev,BUILDER_REVISION=unknown,BUILDER_CREATED={created_unix}");
+    let mut command_args = vec!["sh", build_system.wrapper()];
+    command_args.extend(build_system.build_command());
 
-    let mut args: Vec<String> = vec![
-        "host".into(),
-        "directory".into(),
-        format!("--path={builder_dir}"),
-        "docker-build".into(),
-        format!("--build-args={build_args}"),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={source_dir}"),
-        "with-workdir".into(),
-        "--path=/src".into(),
-    ];
-
-    let mut command_args = vec!["sh".to_string(), build_system.wrapper().to_string()];
-    command_args.extend(build_system.build_command().iter().map(|s| s.to_string()));
-
-    args.push("with-exec".into());
-    args.push(format!("--args={}", command_args.join(",")));
-    args.push("stdout".into());
-    args
+    Pipeline::from_builder_image(builder_dir)
+        .mount("/src", source_dir)
+        .workdir("/src")
+        .exec(command_args)
+        .stdout()
 }
 
 #[cfg(test)]
@@ -179,12 +152,8 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("paws-java-test-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(name: &str) -> PathBuf {
+        paws_core::test_support::scratch_dir("java", name)
     }
 
     #[test]
