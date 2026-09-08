@@ -156,12 +156,37 @@ pub async fn provision_with_timing(
     results
 }
 
+/// The installer binary for an ecosystem isn't on PATH at all, so nothing
+/// was even attempted. Kept distinct from "the installer ran and failed" so
+/// callers can decide: `paws provision` was asked for the install and must
+/// fail, while `paws ci` runs the real build inside Dagger containers and
+/// only wants a host toolchain as a convenience — a missing host `uv` there
+/// is a note, not a broken build.
+#[derive(Debug)]
+pub struct MissingInstaller {
+    pub program: String,
+}
+
+impl std::fmt::Display for MissingInstaller {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "`{}` is not installed or not on PATH", self.program)
+    }
+}
+
+impl std::error::Error for MissingInstaller {}
+
 async fn run_command(program: &str, args: &[&str]) -> Result<()> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to spawn `{program}` — is it installed and on PATH?"))?;
+    let output = match Command::new(program).args(args).output().await {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(anyhow::Error::new(MissingInstaller {
+                program: program.to_string(),
+            }));
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to spawn `{program}`"));
+        }
+    };
 
     if !output.status.success() {
         anyhow::bail!(
@@ -286,6 +311,21 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(millis)).await;
             anyhow::bail!("install failed")
         })
+    }
+
+    #[tokio::test]
+    async fn a_binary_that_is_not_on_path_reports_missing_not_a_generic_failure() {
+        let err = run_command("paws-no-such-installer-binary", &["--version"])
+            .await
+            .expect_err("spawning a nonexistent program must fail");
+
+        // Callers key off this type to tell "the tool isn't here" apart from
+        // "the tool ran and the install failed" — a downcast that stops
+        // working would silently sink `paws ci` on runners without `uv`.
+        let missing = err
+            .downcast_ref::<MissingInstaller>()
+            .expect("a missing binary must surface as MissingInstaller");
+        assert_eq!(missing.program, "paws-no-such-installer-binary");
     }
 
     #[tokio::test]
