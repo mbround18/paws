@@ -118,8 +118,13 @@ see `docs/ROADMAP.md`'s "Current coverage" for the running tally of what's been 
   underlying `dagger` calls in isolation.
 - `crates/paws-provision` — concurrent toolchain provisioning (`tokio::JoinSet`-based),
   aggregating per-ecosystem install results without one failure hiding another's. Real
-  installers shell to `rustup`/`corepack`/`uv`; `paws ci` uses this internally whenever a repo
-  needs more than one ecosystem (FR-015), rather than a sequential setup loop.
+  installers shell to `rustup`/`corepack`/`uv`; `paws ci` uses this internally (FR-015), rather
+  than a sequential setup loop. `paws ci` provisions only the ecosystem behind its
+  `--toolchain`, never every ecosystem whose marker files happen to sit in the repo — a
+  `Cargo.toml` next to a `pyproject.toml` must not drag `uv` into a Rust build. And because
+  `ci`'s real work happens inside Dagger containers, an installer binary that isn't on PATH
+  (`paws_provision::MissingInstaller`) is reported and skipped there, while `paws provision`,
+  which was asked to install, still fails on it.
 - `crates/paws-docs` — thin wrapper around `cargo doc --workspace --no-deps`; doesn't need the
   `dagger` CLI at all.
 - `crates/paws-release` — cross-target build + smoke-test + package (`zip`) + GitHub Release

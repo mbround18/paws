@@ -18,36 +18,6 @@ use paws_semver::{GitHubGraphQlTagSource, SemverRequest, compute_new_version};
 pub mod action_metadata;
 pub mod mcp_setup;
 
-/// Detects which of the ecosystems `paws-provision` knows about are needed in
-/// the current directory, purely from marker files (mirrors `paws-audit`'s
-/// signal-based detection, scoped to what `paws-provision` actually supports).
-/// Ecosystems whose marker files sit directly in `dir`.
-///
-/// Takes the directory rather than assuming the process's own, so `--source`
-/// provisions for the project actually being built rather than for whatever
-/// happens to be at the repo root.
-///
-/// Walks `paws_core::TOOLCHAINS` rather than a marker table of its own. A
-/// toolchain contributes here only if it has both a filename marker and an
-/// installer, which is what keeps this to the ecosystems that can actually be
-/// provisioned without also guessing that every `Cargo.toml` is an ESP32
-/// firmware project.
-fn detect_needed_ecosystems(dir: &std::path::Path) -> Vec<Ecosystem> {
-    let mut found = Vec::new();
-    for info in paws_core::TOOLCHAINS {
-        let Some(ecosystem) = Ecosystem::for_toolchain(info.toolchain) else {
-            continue;
-        };
-        if found.contains(&ecosystem) {
-            continue;
-        }
-        if info.markers.iter().any(|marker| dir.join(marker).exists()) {
-            found.push(ecosystem);
-        }
-    }
-    found
-}
-
 /// Runs a `dagger core <args>` pipeline, streaming its live progress to the
 /// terminal by default (`paws_dagger::core_streaming`) — `--silent` falls
 /// back to capturing everything and printing it only once the pipeline
@@ -87,7 +57,21 @@ fn parse_registry_usernames(
     Ok(usernames)
 }
 
-async fn run_provisioning(ecosystems: Vec<Ecosystem>, verbose: bool) -> anyhow::Result<()> {
+/// What a missing installer binary (no `uv`/`corepack`/`rustup` on PATH)
+/// means for the caller. `paws provision` was asked to install and must fail;
+/// `paws ci` only wants a host toolchain as a convenience, since the build
+/// itself runs inside Dagger containers, so it reports and carries on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MissingInstallerPolicy {
+    Fail,
+    Skip,
+}
+
+async fn run_provisioning(
+    ecosystems: Vec<Ecosystem>,
+    verbose: bool,
+    on_missing_installer: MissingInstallerPolicy,
+) -> anyhow::Result<()> {
     if ecosystems.is_empty() {
         return Ok(());
     }
@@ -95,6 +79,17 @@ async fn run_provisioning(ecosystems: Vec<Ecosystem>, verbose: bool) -> anyhow::
         .into_iter()
         .map(|e| (e, real_installer(e)))
         .collect();
+    provision_and_report(tasks, verbose, on_missing_installer).await
+}
+
+/// Runs the given installers concurrently and turns their outcomes into one
+/// result. Split from `run_provisioning` so tests can hand it installers that
+/// fail on purpose without needing a runner missing `uv`.
+async fn provision_and_report(
+    tasks: Vec<(Ecosystem, Box<dyn Installer>)>,
+    verbose: bool,
+    on_missing_installer: MissingInstallerPolicy,
+) -> anyhow::Result<()> {
     let requested: Vec<Ecosystem> = tasks.iter().map(|(e, _)| *e).collect();
 
     let outcomes = provision_with_timing(tasks).await;
@@ -112,6 +107,15 @@ async fn run_provisioning(ecosystems: Vec<Ecosystem>, verbose: bool) -> anyhow::
             );
         }
         if let Err(err) = &outcome.result {
+            if on_missing_installer == MissingInstallerPolicy::Skip
+                && let Some(missing) = err.downcast_ref::<paws_provision::MissingInstaller>()
+            {
+                eprintln!(
+                    "provision: skipping {} — {missing} (the build itself runs in a container)",
+                    ecosystem.as_str()
+                );
+                continue;
+            }
             failures.push(format!("{}: {err}", ecosystem.as_str()));
         }
     }
@@ -246,13 +250,18 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
         println!("ci: building {}", source_dir.display());
     }
 
-    // FR-015: provisioning must go through the same concurrent path as
-    // `paws provision`, never a sequential loop, whenever the target
-    // repo needs more than one ecosystem.
-    let needed = detect_needed_ecosystems(&source_dir);
-    if needed.len() > 1 {
-        run_provisioning(needed, verbose).await?;
-    }
+    // Provision for the toolchain that was actually asked for, and nothing
+    // else. Detecting ecosystems from marker files instead meant a polyglot
+    // repo (a Cargo.toml next to a pyproject.toml) provisioned Python for a
+    // `--toolchain rust` build, and a runner without `uv` then failed the
+    // Rust build before it started. FR-015 still holds: this goes through
+    // `provision_with_timing`, the same concurrent path `paws provision`
+    // uses, rather than a loop of its own.
+    let needed: Vec<Ecosystem> = toolchain
+        .and_then(Ecosystem::for_toolchain)
+        .into_iter()
+        .collect();
+    run_provisioning(needed, verbose, MissingInstallerPolicy::Skip).await?;
 
     // Resolve the toolchain version once, here, so every `ci_*` below builds
     // against the same answer and the log names where it came from.
@@ -1589,7 +1598,7 @@ pub async fn run_provision(args: ProvisionArgs) -> anyhow::Result<()> {
         .iter()
         .map(|t| t.parse::<Ecosystem>())
         .collect::<anyhow::Result<Vec<_>>>()?;
-    run_provisioning(ecosystems, verbose).await?;
+    run_provisioning(ecosystems, verbose, MissingInstallerPolicy::Fail).await?;
     println!("provision: all requested toolchains provisioned successfully");
     Ok(())
 }
@@ -3168,50 +3177,61 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn ecosystems_are_detected_in_the_directory_given_not_the_process_one() {
-        let root = scratch("detect");
-        std::fs::write(root.join("Cargo.toml"), "").unwrap();
-        let web = root.join("web");
-        std::fs::create_dir_all(&web).unwrap();
-        std::fs::write(web.join("package.json"), "{}").unwrap();
+    fn missing_installer(program: &'static str) -> Box<dyn Installer> {
+        Box::new(move || async move {
+            Err(anyhow::Error::new(paws_provision::MissingInstaller {
+                program: program.to_string(),
+            }))
+        })
+    }
 
-        // This is the monorepo case: --source web must provision for node,
-        // not for the rust project at the repo root.
-        assert_eq!(detect_needed_ecosystems(&root), vec![Ecosystem::Rust]);
-        assert_eq!(detect_needed_ecosystems(&web), vec![Ecosystem::Node]);
+    #[tokio::test]
+    async fn ci_carries_on_when_an_installer_binary_is_absent() {
+        // `paws ci` builds inside Dagger containers, so a runner without
+        // `uv` on PATH is not a reason to fail before the build starts.
+        let tasks: Vec<(Ecosystem, Box<dyn Installer>)> =
+            vec![(Ecosystem::Python, missing_installer("uv"))];
 
-        std::fs::remove_dir_all(&root).ok();
+        provision_and_report(tasks, false, MissingInstallerPolicy::Skip)
+            .await
+            .expect("a missing installer binary must not fail `paws ci`");
+    }
+
+    #[tokio::test]
+    async fn provision_still_fails_when_an_installer_binary_is_absent() {
+        // `paws provision` was asked to install the thing; silently doing
+        // nothing and reporting success would be a lie.
+        let tasks: Vec<(Ecosystem, Box<dyn Installer>)> =
+            vec![(Ecosystem::Python, missing_installer("uv"))];
+
+        let err = provision_and_report(tasks, false, MissingInstallerPolicy::Fail)
+            .await
+            .expect_err("`paws provision` must fail when it cannot install");
+        assert!(err.to_string().contains("python"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_real_install_failure_fails_ci_even_under_the_skip_policy() {
+        let tasks: Vec<(Ecosystem, Box<dyn Installer>)> = vec![(
+            Ecosystem::Rust,
+            Box::new(|| async { anyhow::bail!("rustup exploded") }),
+        )];
+
+        let err = provision_and_report(tasks, false, MissingInstallerPolicy::Skip)
+            .await
+            .expect_err("only a missing binary is skipped, not a failed install");
+        assert!(err.to_string().contains("rustup exploded"), "got: {err}");
     }
 
     #[test]
-    fn a_polyglot_directory_detects_every_ecosystem_present() {
-        let dir = scratch("polyglot");
-        for marker in ["Cargo.toml", "package.json", "pyproject.toml", "go.mod"] {
-            std::fs::write(dir.join(marker), "").unwrap();
-        }
-
-        // Order follows `paws_core::TOOLCHAINS`, which is also the order
-        // `--toolchain`'s help lists them in. It carries no meaning for
-        // provisioning itself — `provision_with_timing` runs every ecosystem
-        // as an independent task with no ordering between them (FR-013).
+    fn ci_provisions_only_the_requested_toolchain() {
+        // The hammock regression: a repo with both a Cargo.toml and a
+        // pyproject.toml used to provision Python for a `--toolchain rust`
+        // build, so a runner without `uv` failed the Rust build outright.
         assert_eq!(
-            detect_needed_ecosystems(&dir),
-            vec![
-                Ecosystem::Node,
-                Ecosystem::Rust,
-                Ecosystem::Python,
-                Ecosystem::Go
-            ]
+            Ecosystem::for_toolchain(Toolchain::Rust),
+            Some(Ecosystem::Rust)
         );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn an_empty_directory_needs_no_provisioning() {
-        let dir = scratch("empty");
-        assert!(detect_needed_ecosystems(&dir).is_empty());
-        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(Ecosystem::for_toolchain(Toolchain::Ruby), None);
     }
 }
