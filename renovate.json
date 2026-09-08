@@ -1,37 +1,123 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended"],
+  "extends": [
+    "config:recommended"
+  ],
+  "timezone": "America/Los_Angeles",
+  "dependencyDashboard": true,
+  "configMigration": true,
+  "labels": [
+    "dependencies"
+  ],
+  "ignorePaths": [
+    "examples/**"
+  ],
+  "description": [
+    "`examples/**` is ignored deliberately, and it is the most load-bearing line in this file. Renovate's own default ignorePaths is only `**/node_modules/**` and `**/bower_components/**` -- read directly out of lib/config/options/index.ts in renovatebot/renovate rather than assumed from older docs that also listed examples/test/fixtures. Without this line Renovate would manage 46 manifests under examples/: 16 package.json, 7 Cargo.toml, 6 .gradle, 4 go.mod, 4 Dockerfile, 4 gradle-wrapper.properties, 4 .gradle.kts, 2 .csproj, plus composer.json, Gemfile and mix.exs.",
+    "Those are not dependencies paws ships. They are fixture projects whose entire job is to be a realistic, stable target for `paws ci` to build, and several are unmodified upstream scaffolds (`npm create vite`, `create-next-app`, `dotnet new xunit`, `create-playwright`) kept exactly as the generator emitted them -- which is the property that makes them evidence rather than decoration. Bumping their dependencies would churn dozens of PRs, break that as-scaffolded guarantee, and turn an unrelated upstream release into a red CI leg on paws's own PRs.",
+    "Fixtures are still exercised on every PR by ci.yaml's ci-e2e/ci-e2e-languages jobs, so one that genuinely rots gets caught there instead of silently."
+  ],
+  "minimumReleaseAge": "3 days",
+  "platformAutomerge": true,
+  "lockFileMaintenance": {
+    "description": "Refresh Cargo.lock's transitive tree on a schedule, not only when a direct dependency happens to move -- paws ships prebuilt binaries built from this lockfile, so 'nothing in Cargo.toml changed' is not the same as 'the shipped binary's dependency tree is current'. Automerged, since a refresh that breaks anything fails `build, test, lint` before it can land.",
+    "enabled": true,
+    "schedule": [
+      "before 6am on monday"
+    ],
+    "automerge": true
+  },
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "description": "Security fixes bypass both the weekly batching and minimumReleaseAge -- waiting 3 days to dodge a yanked release is the right trade for a routine bump and exactly the wrong one for a known CVE.",
+    "labels": [
+      "dependencies",
+      "security"
+    ],
+    "schedule": [
+      "at any time"
+    ],
+    "minimumReleaseAge": null,
+    "automerge": false
+  },
   "packageRules": [
     {
-      "matchUpdateTypes": ["minor", "patch"],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
       "matchCurrentVersion": "!/^0/",
-      "automerge": true
+      "automerge": true,
+      "description": "Routine minor/patch updates automerge once CI passes. `!/^0/` keeps 0.x dependencies out of it: a 0.x minor bump carries no semver compatibility promise at all, so those stay a human decision."
     },
     {
-      "matchUpdateTypes": ["major"],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "Base images for ./builders/* never automerge, whatever the version bump looks like. These are what `paws release`'s matrix builds the published binaries with, and what `paws ci --toolchain java/kotlin/tauri/flatpak/esp32` builds user projects against -- a bad one breaks releases rather than just a test, and a container tag's version string says little about how much moved underneath it. Placed after the minor/patch rule deliberately: later rules win, so this re-disables automerge for exactly these.",
+      "matchManagers": [
+        "dockerfile",
+        "docker-compose"
+      ],
       "automerge": false
     },
     {
       "description": "eclipse-temurin (builders/java's JDK 21 + JDK 25 pair, shared by paws-java/paws-kotlin) needs a deliberate look before bumping either FROM line, not an automatic merge -- confirmed for real that Gradle <=8.10 can't even launch on a JDK-25 host JVM at all, and that a real project's `java.toolchain.languageVersion` requirement needs the specific JDK installed, not just \"newer\" (see builders/java/Dockerfile's header comment).",
-      "matchDepNames": ["eclipse-temurin"],
+      "matchDepNames": [
+        "eclipse-temurin"
+      ],
       "automerge": false
     },
     {
       "description": "The .NET SDK pin (crates/paws-dotnet's DEFAULT_DOTNET_SDK_VERSION) tracks the current LTS, not simply the newest major -- .NET alternates LTS (even majors, 3 years) and STS (odd majors, 18 months), so a bump onto an STS release is a downgrade in supportability and needs a human's call. Same reasoning as the eclipse-temurin rule above.",
-      "matchDepNames": ["mcr.microsoft.com/dotnet/sdk"],
+      "matchDepNames": [
+        "mcr.microsoft.com/dotnet/sdk"
+      ],
       "automerge": false
     },
     {
       "description": "The OTP major behind crates/paws-elixir's BASE_IMAGE. NIF/native dependencies and Erlang-level behavior change across OTP majors in ways Elixir's own releases don't, so this is a deliberate bump, never an automatic one.",
-      "matchDepNames": ["erlang"],
+      "matchDepNames": [
+        "erlang"
+      ],
       "automerge": false
+    },
+    {
+      "description": "Batch Rust dependency churn into one weekly PR instead of one per crate. The workspace pulls a wide tree (tokio, reqwest, clap, serde, schemars, rmcp) and every separate PR re-runs the whole CI gate, Dagger e2e included, usually for a patch bump.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "cargo dependencies",
+      "schedule": [
+        "before 6am on monday"
+      ]
+    },
+    {
+      "description": "The Actions used by ci.yaml/release.yaml/tag-manager.yaml, grouped for the same reason.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "github actions"
     }
   ],
   "customManagers": [
     {
       "customType": "regex",
       "description": "paws-python's astral/uv base image tag encodes the pinned Python minor version (crates/paws-python/src/lib.rs's DEFAULT_PYTHON_VERSION doc comment: CPython has no self-updating \"latest\"/LTS tag the way node:lts-trixie does, so this is a real pin needing a real bump when a new Python minor ships). Matched against pipeline_uses_the_default_python_image's assertion specifically (anchored by function name, not just the tag shape) -- the production constant only holds the bare \"3.13\" fragment `format!` interpolates into it, and a second test (pipeline_respects_an_explicit_python_version) asserts an unrelated, deliberately-non-default \"3.11\" literal in the exact same shape that must NOT be tracked as a dependency to bump.",
-      "managerFilePatterns": ["/^crates/paws-python/src/lib\\.rs$/"],
+      "managerFilePatterns": [
+        "/^crates/paws-python/src/lib\\.rs$/"
+      ],
       "matchStrings": [
         "fn pipeline_uses_the_default_python_image\\(\\) \\{[\\s\\S]*?--address=(?<depName>astral/uv):python(?<currentValue>[0-9.]+)-trixie-slim"
       ],
@@ -41,7 +127,9 @@
     {
       "customType": "regex",
       "description": "paws-provision's install_go installer pins a real Go release (crates/paws-provision/src/lib.rs's DEFAULT_GO_VERSION doc comment: golang.org/dl's per-version install mechanism has no floating \"latest\" alias the way rustup's \"stable\"/corepack's \"pnpm@latest\" do).",
-      "managerFilePatterns": ["/^crates/paws-provision/src/lib\\.rs$/"],
+      "managerFilePatterns": [
+        "/^crates/paws-provision/src/lib\\.rs$/"
+      ],
       "matchStrings": [
         "pub const DEFAULT_GO_VERSION: &str = \"(?<currentValue>[0-9.]+)\";"
       ],
@@ -51,7 +139,9 @@
     {
       "customType": "regex",
       "description": "paws-dotnet's SDK image tag (crates/paws-dotnet/src/lib.rs's DEFAULT_DOTNET_SDK_VERSION): mcr.microsoft.com/dotnet/sdk publishes a floating per-major tag, but no \"current LTS\" alias -- `latest` follows STS releases too -- so the major is a real pin needing a real bump each LTS. The bare constant is matched rather than an image address, since it only holds the \"10.0\" fragment `format!` interpolates into one (and a test in the same file asserts a deliberately-non-default \"9.0\" literal that must NOT be tracked, the same trap paws-python's manager above works around).",
-      "managerFilePatterns": ["/^crates/paws-dotnet/src/lib\\.rs$/"],
+      "managerFilePatterns": [
+        "/^crates/paws-dotnet/src/lib\\.rs$/"
+      ],
       "matchStrings": [
         "pub const DEFAULT_DOTNET_SDK_VERSION: &str = \"(?<currentValue>[0-9.]+)\";"
       ],
@@ -61,7 +151,9 @@
     {
       "customType": "regex",
       "description": "The OTP major in paws-elixir's base image (crates/paws-elixir/src/lib.rs's BASE_IMAGE, `elixir:otp-<major>`). That tag floats the Elixir version deliberately, so only the OTP half is a dependency to track; it resolves against the official `erlang` image's own major tags, since the `elixir` image's `otp-N` tags carry no comparable version for Renovate to order.",
-      "managerFilePatterns": ["/^crates/paws-elixir/src/lib\\.rs$/"],
+      "managerFilePatterns": [
+        "/^crates/paws-elixir/src/lib\\.rs$/"
+      ],
       "matchStrings": [
         "pub const BASE_IMAGE: &str = \"elixir:otp-(?<currentValue>[0-9]+)\";"
       ],
