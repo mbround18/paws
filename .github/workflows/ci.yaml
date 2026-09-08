@@ -98,6 +98,18 @@ jobs:
         working-directory: examples/python-fixture
         run: ../../target/debug/paws ci --toolchain python
 
+      # A project with no pytest and no tests must build and skip the test
+      # step, not fail on a tool it never asked for. Asserting the message
+      # (not just the exit code) keeps a silently-skipped real test suite
+      # from passing this leg too.
+      - name: paws ci --toolchain python, no tests (examples/python-no-tests-fixture)
+        working-directory: examples/python-no-tests-fixture
+        run: |
+          set -euo pipefail
+          output="$(../../target/debug/paws ci --toolchain python)"
+          echo "$output"
+          grep -q "no tests to run" <<<"$output"
+
       # specs/004-rust-coverage/quickstart.md §4: proves cargo llvm-cov
       # measures a real gap (examples/rust-coverage-fixture has one
       # deliberately untested branch), not just running and reporting a

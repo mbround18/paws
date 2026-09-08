@@ -412,6 +412,19 @@ async fn ci_python(
         },
         dir.display()
     );
+    match project.test_plan() {
+        paws_python::TestPlan::Run => {}
+        // Caught here rather than by the pipeline's own `uv run pytest`,
+        // which only fails after a full sync and build have already run.
+        paws_python::TestPlan::MissingPytest => anyhow::bail!(
+            "this project has tests but nothing installs pytest — add it to \
+             pyproject.toml's [dependency-groups] (e.g. `dev = [\"pytest\"]`) so \
+             `uv sync --all-groups` puts it on PATH"
+        ),
+        paws_python::TestPlan::Skip => println!(
+            "ci: no pytest declared and no tests found — building only, skipping the test step"
+        ),
+    }
     let args = image.map_or_else(
         || paws_python::dagger_pipeline_args(&project, &dir.to_string_lossy()),
         |image| {
@@ -419,7 +432,11 @@ async fn ci_python(
         },
     );
     run_dagger_core(&args, silent).await?;
-    println!("ci: python build/test succeeded");
+    if project.test_plan() == paws_python::TestPlan::Run {
+        println!("ci: python build/test succeeded");
+    } else {
+        println!("ci: python build succeeded (no tests to run)");
+    }
     Ok(())
 }
 

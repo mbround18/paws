@@ -168,7 +168,13 @@ pytest` against `astral/uv:python<version>-trixie-slim`, a plain `container from
   dedicated `builders/*` Dockerfile needed, unlike Tauri). `uv`-based projects only
   (`pyproject.toml`) — that's what `gh-reusable` actually supports, no poetry/pipenv/pip path
   exists there to port. `--frozen` is only passed when `uv.lock` is committed, the same
-  lockfile-optional-install fix `paws-node` needed for `npm ci`.
+  lockfile-optional-install fix `paws-node` needed for `npm ci`. The `pytest` step is
+  conditional (`PythonProject::test_plan`) — `gh-reusable` ran it unconditionally, which fails
+  any project that doesn't use pytest with ``Failed to spawn: `pytest` `` after a full sync and
+  build. A project that declares pytest runs it; one with neither pytest nor tests builds and
+  skips the step (`examples/python-no-tests-fixture`); one with tests but no declared pytest is
+  an error raised before the container is built, since that combination is a mistake, not a
+  project without tests.
 - `crates/paws-ruby`, `crates/paws-php`, `crates/paws-dotnet`, `crates/paws-elixir` — the
   Ruby/PHP/.NET/Elixir toolchains behind `paws ci --toolchain ruby`/`php`/`dotnet`/`elixir`. Each
   is a detect-then-build-an-argument-list crate in the same shape as `paws-python`/`paws-go` (no
