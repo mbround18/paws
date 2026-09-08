@@ -5,6 +5,7 @@
 //! whatever a given repo actually uses (docs/ROADMAP.md's "Node is
 //! pnpm-specific today" gap).
 
+use paws_core::Pipeline;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -19,12 +20,12 @@ pub enum PackageManager {
 }
 
 impl PackageManager {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            PackageManager::Npm => "npm",
-            PackageManager::Yarn => "yarn",
-            PackageManager::Pnpm => "pnpm",
-            PackageManager::Bun => "bun",
+            Self::Npm => "npm",
+            Self::Yarn => "yarn",
+            Self::Pnpm => "pnpm",
+            Self::Bun => "bun",
         }
     }
 
@@ -36,16 +37,16 @@ impl PackageManager {
     /// bare `package.json` with neither.
     pub fn detect(dir: &Path) -> Result<Self> {
         if dir.join("bun.lockb").is_file() || dir.join("bun.lock").is_file() {
-            return Ok(PackageManager::Bun);
+            return Ok(Self::Bun);
         }
         if dir.join("pnpm-lock.yaml").is_file() {
-            return Ok(PackageManager::Pnpm);
+            return Ok(Self::Pnpm);
         }
         if dir.join("yarn.lock").is_file() {
-            return Ok(PackageManager::Yarn);
+            return Ok(Self::Yarn);
         }
         if dir.join("package-lock.json").is_file() {
-            return Ok(PackageManager::Npm);
+            return Ok(Self::Npm);
         }
 
         let package_json_path = dir.join("package.json");
@@ -57,26 +58,26 @@ impl PackageManager {
         if let Some(spec) = package_json.get("packageManager").and_then(|v| v.as_str()) {
             let name = spec.split('@').next().unwrap_or(spec);
             return match name {
-                "npm" => Ok(PackageManager::Npm),
-                "yarn" => Ok(PackageManager::Yarn),
-                "pnpm" => Ok(PackageManager::Pnpm),
-                "bun" => Ok(PackageManager::Bun),
+                "npm" => Ok(Self::Npm),
+                "yarn" => Ok(Self::Yarn),
+                "pnpm" => Ok(Self::Pnpm),
+                "bun" => Ok(Self::Bun),
                 other => anyhow::bail!("unrecognized packageManager field: {other}"),
             };
         }
 
-        Ok(PackageManager::Npm)
+        Ok(Self::Npm)
     }
 
     /// The lockfile name(s) this package manager reads. `Bun` has used both
     /// a binary (`bun.lockb`) and, more recently, a text (`bun.lock`) format
     /// across versions, so both are recognized.
-    pub fn lockfile_names(&self) -> &'static [&'static str] {
+    pub const fn lockfile_names(&self) -> &'static [&'static str] {
         match self {
-            PackageManager::Npm => &["package-lock.json"],
-            PackageManager::Yarn => &["yarn.lock"],
-            PackageManager::Pnpm => &["pnpm-lock.yaml"],
-            PackageManager::Bun => &["bun.lockb", "bun.lock"],
+            Self::Npm => &["package-lock.json"],
+            Self::Yarn => &["yarn.lock"],
+            Self::Pnpm => &["pnpm-lock.yaml"],
+            Self::Bun => &["bun.lockb", "bun.lock"],
         }
     }
 
@@ -89,23 +90,23 @@ impl PackageManager {
     /// install variant instead, which is happy to create one.
     pub fn install_args(&self, has_lockfile: bool) -> Vec<&'static str> {
         match (self, has_lockfile) {
-            (PackageManager::Npm, true) => vec!["npm", "ci"],
-            (PackageManager::Npm, false) => vec!["npm", "install"],
-            (PackageManager::Yarn, true) => vec!["yarn", "install", "--frozen-lockfile"],
-            (PackageManager::Yarn, false) => vec!["yarn", "install"],
-            (PackageManager::Pnpm, true) => vec!["pnpm", "install", "--frozen-lockfile"],
-            (PackageManager::Pnpm, false) => vec!["pnpm", "install"],
-            (PackageManager::Bun, true) => vec!["bun", "install", "--frozen-lockfile"],
-            (PackageManager::Bun, false) => vec!["bun", "install"],
+            (Self::Npm, true) => vec!["npm", "ci"],
+            (Self::Npm, false) => vec!["npm", "install"],
+            (Self::Yarn, true) => vec!["yarn", "install", "--frozen-lockfile"],
+            (Self::Yarn, false) => vec!["yarn", "install"],
+            (Self::Pnpm, true) => vec!["pnpm", "install", "--frozen-lockfile"],
+            (Self::Pnpm, false) => vec!["pnpm", "install"],
+            (Self::Bun, true) => vec!["bun", "install", "--frozen-lockfile"],
+            (Self::Bun, false) => vec!["bun", "install"],
         }
     }
 
     pub fn run_script_args(&self, script: &str) -> Vec<String> {
         match self {
-            PackageManager::Npm => vec!["npm".to_string(), "run".to_string(), script.to_string()],
-            PackageManager::Yarn => vec!["yarn".to_string(), "run".to_string(), script.to_string()],
-            PackageManager::Pnpm => vec!["pnpm".to_string(), "run".to_string(), script.to_string()],
-            PackageManager::Bun => vec!["bun".to_string(), "run".to_string(), script.to_string()],
+            Self::Npm => vec!["npm".to_string(), "run".to_string(), script.to_string()],
+            Self::Yarn => vec!["yarn".to_string(), "run".to_string(), script.to_string()],
+            Self::Pnpm => vec!["pnpm".to_string(), "run".to_string(), script.to_string()],
+            Self::Bun => vec!["bun".to_string(), "run".to_string(), script.to_string()],
         }
     }
 
@@ -115,8 +116,8 @@ impl PackageManager {
     /// expected to already have it (see [`base_image`]).
     pub fn setup_args(&self) -> Option<Vec<&'static str>> {
         match self {
-            PackageManager::Yarn | PackageManager::Pnpm => Some(vec!["corepack", "enable"]),
-            PackageManager::Npm | PackageManager::Bun => None,
+            Self::Yarn | Self::Pnpm => Some(vec!["corepack", "enable"]),
+            Self::Npm | Self::Bun => None,
         }
     }
 
@@ -131,10 +132,10 @@ impl PackageManager {
     /// LTS releases, the same way `oven/bun:1-debian`/`golang:1-bookworm`/
     /// `rust:1-bookworm` already float to "latest" for ecosystems with no
     /// LTS concept to track in the first place.
-    pub fn base_image(&self) -> &'static str {
+    pub const fn base_image(&self) -> &'static str {
         match self {
-            PackageManager::Npm | PackageManager::Yarn | PackageManager::Pnpm => "node:lts-trixie",
-            PackageManager::Bun => "oven/bun:1-debian",
+            Self::Npm | Self::Yarn | Self::Pnpm => "node:lts-trixie",
+            Self::Bun => "oven/bun:1-debian",
         }
     }
 }
@@ -147,11 +148,11 @@ pub enum Framework {
 }
 
 impl Framework {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            Framework::Vite => "vite",
-            Framework::NextJs => "next.js",
-            Framework::Plain => "plain",
+            Self::Vite => "vite",
+            Self::NextJs => "next.js",
+            Self::Plain => "plain",
         }
     }
 
@@ -173,24 +174,24 @@ impl Framework {
         // React/other Vite-adjacent tooling, but "next" itself is the
         // unambiguous signal a plain "react" or "vite" dependency isn't.
         if has_dep("next") {
-            return Framework::NextJs;
+            return Self::NextJs;
         }
         if has_dep("vite") {
-            return Framework::Vite;
+            return Self::Vite;
         }
 
         for config in ["next.config.js", "next.config.mjs", "next.config.ts"] {
             if dir.join(config).is_file() {
-                return Framework::NextJs;
+                return Self::NextJs;
             }
         }
         for config in ["vite.config.js", "vite.config.ts", "vite.config.mjs"] {
             if dir.join(config).is_file() {
-                return Framework::Vite;
+                return Self::Vite;
             }
         }
 
-        Framework::Plain
+        Self::Plain
     }
 }
 
@@ -301,52 +302,26 @@ pub fn detect_project(dir: &Path) -> Result<NodeProject> {
 /// a real `dagger`/container engine.
 pub fn dagger_pipeline_args(project: &NodeProject, source_dir: &str) -> Vec<String> {
     let pm = project.package_manager;
-    let mut args: Vec<String> = vec![
-        "container".into(),
-        "from".into(),
-        format!("--address={}", pm.base_image()),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={source_dir}"),
-        "with-workdir".into(),
-        "--path=/src".into(),
-    ];
-
-    let mut push_exec = |command_args: Vec<String>| {
-        args.push("with-exec".into());
-        args.push(format!("--args={}", command_args.join(",")));
-    };
+    let mut pipeline = Pipeline::from_image(pm.base_image())
+        .mount("/src", source_dir)
+        .workdir("/src");
 
     if let Some(setup) = pm.setup_args() {
-        push_exec(setup.iter().map(|s| s.to_string()).collect());
+        pipeline = pipeline.exec(setup);
     }
-    push_exec(
-        pm.install_args(project.has_lockfile)
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    );
-    if project.has_build_script {
-        push_exec(pm.run_script_args("build"));
-    }
-    if project.has_test_script {
-        push_exec(pm.run_script_args("test"));
-    }
-    if project.has_lint_script {
-        push_exec(pm.run_script_args("lint"));
-    }
+    pipeline = pipeline
+        .exec(pm.install_args(project.has_lockfile))
+        .exec_if(project.has_build_script, pm.run_script_args("build"))
+        .exec_if(project.has_test_script, pm.run_script_args("test"))
+        .exec_if(project.has_lint_script, pm.run_script_args("lint"));
+
     if project.has_playwright {
-        push_exec(vec![
-            "npx".into(),
-            "playwright".into(),
-            "install".into(),
-            "--with-deps".into(),
-        ]);
-        push_exec(vec!["npx".into(), "playwright".into(), "test".into()]);
+        pipeline = pipeline
+            .exec(["npx", "playwright", "install", "--with-deps"])
+            .exec(["npx", "playwright", "test"]);
     }
 
-    args.push("stdout".into());
-    args
+    pipeline.stdout()
 }
 
 #[cfg(test)]
@@ -355,11 +330,7 @@ mod tests {
     use std::fs;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("paws-node-test-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        paws_core::test_support::scratch_dir("node", name)
     }
 
     #[test]
@@ -443,7 +414,7 @@ mod tests {
 
     #[test]
     fn detects_vite_from_config_file_when_no_dependency_listed() {
-        let json: Value = serde_json::from_str(r#"{}"#).unwrap();
+        let json: Value = serde_json::from_str(r"{}").unwrap();
         let dir = temp_dir("vite-config");
         fs::write(dir.join("vite.config.ts"), "export default {}").unwrap();
         assert_eq!(Framework::detect(&json, &dir), Framework::Vite);

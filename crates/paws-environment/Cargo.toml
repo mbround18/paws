@@ -3,6 +3,13 @@ name = "paws-environment"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+# paws ships as a binary, not as crates on crates.io. Marking it explicitly
+# keeps an accidental `cargo publish` from succeeding, and lets `cargo deny`
+# treat the intra-workspace `path` dependencies as the private edges they are.
+publish = false
+
+[lints]
+workspace = true
 
 [dependencies]
 anyhow.workspace = true

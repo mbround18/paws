@@ -39,9 +39,10 @@
 //!    flow (e.g. `mbround18/oled-wallpaper`'s own `release.yml`) should
 //!    keep doing that itself for now, not route through `paws-flatpak`.
 
+use paws_core::Pipeline;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 /// The Flatpak builder Dockerfile, embedded at compile time from
 /// `builders/flatpak/Dockerfile`. `paws ci` runs from inside whatever
@@ -55,12 +56,7 @@ const FLATPAK_DOCKERFILE: &str = include_str!("../../../builders/flatpak/Dockerf
 /// returns that directory's path, suitable for `dagger_pipeline_args`'s
 /// `builder_dir` argument.
 pub fn write_builder_dockerfile() -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join("paws-builders").join("flatpak");
-    std::fs::create_dir_all(&dir)
-        .context("failed to create temp dir for the flatpak builder Dockerfile")?;
-    std::fs::write(dir.join("Dockerfile"), FLATPAK_DOCKERFILE)
-        .context("failed to write the flatpak builder Dockerfile")?;
-    Ok(dir)
+    paws_core::write_builder_dockerfile("flatpak", FLATPAK_DOCKERFILE)
 }
 
 /// Common locations a Flatpak manifest lives in a real repo, checked in
@@ -69,6 +65,7 @@ pub fn write_builder_dockerfile() -> Result<PathBuf> {
 /// the next most common conventions.
 const MANIFEST_SEARCH_DIRS: &[&str] = &["packaging/flatpak", "flatpak", "."];
 
+#[derive(Debug, Clone)]
 pub struct FlatpakProject {
     pub manifest_path: PathBuf,
     pub app_id: String,
@@ -154,31 +151,21 @@ pub fn dagger_pipeline_args(
     source_dir: &str,
     builder_dir: &str,
 ) -> Vec<String> {
-    let created_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let build_args =
-        format!("BUILDER_VERSION=dev,BUILDER_REVISION=unknown,BUILDER_CREATED={created_unix}");
-
     let manifest_relative = project.manifest_path.to_string_lossy();
 
-    vec![
-        "host".into(),
-        "directory".into(),
-        format!("--path={builder_dir}"),
-        "docker-build".into(),
-        format!("--build-args={build_args}"),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={source_dir}"),
-        "with-workdir".into(),
-        "--path=/src".into(),
-        "with-exec".into(),
-        "--insecure-root-capabilities".into(),
-        format!("--args=flatpak-builder,--build-only,--force-clean,build-dir,{manifest_relative}"),
-        "stdout".into(),
-    ]
+    Pipeline::from_builder_image(builder_dir)
+        .mount("/src", source_dir)
+        .workdir("/src")
+        // Root inside the container: flatpak-builder's own sandboxed build is
+        // FUSE-backed, and a bare device flag isn't enough (verified directly).
+        .exec_as_root([
+            "flatpak-builder",
+            "--build-only",
+            "--force-clean",
+            "build-dir",
+            &manifest_relative,
+        ])
+        .stdout()
 }
 
 #[cfg(test)]
@@ -187,11 +174,7 @@ mod tests {
     use std::fs;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("paws-flatpak-test-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        paws_core::test_support::scratch_dir("flatpak", name)
     }
 
     #[test]

@@ -432,3 +432,6 @@ builders/macos/*.sdk.tar.xz
 # the local/session-ish paths are excluded here, not all of .claude/.
 .claude/settings.local.json
 .claude/*.session*
+
+# Generated knowledge-graph output (`/graphify`), not source.
+graphify-out/

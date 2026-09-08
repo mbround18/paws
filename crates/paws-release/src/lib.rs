@@ -6,7 +6,7 @@
 //! `dagger core <chain>` pipelines against `./builders/*` Dockerfiles) —
 //! never a direct `docker`/`cross` spawn. That keeps `paws-dagger` the single
 //! seam that talks to a container engine, gives every build Dagger's own
-//! BuildKit layer caching for free, and means a user running `paws release`
+//! `BuildKit` layer caching for free, and means a user running `paws release`
 //! only ever needs the `dagger` CLI, not Docker/`cross`/QEMU/Wine set up
 //! independently — Dagger's own `--platform` support covers cross-arch
 //! execution (backed by the host's QEMU `binfmt_misc` registration), and a
@@ -127,7 +127,7 @@ const GENERIC_LINUX_GNU_DOCKERFILE: &str = include_str!("../../../builders/linux
 /// [`GENERIC_LINUX_GNU_DOCKERFILE`] actually has a toolchain for. Deliberately
 /// narrow (linux-gnu only, no macOS/Windows) — a generic cross matrix is
 /// speculative until a second target repo actually needs it.
-pub fn local_build_targets() -> &'static [&'static str] {
+pub const fn local_build_targets() -> &'static [&'static str] {
     &["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 }
 
@@ -159,6 +159,7 @@ pub fn archive_name(binary_name: &str, version: &str, target: &str) -> String {
 }
 
 /// Inputs for [`build_binary`].
+#[derive(Debug, Clone, Copy)]
 pub struct BuildRequest<'a> {
     pub builder_dir: &'a str,
     /// Host path to the source tree to build (mounted read-write at `/src`).
@@ -187,6 +188,46 @@ pub fn prebuilt_image_candidate(builder_dir: &str, version: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or(builder_dir);
     format!("ghcr.io/mbround18/paws-builders:{name}-{version}")
+}
+
+/// Builds the `dagger core` chain that cross-compiles one release target and
+/// exports the binary — split out as a pure function so the step *order* is
+/// testable without a Dagger engine.
+///
+/// That order is load-bearing: `rustup target add` must run before `cargo
+/// build`. The builder images add their targets at image-build time, bound to
+/// that image's toolchain, so a source tree containing a `rust-toolchain.toml`
+/// makes rustup switch to the toolchain that file names — one with no targets
+/// installed — and the build fails with an `error[E0463]` naming a missing
+/// `core` crate, which reads like a broken image rather than a missing target.
+/// Installing it here fixes it for any consumer repo that pins its toolchain,
+/// which is a case `paws` explicitly supports.
+fn cross_build_pipeline_args(
+    prebuilt: &str,
+    request: &BuildRequest<'_>,
+    container_bin_path: &str,
+    host_out_path: &str,
+) -> Vec<String> {
+    paws_core::Pipeline::from_image(prebuilt)
+        .mount("/src", request.source_dir)
+        .workdir("/src")
+        .exec(["rustup", "target", "add", request.triple])
+        .exec([
+            "cargo",
+            "build",
+            "--release",
+            "--target",
+            request.triple,
+            "-p",
+            request.package,
+        ])
+        .raw(vec![
+            "file".into(),
+            format!("--path={container_bin_path}"),
+            "export".into(),
+            format!("--path={host_out_path}"),
+        ])
+        .into_args()
 }
 
 /// Pulls the prebuilt builder image ([`prebuilt_image_candidate`]) —
@@ -225,28 +266,12 @@ pub async fn build_binary(request: &BuildRequest<'_>) -> Result<PathBuf> {
         );
     }
 
-    let mut args: Vec<String> = vec![
-        "container".into(),
-        "from".into(),
-        format!("--address={prebuilt}"),
-    ];
-
-    args.extend([
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={}", request.source_dir),
-        "with-workdir".into(),
-        "--path=/src".into(),
-        "with-exec".into(),
-        format!(
-            "--args=cargo,build,--release,--target,{},-p,{}",
-            request.triple, request.package
-        ),
-        "file".into(),
-        format!("--path={container_bin_path}"),
-        "export".into(),
-        format!("--path={}", out_path.display()),
-    ]);
+    let args = cross_build_pipeline_args(
+        &prebuilt,
+        request,
+        &container_bin_path,
+        &out_path.to_string_lossy(),
+    );
 
     paws_dagger::core(&args)
         .await
@@ -288,26 +313,30 @@ pub async fn build_binary_local(
         .context("failed to create release output directory")?;
     let out_path = out_dir.join(&file_name);
 
-    let args: Vec<String> = vec![
-        "host".into(),
-        "directory".into(),
-        format!("--path={}", local_builder_dir.display()),
-        "docker-build".into(),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={}", request.source_dir),
-        "with-workdir".into(),
-        "--path=/src".into(),
-        "with-exec".into(),
-        format!(
-            "--args=cargo,build,--release,--target,{},-p,{}",
-            request.triple, request.package
-        ),
-        "file".into(),
-        format!("--path={container_bin_path}"),
-        "export".into(),
-        format!("--path={}", out_path.display()),
-    ];
+    // Same `rustup target add` ordering as `cross_build_pipeline_args` — see
+    // its doc comment. This path builds the Dockerfile locally rather than
+    // pulling a prebuilt image, but the toolchain-override problem is
+    // identical.
+    let args = paws_core::Pipeline::from_host_dockerfile(&local_builder_dir.to_string_lossy())
+        .mount("/src", request.source_dir)
+        .workdir("/src")
+        .exec(["rustup", "target", "add", request.triple])
+        .exec([
+            "cargo",
+            "build",
+            "--release",
+            "--target",
+            request.triple,
+            "-p",
+            request.package,
+        ])
+        .raw(vec![
+            "file".into(),
+            format!("--path={container_bin_path}"),
+            "export".into(),
+            format!("--path={}", out_path.display()),
+        ])
+        .into_args();
 
     paws_dagger::core(&args)
         .await
@@ -382,6 +411,24 @@ pub async fn package_zip(working_dir: &Path, archive_path: &Path, files: &[Strin
     Ok(())
 }
 
+/// Release ids in a `GET /releases` payload whose `tag_name` is `tag`.
+///
+/// Split out as a pure function so the duplicate-detection rule is testable
+/// without standing up a fixture server.
+fn releases_matching_tag(body: &serde_json::Value, tag: &str) -> Vec<u64> {
+    body.as_array()
+        .map(|releases| {
+            releases
+                .iter()
+                .filter(|release| {
+                    release.get("tag_name").and_then(serde_json::Value::as_str) == Some(tag)
+                })
+                .filter_map(|release| release.get("id").and_then(serde_json::Value::as_u64))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Whether a `POST /releases`' `422 Unprocessable Entity` body is GitHub's
 /// specific "a release for this tag already exists" error, as opposed to
 /// some other validation failure — checked as a plain substring rather than
@@ -406,6 +453,19 @@ pub struct GitHubReleaseClient {
     /// GitHub API — always `None` outside of test/fixture use, see
     /// [`with_base_url_for_tests`](Self::with_base_url_for_tests).
     base_override: Option<String>,
+}
+
+/// Hand-written, not derived: `token` is a live GitHub credential and this
+/// client is a natural thing to `{:?}` into an error context when a release
+/// call fails.
+impl std::fmt::Debug for GitHubReleaseClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubReleaseClient")
+            .field("owner", &self.owner)
+            .field("repo", &self.repo)
+            .field("token", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 impl GitHubReleaseClient {
@@ -466,7 +526,7 @@ impl GitHubReleaseClient {
             .await
             .context("failed to parse release response")?;
         body.get("id")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .context("release response missing id")
             .map(Some)
     }
@@ -526,9 +586,128 @@ impl GitHubReleaseClient {
             .json()
             .await
             .context("failed to parse created-release response")?;
-        body.get("id")
-            .and_then(|v| v.as_u64())
-            .context("created-release response missing id")
+        let created = body
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .context("created-release response missing id")?;
+
+        self.converge_on_one_release(tag, created).await
+    }
+
+    /// Collapses a create-race down to a single release for `tag`.
+    ///
+    /// `paws release` runs once per target, in parallel, and each leg calls
+    /// [`get_or_create_release`](Self::get_or_create_release). GitHub does
+    /// *not* reject a second release for a tag that already exists as a git
+    /// tag — which every `paws` release does, since the tag is pushed before
+    /// the build — so two legs that miss each other's `GET` both create one
+    /// and both get a 201. The assets then split across two releases and each
+    /// leg reports success, because from its own side nothing failed. That is
+    /// exactly what happened on `v0.0.1-prerelease.40`: 6 assets on one
+    /// release, 1 on the other.
+    ///
+    /// The rule is "lowest id wins", which every racing leg computes the same
+    /// way without coordinating: whoever is not the winner deletes the empty
+    /// release it just made and adopts the winner. Deleting a release does not
+    /// delete the git tag.
+    ///
+    /// Retried briefly because a just-created release is not always visible to
+    /// the list endpoint immediately — a single check can miss the very
+    /// duplicate it exists to find.
+    async fn converge_on_one_release(&self, tag: &str, created: u64) -> Result<u64> {
+        const ATTEMPTS: usize = 3;
+        for attempt in 0..ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            }
+            let ids = self.release_ids_for_tag(tag).await?;
+            let Some(&winner) = ids.iter().min() else {
+                continue;
+            };
+            if ids.len() < 2 {
+                continue;
+            }
+            if winner == created {
+                // We are the winner; the other legs will drop theirs.
+                return Ok(created);
+            }
+            // Ours is a duplicate. It has no assets yet — this runs before
+            // anything is uploaded — so removing it loses nothing.
+            self.delete_release(created).await.with_context(|| {
+                format!("failed to remove duplicate release {created} for tag {tag}")
+            })?;
+            println!(
+                "release: another job created release {winner} for {tag} first;                  dropped the duplicate {created} and will publish to {winner}"
+            );
+            return Ok(winner);
+        }
+        Ok(created)
+    }
+
+    /// Every release id pointing at `tag`. More than one means a create-race.
+    async fn release_ids_for_tag(&self, tag: &str) -> Result<Vec<u64>> {
+        let url = format!("{}/releases?per_page=100", self.api_base());
+        let response = self
+            .auth_headers(self.client.get(&url))
+            .send()
+            .await
+            .context("failed to list releases")?;
+        if !response.status().is_success() {
+            anyhow::bail!("unexpected status listing releases: {}", response.status());
+        }
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("failed to parse release list")?;
+        Ok(releases_matching_tag(&body, tag))
+    }
+
+    async fn delete_release(&self, release_id: u64) -> Result<()> {
+        let url = format!("{}/releases/{release_id}", self.api_base());
+        let response = self
+            .auth_headers(self.client.delete(&url))
+            .send()
+            .await
+            .context("failed to delete release")?;
+        if !response.status().is_success() && response.status() != reqwest::StatusCode::NOT_FOUND {
+            anyhow::bail!("unexpected status deleting release: {}", response.status());
+        }
+        Ok(())
+    }
+
+    /// Confirms `asset_name` is visible on the release the *tag* resolves to.
+    ///
+    /// An upload can succeed and still leave the release users see incomplete:
+    /// if a create-race put the asset on a duplicate release, the uploading
+    /// job's own view is perfectly consistent and it reports success, while
+    /// `GET /releases/tags/{tag}` — the view `install.sh`, `actions/paws-up`
+    /// and the Releases page all use — is missing that platform.
+    ///
+    /// [`converge_on_one_release`](Self::converge_on_one_release) is what
+    /// prevents that; this is the check that the prevention worked, so the
+    /// failure mode is a red job rather than a release that looks fine until
+    /// someone on the missing platform tries to install it.
+    pub async fn verify_asset_published(&self, tag: &str, asset_name: &str) -> Result<()> {
+        let canonical = self
+            .fetch_release_by_tag(tag)
+            .await?
+            .with_context(|| format!("no release found for tag {tag} after uploading"))?;
+
+        if self
+            .find_existing_asset_id(canonical, asset_name)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let ids = self.release_ids_for_tag(tag).await.unwrap_or_default();
+        anyhow::bail!(
+            "{asset_name} was uploaded, but it is not on the release that tag {tag} resolves to \
+             (release {canonical}). Releases currently pointing at this tag: {ids:?}. A duplicate \
+             release would split the assets across two entries, leaving the published release \
+             missing this platform."
+        )
     }
 
     /// Uploads `file_path` as a release asset, replacing any existing asset
@@ -628,7 +807,7 @@ impl GitHubReleaseClient {
             .iter()
             .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(file_name))
             .and_then(|a| a.get("id"))
-            .and_then(|v| v.as_u64()))
+            .and_then(serde_json::Value::as_u64))
     }
 
     /// Fetches `path` at `git_ref` via the Contents API — decoded file
@@ -800,6 +979,12 @@ impl GitHubReleaseClient {
     /// [`put_content`](Self::put_content) — a multi-hundred-file docs tree
     /// publishes as one commit/one ref-update, not one `put_content` call
     /// (and one push event) per file (FR-003, research.md R4).
+    // 113 lines, and deliberately one function: it is a single Git Trees
+    // transaction — blobs, then a tree, then a commit, then one ref update —
+    // where every step consumes the previous step's SHA. Splitting it would
+    // produce four private helpers that can only ever be called in this order,
+    // which hides the sequence rather than clarifying it.
+    #[allow(clippy::too_many_lines)]
     pub async fn publish_tree(
         &self,
         branch: &str,
@@ -925,11 +1110,13 @@ impl GitHubReleaseClient {
 }
 
 /// [`GitHubReleaseClient::get_pages_config`]'s result on a configured repo.
+#[derive(Debug, Clone)]
 pub struct PagesConfig {
     pub build_type: String,
 }
 
 /// A file fetched via [`GitHubReleaseClient::get_content`].
+#[derive(Debug, Clone)]
 pub struct ContentFile {
     pub content: Vec<u8>,
     pub sha: String,
@@ -1035,6 +1222,47 @@ mod tests {
         assert_eq!(contents, GENERIC_LINUX_GNU_DOCKERFILE);
     }
 
+    /// Regression guard for the release that broke on
+    /// `v0.0.1-prerelease.39`: adding a `rust-toolchain.toml` to the repo made
+    /// every cross target fail with an `error[E0463]` for a missing `core`, because
+    /// rustup switched away from the builder image's toolchain (the one with
+    /// the targets installed) and nothing re-added the target.
+    #[test]
+    fn the_target_is_installed_before_the_cross_build_runs() {
+        let request = BuildRequest {
+            builder_dir: "builders/linux-gnu",
+            source_dir: ".",
+            triple: "aarch64-unknown-linux-gnu",
+            package: "paws-cli",
+            binary_name: "paws",
+            builder_version: "v1",
+        };
+        let args = cross_build_pipeline_args(
+            "ghcr.io/example/builders:linux-gnu",
+            &request,
+            "target/aarch64-unknown-linux-gnu/release/paws",
+            "/host/out/paws",
+        );
+
+        let rustup = args
+            .iter()
+            .position(|a| a == "--args=rustup,target,add,aarch64-unknown-linux-gnu")
+            .expect("the target must be installed inside the container");
+        let build = args
+            .iter()
+            .position(|a| a.starts_with("--args=cargo,build,--release"))
+            .expect("the cross build must run");
+        assert!(
+            rustup < build,
+            "rustup target add must precede cargo build, got {args:?}"
+        );
+
+        // The export chain still terminates the pipeline.
+        assert_eq!(args[args.len() - 4], "file");
+        assert_eq!(args[args.len() - 2], "export");
+        assert_eq!(args[args.len() - 1], "--path=/host/out/paws");
+    }
+
     #[tokio::test]
     async fn build_binary_local_rejects_unsupported_targets() {
         let request = BuildRequest {
@@ -1058,12 +1286,7 @@ mod tests {
         // pipeline uses) — skip rather than fail when they're genuinely
         // absent, the same convention `paws-dagger`'s tests use for the
         // `dagger` CLI.
-        if tokio::process::Command::new("zip")
-            .arg("--version")
-            .output()
-            .await
-            .is_err()
-        {
+        if Command::new("zip").arg("--version").output().await.is_err() {
             return;
         }
 
@@ -1084,7 +1307,7 @@ mod tests {
 
         // Unzip and verify the binary landed at the archive root (flattened),
         // not nested under "nested/".
-        let list_output = tokio::process::Command::new("unzip")
+        let list_output = Command::new("unzip")
             .arg("-l")
             .arg(&archive_path)
             .output()
@@ -1128,6 +1351,119 @@ mod tests {
             socket.shutdown().await.ok();
         }
         requests
+    }
+
+    // --- release create-race (v0.0.1-prerelease.40) --------------------------
+
+    /// The rule every racing leg has to compute identically without talking to
+    /// the others: lowest id wins.
+    #[test]
+    fn duplicate_releases_for_a_tag_are_all_found() {
+        let body = serde_json::json!([
+            {"id": 381_570_157, "tag_name": "v0.0.1-prerelease.40"},
+            {"id": 381_570_156, "tag_name": "v0.0.1-prerelease.40"},
+            {"id": 381_570_100, "tag_name": "v0.0.1-prerelease.39"},
+            {"tag_name": "v0.0.1-prerelease.40"},
+        ]);
+        let mut ids = releases_matching_tag(&body, "v0.0.1-prerelease.40");
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec![381_570_156, 381_570_157],
+            "both releases on the tag must be seen, and the one with no id ignored"
+        );
+        assert_eq!(
+            ids.iter().min(),
+            Some(&381_570_156),
+            "the lowest id is the winner every leg converges on"
+        );
+    }
+
+    #[test]
+    fn a_tag_with_one_release_reports_no_duplicate() {
+        let body = serde_json::json!([
+            {"id": 7, "tag_name": "v1.0.0"},
+            {"id": 8, "tag_name": "v1.0.1"},
+        ]);
+        assert_eq!(releases_matching_tag(&body, "v1.0.0"), vec![7]);
+        assert!(releases_matching_tag(&body, "v9.9.9").is_empty());
+    }
+
+    #[test]
+    fn a_non_array_release_listing_yields_nothing_rather_than_panicking() {
+        let body = serde_json::json!({"message": "Not Found"});
+        assert!(releases_matching_tag(&body, "v1.0.0").is_empty());
+    }
+
+    /// The failure this makes loud: the upload succeeded, but against a
+    /// duplicate release, so the release the tag resolves to is missing that
+    /// platform. Previously every leg reported success and the gap only showed
+    /// up when someone tried to install.
+    #[tokio::test]
+    async fn verify_asset_published_fails_when_the_asset_is_on_another_release() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_fixture_responses(
+            listener,
+            vec![
+                // GET /releases/tags/{tag} -> the canonical release
+                serde_json::json!({"id": 381_570_156}),
+                // GET /releases/{id}/assets -> the platform is absent
+                serde_json::json!([
+                    {"id": 1, "name": "paws-x86_64-apple-darwin.zip"}
+                ]),
+                // GET /releases -> two releases share the tag
+                serde_json::json!([
+                    {"id": 381_570_156, "tag_name": "v0.0.1-prerelease.40"},
+                    {"id": 381_570_157, "tag_name": "v0.0.1-prerelease.40"},
+                ]),
+            ],
+        ));
+
+        let client =
+            GitHubReleaseClient::new("octo".to_string(), "repo".to_string(), "t".to_string())
+                .with_base_url_for_tests(format!("http://{addr}"));
+        let error = client
+            .verify_asset_published("v0.0.1-prerelease.40", "paws-x86_64-unknown-linux-musl.zip")
+            .await
+            .expect_err("a split release must not be reported as a success");
+        let error = error.to_string();
+
+        assert!(
+            error.contains("paws-x86_64-unknown-linux-musl.zip"),
+            "the error should name the missing asset: {error}"
+        );
+        assert!(
+            error.contains("381570157"),
+            "the error should name the duplicate releases so the cause is obvious: {error}"
+        );
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn verify_asset_published_passes_when_the_asset_is_on_the_tags_release() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_fixture_responses(
+            listener,
+            vec![
+                serde_json::json!({"id": 42}),
+                serde_json::json!([
+                    {"id": 9, "name": "paws-x86_64-unknown-linux-musl.zip"}
+                ]),
+            ],
+        ));
+
+        let client =
+            GitHubReleaseClient::new("octo".to_string(), "repo".to_string(), "t".to_string())
+                .with_base_url_for_tests(format!("http://{addr}"));
+        client
+            .verify_asset_published("v1.0.0", "paws-x86_64-unknown-linux-musl.zip")
+            .await
+            .expect("the asset is on the release the tag resolves to");
+
+        server.await.unwrap();
     }
 
     #[tokio::test]

@@ -48,6 +48,7 @@ fn is_transient_registry_error(stderr: &str) -> bool {
     TRANSIENT_SIGNATURES.iter().any(|sig| lower.contains(sig))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaggerCall {
     pub module: String,
     pub function: String,
@@ -124,7 +125,7 @@ impl CacheBackend {
     /// upstream) when the runtime token is also present.
     pub fn detect() -> Self {
         if std::env::var("DAGGER_CLOUD_TOKEN").is_ok() {
-            return CacheBackend::DaggerCloud;
+            return Self::DaggerCloud;
         }
         // `006-paws-doesn-expose`: a workflow step that exposes these vars
         // (e.g. `paws-up`'s `actions/github-script` step) may legitimately
@@ -135,35 +136,37 @@ impl CacheBackend {
         let non_empty = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
 
         let Some(token) = non_empty("ACTIONS_RUNTIME_TOKEN") else {
-            return CacheBackend::None;
+            return Self::None;
         };
 
         if let Some(results_url) = non_empty("ACTIONS_RESULTS_URL")
             && non_empty("ACTIONS_CACHE_SERVICE_V2").is_some()
         {
-            return CacheBackend::GitHubActionsCache {
+            return Self::GitHubActionsCache {
                 base_url: results_url,
                 token,
                 version: CacheApiVersion::V2,
             };
         }
-        if let Some(base_url) = non_empty("ACTIONS_CACHE_URL").or_else(|| non_empty("ACTIONS_RESULTS_URL")) {
-            return CacheBackend::GitHubActionsCache {
+        if let Some(base_url) =
+            non_empty("ACTIONS_CACHE_URL").or_else(|| non_empty("ACTIONS_RESULTS_URL"))
+        {
+            return Self::GitHubActionsCache {
                 base_url,
                 token,
                 version: CacheApiVersion::V1,
             };
         }
-        CacheBackend::None
+        Self::None
     }
 
     /// FR-006: independently verifiable without inferring from build speed
     /// — exactly one line, naming the selected backend (or `none`).
     pub fn log_line(&self) -> String {
         match self {
-            CacheBackend::DaggerCloud => "cache: using dagger-cloud".to_string(),
-            CacheBackend::GitHubActionsCache { .. } => "cache: using github-actions".to_string(),
-            CacheBackend::None => "cache: no backend detected (full rebuild)".to_string(),
+            Self::DaggerCloud => "cache: using dagger-cloud".to_string(),
+            Self::GitHubActionsCache { .. } => "cache: using github-actions".to_string(),
+            Self::None => "cache: no backend detected (full rebuild)".to_string(),
         }
     }
 }
@@ -174,7 +177,7 @@ impl CacheBackend {
 /// documentation.
 const ENGINE_CONTAINER_NAME_PREFIX: &str = "dagger-engine-";
 
-/// Path inside the engine container where its persistent state (BuildKit
+/// Path inside the engine container where its persistent state (`BuildKit`
 /// cache, layer store) lives — confirmed for real via `docker inspect`
 /// against a live engine container's `Mounts`, not assumed.
 const ENGINE_STATE_PATH: &str = "/var/lib/dagger";
@@ -274,7 +277,13 @@ async fn find_engine_volume(container: &str) -> Result<String> {
 fn short_cache_version(key: &str) -> String {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(key.as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    digest
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
 }
 
 /// A stable cache key for the engine-state archive — scoped to the
@@ -302,7 +311,7 @@ struct ActionsCacheClient {
 }
 
 impl ActionsCacheClient {
-    fn new(base_url: String, token: String) -> Self {
+    fn new(base_url: &str, token: String) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
         Self {
             base_url,
@@ -376,8 +385,7 @@ impl ActionsCacheClient {
     /// this first cut).
     async fn reserve(&self, key: &str, size: u64) -> Result<u64> {
         let url = format!("{}/_apis/artifactcache/caches", self.base_url);
-        let body =
-            serde_json::json!({ "key": key, "version": short_cache_version(key), "cacheSize": size });
+        let body = serde_json::json!({ "key": key, "version": short_cache_version(key), "cacheSize": size });
         let response = self
             .auth_headers(self.client.post(&url))
             .json(&body)
@@ -396,7 +404,7 @@ impl ActionsCacheClient {
             .context("failed to parse the Actions cache reservation response")?;
         parsed
             .get("cacheId")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .context("Actions cache reservation response missing cacheId")
     }
 
@@ -446,7 +454,7 @@ impl ActionsCacheClient {
 /// protobuf — Twirp supports both; JSON avoids needing a protobuf codegen
 /// step here, and the server accepts either the proto field name or the
 /// lowerCamelCase form on requests per the proto3 JSON spec, so plain
-/// snake_case request bodies work). Reserve/upload/commit becomes
+/// `snake_case` request bodies work). Reserve/upload/commit becomes
 /// create-entry (returns a signed Azure Blob SAS URL) / upload-to-blob /
 /// finalize-entry; the blob upload itself is a single `PUT` with
 /// `x-ms-blob-type: BlockBlob` (Azure's simple-PUT path, valid up to 5000
@@ -460,7 +468,7 @@ struct ActionsCacheClientV2 {
 
 /// Looks up a JSON string field trying both its lowerCamelCase name (the
 /// proto3 JSON default, and what protobuf-ts's own generated response
-/// parser expects) and its snake_case proto field name — confirmed live
+/// parser expects) and its `snake_case` proto field name — confirmed live
 /// that the real receiver's response bodies don't reliably match the
 /// former alone (`CreateCacheEntry`'s `signedUploadUrl` came back missing
 /// even on a genuine `ok: true` response; the reservation itself had
@@ -474,7 +482,7 @@ fn json_str<'a>(value: &'a serde_json::Value, camel: &str, snake: &str) -> Optio
 }
 
 impl ActionsCacheClientV2 {
-    fn new(base_url: String, token: String) -> Self {
+    fn new(base_url: &str, token: String) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
         Self {
             base_url,
@@ -535,7 +543,11 @@ impl ActionsCacheClientV2 {
     async fn find_entry(&self, key: &str) -> Result<Option<String>> {
         let body = serde_json::json!({ "key": key, "restore_keys": [], "version": short_cache_version(key) });
         let response = self.call("GetCacheEntryDownloadURL", body).await?;
-        if !response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !response
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
             return Ok(None);
         }
         Ok(json_str(&response, "signedDownloadUrl", "signed_download_url").map(String::from))
@@ -562,7 +574,11 @@ impl ActionsCacheClientV2 {
     async fn create_entry(&self, key: &str) -> Result<String> {
         let body = serde_json::json!({ "key": key, "version": short_cache_version(key) });
         let response = self.call("CreateCacheEntry", body).await?;
-        if !response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !response
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
             let message = response
                 .get("message")
                 .and_then(|v| v.as_str())
@@ -601,7 +617,11 @@ impl ActionsCacheClientV2 {
     async fn finalize(&self, key: &str, size: u64) -> Result<()> {
         let body = serde_json::json!({ "key": key, "version": short_cache_version(key), "size_bytes": size.to_string() });
         let response = self.call("FinalizeCacheEntryUpload", body).await?;
-        if !response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !response
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
             let message = response
                 .get("message")
                 .and_then(|v| v.as_str())
@@ -622,10 +642,10 @@ enum CacheTransport {
 }
 
 impl CacheTransport {
-    fn new(base_url: String, token: String, version: CacheApiVersion) -> Self {
+    fn new(base_url: &str, token: String, version: CacheApiVersion) -> Self {
         match version {
-            CacheApiVersion::V1 => CacheTransport::V1(ActionsCacheClient::new(base_url, token)),
-            CacheApiVersion::V2 => CacheTransport::V2(ActionsCacheClientV2::new(base_url, token)),
+            CacheApiVersion::V1 => Self::V1(ActionsCacheClient::new(base_url, token)),
+            CacheApiVersion::V2 => Self::V2(ActionsCacheClientV2::new(base_url, token)),
         }
     }
 
@@ -633,14 +653,14 @@ impl CacheTransport {
     /// clean miss.
     async fn find_and_download(&self, key: &str, dest: &std::path::Path) -> Result<bool> {
         match self {
-            CacheTransport::V1(c) => {
+            Self::V1(c) => {
                 let Some(location) = c.find_entry(key).await? else {
                     return Ok(false);
                 };
                 c.download(&location, dest).await?;
                 Ok(true)
             }
-            CacheTransport::V2(c) => {
+            Self::V2(c) => {
                 let Some(url) = c.find_entry(key).await? else {
                     return Ok(false);
                 };
@@ -652,13 +672,13 @@ impl CacheTransport {
 
     async fn upload(&self, key: &str, data: &[u8]) -> Result<()> {
         match self {
-            CacheTransport::V1(c) => {
+            Self::V1(c) => {
                 let cache_id = c.reserve(key, data.len() as u64).await?;
                 c.upload(cache_id, data).await?;
                 c.commit(cache_id, data.len() as u64).await?;
                 Ok(())
             }
-            CacheTransport::V2(c) => {
+            Self::V2(c) => {
                 let upload_url = c.create_entry(key).await?;
                 c.upload(&upload_url, data).await?;
                 c.finalize(key, data.len() as u64).await?;
@@ -671,7 +691,7 @@ impl CacheTransport {
 /// Restores the Dagger engine's persistent state from the Actions cache,
 /// if a cached entry exists, **before** the caller's real pipeline runs.
 /// Safe no-op on a cache miss. Stops the engine container while restoring
-/// (BuildKit needs exclusive access to its own on-disk state) — the next
+/// (`BuildKit` needs exclusive access to its own on-disk state) — the next
 /// real `dagger core`/`dagger call` invocation auto-restarts it, the same
 /// `docker start dagger-engine-v...` sequence `dagger` already performs on
 /// every invocation when the container exists but isn't running.
@@ -793,7 +813,7 @@ pub async fn restore_cache_backend() -> CacheBackend {
         version,
     } = &backend
     {
-        let client = CacheTransport::new(base_url.clone(), token.clone(), *version);
+        let client = CacheTransport::new(base_url, token.clone(), *version);
         if let Err(err) = restore_github_actions_cache(&client).await {
             eprintln!("cache: restore failed, continuing with a cold build: {err:#}");
         }
@@ -813,7 +833,7 @@ pub async fn save_cache_backend(backend: &CacheBackend) {
         version,
     } = backend
     {
-        let client = CacheTransport::new(base_url.clone(), token.clone(), *version);
+        let client = CacheTransport::new(base_url, token.clone(), *version);
         if let Err(err) = save_github_actions_cache(&client).await {
             eprintln!("cache: save failed (build result is unaffected): {err:#}");
         }
@@ -858,6 +878,19 @@ pub async fn ensure_available() -> Result<()> {
 /// is also appended there so a later step's `dagger` calls resolve without
 /// the caller having to touch `PATH` itself.
 pub async fn install_cli() -> Result<std::path::PathBuf> {
+    install_cli_with_version(None).await
+}
+
+/// [`install_cli`] pinned to a specific `dagger` release.
+///
+/// Unpinned, `install.sh` serves whatever is current, so two `paws init` runs
+/// weeks apart can leave different engines behind and a pipeline that worked
+/// last month can fail with no local change. A `[tools] dagger = "..."` entry
+/// in `paws.toml` makes that reproducible.
+///
+/// The version travels as `$DAGGER_VERSION`, which is the install script's own
+/// documented knob — this does not reimplement the installer.
+pub async fn install_cli_with_version(version: Option<&str>) -> Result<std::path::PathBuf> {
     let home =
         std::env::var("HOME").context("HOME is not set - can't determine an install directory")?;
     let install_dir = std::path::PathBuf::from(home).join(".local").join("bin");
@@ -865,10 +898,15 @@ pub async fn install_cli() -> Result<std::path::PathBuf> {
         .await
         .context("failed to create the dagger install directory")?;
 
-    let output = Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
         .arg("curl -fsSL https://dl.dagger.io/dagger/install.sh | sh")
-        .env("BIN_DIR", &install_dir)
+        .env("BIN_DIR", &install_dir);
+    if let Some(version) = version.map(str::trim).filter(|v| !v.is_empty()) {
+        command.env("DAGGER_VERSION", version);
+    }
+    let output = command
         .output()
         .await
         .context("failed to run the dagger install script")?;
@@ -1068,8 +1106,7 @@ async fn core_streaming_once(args: &[String]) -> Result<(bool, String)> {
         if n == 0 {
             break;
         }
-        use std::io::Write;
-        std::io::stderr().write_all(&chunk[..n])?;
+        std::io::Write::write_all(&mut std::io::stderr(), &chunk[..n])?;
         captured.extend_from_slice(&chunk[..n]);
     }
 
@@ -1099,6 +1136,10 @@ pub async fn core_streaming(args: &[String]) -> Result<()> {
 }
 
 #[cfg(test)]
+// `std::env::set_var`/`remove_var` are unsafe in edition 2024, and these
+// tests exist precisely to exercise env-var-driven detection. Every call is
+// serialized behind this module's env lock, which is what makes it sound.
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
 
@@ -1396,8 +1437,7 @@ mod tests {
         let source = include_str!("lib.rs");
         let production_code = source
             .split_once("#[cfg(test)]")
-            .map(|(before, _)| before)
-            .unwrap_or(source);
+            .map_or(source, |(before, _)| before);
         assert!(
             !production_code.contains(".env_clear()"),
             "a .env_clear() call would silently break DAGGER_CLOUD_TOKEN propagation"
@@ -1433,7 +1473,7 @@ mod tests {
             version,
         } = backend
         {
-            let client = CacheTransport::new(base_url.clone(), token.clone(), *version);
+            let client = CacheTransport::new(base_url, token.clone(), *version);
             let _ = restore_github_actions_cache(&client).await;
         }
         backend.clone()
@@ -1467,7 +1507,8 @@ mod tests {
             request
         });
 
-        let client = ActionsCacheClient::new(format!("http://{addr}"), "fixture-token".to_string());
+        let client =
+            ActionsCacheClient::new(&format!("http://{addr}"), "fixture-token".to_string());
         let location = client
             .find_entry("fixture-key")
             .await

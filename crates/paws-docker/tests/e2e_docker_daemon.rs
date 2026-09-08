@@ -13,16 +13,14 @@ fn docker_available() -> bool {
     Command::new("docker")
         .arg("version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 fn buildx_available() -> bool {
     Command::new("docker")
         .args(["buildx", "version"])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 fn examples_dir() -> PathBuf {

@@ -52,6 +52,17 @@ pub struct GitHubHistoryProvider {
     client: reqwest::Client,
 }
 
+/// Hand-written, not derived: `token` is a live GitHub credential.
+impl std::fmt::Debug for GitHubHistoryProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubHistoryProvider")
+            .field("owner", &self.owner)
+            .field("repo", &self.repo)
+            .field("token", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
 impl GitHubHistoryProvider {
     pub fn new(owner: String, repo: String, token: String) -> Self {
         Self {
@@ -116,14 +127,12 @@ impl HistoryProvider for GitHubHistoryProvider {
         }
 
         let url = format!("{}/commits/{sha}/pulls", self.api_base());
-        let response = match self.auth_headers(self.client.get(&url)).send().await {
-            Ok(response) => response,
-            // A reachability failure here is treated the same as "no PR
-            // found" (FR-009's fallback), not a hard error — the range
-            // enumeration call (commits_in_range) is where a real network
-            // failure should abort the whole run; a single commit's PR
-            // lookup failing shouldn't.
-            Err(_) => return Ok(None),
+        // A reachability failure here is treated the same as "no PR found"
+        // (FR-009's fallback), not a hard error — the range enumeration call
+        // (commits_in_range) is where a real network failure should abort the
+        // whole run; a single commit's PR lookup failing shouldn't.
+        let Ok(response) = self.auth_headers(self.client.get(&url)).send().await else {
+            return Ok(None);
         };
         if !response.status().is_success() {
             return Ok(None);
@@ -133,9 +142,8 @@ impl HistoryProvider for GitHubHistoryProvider {
             Ok(body) => body,
             Err(_) => return Ok(None),
         };
-        let prs = match body.as_array() {
-            Some(prs) => prs,
-            None => return Ok(None),
+        let Some(prs) = body.as_array() else {
+            return Ok(None);
         };
 
         Ok(prs
@@ -192,16 +200,17 @@ pub struct ChangelogEntry {
 /// port of `mbround18/auto`'s Markdown (spec's Out of Scope).
 pub fn render_entry(entry: &ChangelogEntry) -> String {
     let mut out = format!("## {} ({})\n\n", entry.version, entry.date);
+    let short_sha = |sha: &str| sha.chars().take(7).collect::<String>();
     for line in &entry.lines {
-        let short_sha = |sha: &str| sha.chars().take(7).collect::<String>();
-        match line {
+        use std::fmt::Write as _;
+        let _ = match line {
             ChangelogLine::PullRequest { title, sha } => {
-                out.push_str(&format!("- {title} ({})\n", short_sha(sha)));
+                writeln!(out, "- {title} ({})", short_sha(sha))
             }
             ChangelogLine::RawCommit { subject, sha } => {
-                out.push_str(&format!("- {subject} ({})\n", short_sha(sha)));
+                writeln!(out, "- {subject} ({})", short_sha(sha))
             }
-        }
+        };
     }
     out
 }
@@ -274,11 +283,22 @@ pub async fn append_to_file(path: &std::path::Path, entry: &ChangelogEntry) -> R
 /// instead of a date-crate dependency (this feature's `ChangelogEntry.date`
 /// is a manually formatted `String`, see analysis finding U1; no crate in
 /// this workspace depends on `chrono` or similar today).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+// Transcribed from the published algorithm rather than rewritten. Every cast
+// here is part of its correctness argument — `doe` is provably in
+// `0..=146096` at that point, so the `i64`/`u64` round trip cannot lose a
+// sign, and `d`/`m` are provably small. Replacing them with `try_from` would
+// also make this non-`const`. Checked arithmetic here would assert facts the
+// algorithm already establishes.
+#[allow(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation
+)]
+const fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
     let y = yoe as i64 + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
@@ -293,7 +313,8 @@ pub fn today_iso_date() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    let days = (now.as_secs() / 86400) as i64;
+    // Days since 1970 fits an i64 for any clock a machine can report.
+    let days = i64::try_from(now.as_secs() / 86_400).unwrap_or(i64::MAX);
     let (y, m, d) = civil_from_days(days);
     format!("{y:04}-{m:02}-{d:02}")
 }
@@ -349,6 +370,10 @@ pub async fn commit_back(
 }
 
 #[cfg(test)]
+// `std::env::set_var`/`remove_var` are unsafe in edition 2024, and these
+// tests exist precisely to exercise env-var-driven behavior. Access is
+// serialized within this module, which is what makes it sound.
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use std::collections::HashMap;

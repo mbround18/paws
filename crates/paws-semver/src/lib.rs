@@ -26,9 +26,9 @@ impl std::str::FromStr for Increment {
 
     fn from_str(s: &str) -> Result<Self> {
         match s {
-            "major" => Ok(Increment::Major),
-            "minor" => Ok(Increment::Minor),
-            "patch" => Ok(Increment::Patch),
+            "major" => Ok(Self::Major),
+            "minor" => Ok(Self::Minor),
+            "patch" => Ok(Self::Patch),
             other => anyhow::bail!("invalid increment type: {other}"),
         }
     }
@@ -52,12 +52,6 @@ fn resolve_increment_from_branch(branch_name: &str) -> Option<Increment> {
     }
 
     let tokens: Vec<&str> = lower.split(['/', '-']).filter(|s| !s.is_empty()).collect();
-
-    const MAJOR_WORDS: &[&str] = &["major", "breaking"];
-    const MINOR_WORDS: &[&str] = &["feat", "feature", "minor"];
-    const PATCH_WORDS: &[&str] = &[
-        "fix", "patch", "hotfix", "bugfix", "chore", "docs", "refactor", "test", "ci", "perf",
-    ];
 
     if tokens.iter().any(|t| MAJOR_WORDS.contains(t)) {
         return Some(Increment::Major);
@@ -103,6 +97,16 @@ fn resolve_increment_from_labels(
     }
 }
 
+/// Branch-name tokens that select each increment. Module-level consts rather
+/// than locals inside `detect_increment`: they are the vocabulary this crate
+/// recognizes, and a reader looking for "what counts as a major branch?"
+/// should not have to read the function body to find it.
+const MAJOR_WORDS: &[&str] = &["major", "breaking"];
+const MINOR_WORDS: &[&str] = &["feat", "feature", "minor"];
+const PATCH_WORDS: &[&str] = &[
+    "fix", "patch", "hotfix", "bugfix", "chore", "docs", "refactor", "test", "ci", "perf",
+];
+
 /// Resolved precedence per spec.md FR-011 item 2-3 / `increment.js`'s `detectIncrement`:
 /// explicit `--increment` wins outright; otherwise a configured label wins over branch
 /// inference; otherwise fall back to `patch`.
@@ -135,6 +139,7 @@ pub trait TagSource: Send + Sync {
 }
 
 /// A fixed-list fixture, e.g. `FixtureTagSource(vec!["v1.0.0".into()])`.
+#[derive(Debug, Clone)]
 pub struct FixtureTagSource(pub Vec<String>);
 
 impl TagSource for FixtureTagSource {
@@ -151,6 +156,19 @@ pub struct GitHubGraphQlTagSource {
     pub owner: String,
     pub repo: String,
     pub token: String,
+}
+
+/// Hand-written, not derived: `token` is a live GitHub credential, and this
+/// struct is the kind of thing that ends up in an `anyhow` context when a tag
+/// query fails.
+impl std::fmt::Debug for GitHubGraphQlTagSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubGraphQlTagSource")
+            .field("owner", &self.owner)
+            .field("repo", &self.repo)
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 const GET_LAST_TAG_QUERY: &str = r#"query GetLastTag($owner: String!, $repo: String!) {
@@ -318,13 +336,13 @@ pub async fn resolve_last_tag(
             .collect()
     };
 
-    let mut selected_prefix = base_prefix.clone();
+    let mut selected_prefix = base_prefix;
     let mut semver_tags: Vec<(String, semver::Version)> = Vec::new();
     for candidate in &prefix_candidates {
         let candidate_tags = build_candidate_set(candidate);
         if candidate_tags.len() > semver_tags.len() {
             semver_tags = candidate_tags;
-            selected_prefix = candidate.clone();
+            selected_prefix.clone_from(candidate);
         }
     }
 
@@ -462,6 +480,25 @@ pub async fn compute_new_version(
 
 #[cfg(test)]
 mod tests {
+    /// See `paws_environment`'s equivalent test: the `Debug` impl on a
+    /// token-bearing client is hand-written specifically so the token cannot
+    /// reach a log or an `anyhow` context.
+    #[test]
+    fn debug_never_prints_the_token() {
+        let source = GitHubGraphQlTagSource {
+            owner: "octocat".to_string(),
+            repo: "example".to_string(),
+            token: "ghp_SUPERSECRETTOKEN".to_string(),
+        };
+        let rendered = format!("{source:?}");
+        assert!(
+            !rendered.contains("ghp_SUPERSECRETTOKEN"),
+            "token leaked into Debug output: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"));
+        assert!(rendered.contains("octocat"));
+    }
+
     use super::*;
 
     fn base_request() -> SemverRequest {

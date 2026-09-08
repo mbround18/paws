@@ -216,3 +216,40 @@ jobs:
             --target ${{ matrix.target }} \
             --tag "$RELEASE_TAG" \
             $prerelease_flag
+
+  # The release's own job statuses are not sufficient evidence that it
+  # published correctly — twice now they have all been green over a broken
+  # release. v0.0.1-prerelease.39 shipped 3 of 7 binaries because four legs
+  # failed to cross-compile; v0.0.1-prerelease.40 shipped 6 of 7 with *every
+  # leg green*, because a create-race made two releases for the one tag and
+  # split the assets, leaving each job internally consistent and the published
+  # release missing a platform.
+  #
+  # So this gate checks the artifacts from the outside, the way a user
+  # installing would: one release for the tag, an archive per target, and each
+  # binary actually the architecture its name claims. It runs after every leg
+  # (`needs: release`) so it sees the finished release, not a partial one.
+  verify:
+    name: verify the published release
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The same binary the release legs used, so `--list-targets` reports the
+      # target set this very release was built from rather than a list kept
+      # separately in the workflow or the script.
+      - name: Download bootstrapped paws binary
+        uses: actions/download-artifact@v8
+        with:
+          name: paws-bootstrap
+          path: bootstrap
+
+      - name: Verify every target published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          chmod +x bootstrap/paws
+          ./scripts/verify-release.sh "$RELEASE_TAG" ./bootstrap/paws

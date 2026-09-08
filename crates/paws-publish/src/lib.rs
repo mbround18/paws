@@ -40,6 +40,7 @@
 //! crate's own subpath — confirmed for real this fixes `cargo check`
 //! against a real copy of `libs/env-parse`.
 
+use paws_core::Pipeline;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -56,8 +57,7 @@ pub fn is_rust_crate(dir: &Path) -> bool {
 
 fn declares_workspace(dir: &Path) -> bool {
     std::fs::read_to_string(dir.join("Cargo.toml"))
-        .map(|s| s.lines().any(|line| line.trim() == "[workspace]"))
-        .unwrap_or(false)
+        .is_ok_and(|s| s.lines().any(|line| line.trim() == "[workspace]"))
 }
 
 /// Walks up from `dir` looking for the nearest ancestor whose `Cargo.toml`
@@ -171,41 +171,23 @@ pub fn dagger_pipeline_args(
     token_env_var: &str,
     dry_run: bool,
 ) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "container".into(),
-        "from".into(),
-        format!("--address={BASE_IMAGE}"),
-        "with-mounted-directory".into(),
-        "--path=/src".into(),
-        format!("--source={mount_dir}"),
-        "with-workdir".into(),
-        format!("--path={workdir}"),
-    ];
-
-    fn push_exec(args: &mut Vec<String>, command_args: &[&str]) {
-        args.push("with-exec".into());
-        args.push(format!("--args={}", command_args.join(",")));
-    }
-
-    push_exec(&mut args, &["cargo", "check"]);
-    push_exec(&mut args, &["cargo", "test"]);
-    push_exec(&mut args, &["cargo", "package"]);
+    let mut pipeline = Pipeline::from_image(BASE_IMAGE)
+        .mount("/src", mount_dir)
+        .workdir(workdir)
+        .exec(["cargo", "check"])
+        .exec(["cargo", "test"])
+        .exec(["cargo", "package"]);
 
     if !dry_run {
-        args.extend([
-            "with-secret-variable".into(),
-            format!("--name={token_env_var}"),
-            format!("--secret=env:{token_env_var}"),
-        ]);
-        if registry == DEFAULT_REGISTRY {
-            push_exec(&mut args, &["cargo", "publish"]);
+        pipeline = pipeline.secret_env(token_env_var);
+        pipeline = if registry == DEFAULT_REGISTRY {
+            pipeline.exec(["cargo", "publish"])
         } else {
-            push_exec(&mut args, &["cargo", "publish", "--registry", registry]);
-        }
+            pipeline.exec(["cargo", "publish", "--registry", registry])
+        };
     }
 
-    args.push("stdout".into());
-    args
+    pipeline.stdout()
 }
 
 #[cfg(test)]
@@ -213,12 +195,8 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("paws-publish-test-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(name: &str) -> PathBuf {
+        paws_core::test_support::scratch_dir("publish", name)
     }
 
     #[test]

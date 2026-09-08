@@ -47,11 +47,11 @@ pub enum PublishTarget {
 }
 
 impl PublishTarget {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            PublishTarget::GitHubPages => "github-pages",
-            PublishTarget::CloudflarePages => "cloudflare-pages",
-            PublishTarget::S3 => "s3",
+            Self::GitHubPages => "github-pages",
+            Self::CloudflarePages => "cloudflare-pages",
+            Self::S3 => "s3",
         }
     }
 }
@@ -61,9 +61,9 @@ impl std::str::FromStr for PublishTarget {
 
     fn from_str(value: &str) -> Result<Self> {
         match value {
-            "github-pages" => Ok(PublishTarget::GitHubPages),
-            "cloudflare-pages" => Ok(PublishTarget::CloudflarePages),
-            "s3" => Ok(PublishTarget::S3),
+            "github-pages" => Ok(Self::GitHubPages),
+            "cloudflare-pages" => Ok(Self::CloudflarePages),
+            "s3" => Ok(Self::S3),
             other => anyhow::bail!(
                 "invalid --provider value {other:?}; expected one of: github-pages, \
                  cloudflare-pages, s3"
@@ -222,8 +222,7 @@ pub async fn publish_github_pages(
     let existing_manifest = client.get_content(MANIFEST_PATH, branch).await?;
     if existing_manifest
         .as_ref()
-        .map(|m| String::from_utf8_lossy(&m.content).trim() == digest)
-        .unwrap_or(false)
+        .is_some_and(|m| String::from_utf8_lossy(&m.content).trim() == digest)
     {
         println!("docs: github-pages already up to date ({branch}), skipping publish");
         return Ok(());
@@ -252,6 +251,10 @@ pub async fn publish_github_pages(
 }
 
 #[cfg(test)]
+// `std::env::set_var`/`remove_var` are unsafe in edition 2024, and these
+// tests exist precisely to exercise env-var-driven behavior. Access is
+// serialized within this module, which is what makes it sound.
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
 

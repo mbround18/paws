@@ -10,6 +10,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use paws_core::Toolchain;
 use tokio::process::Command;
 use tokio::task::JoinSet;
 
@@ -23,14 +24,25 @@ pub enum Ecosystem {
 }
 
 impl Ecosystem {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            Ecosystem::Rust => "rust",
-            Ecosystem::Node => "node",
-            Ecosystem::Python => "python",
-            Ecosystem::Go => "go",
-            Ecosystem::Esp32 => "esp32",
+            Self::Rust => "rust",
+            Self::Node => "node",
+            Self::Python => "python",
+            Self::Go => "go",
+            Self::Esp32 => "esp32",
         }
+    }
+
+    /// The ecosystem that installs `toolchain`, or `None` when no installer
+    /// exists for it — a JDK or a Ruby, say, which `paws` expects to already
+    /// be on the runner.
+    ///
+    /// Reads `paws_core`'s toolchain registry rather than keeping a second
+    /// opinion about which toolchains are provisionable, so the two can only
+    /// disagree by failing `every_provisioned_toolchain_names_a_real_ecosystem`.
+    pub fn for_toolchain(toolchain: Toolchain) -> Option<Self> {
+        toolchain.provisions().and_then(|name| name.parse().ok())
     }
 }
 
@@ -39,11 +51,11 @@ impl std::str::FromStr for Ecosystem {
 
     fn from_str(s: &str) -> Result<Self> {
         match s {
-            "rust" => Ok(Ecosystem::Rust),
-            "node" => Ok(Ecosystem::Node),
-            "python" => Ok(Ecosystem::Python),
-            "go" => Ok(Ecosystem::Go),
-            "esp32" => Ok(Ecosystem::Esp32),
+            "rust" => Ok(Self::Rust),
+            "node" => Ok(Self::Node),
+            "python" => Ok(Self::Python),
+            "go" => Ok(Self::Go),
+            "esp32" => Ok(Self::Esp32),
             other => anyhow::bail!("unsupported ecosystem: {other}"),
         }
     }
@@ -295,7 +307,7 @@ mod tests {
             "expected concurrent execution, took {elapsed:?}"
         );
         assert_eq!(results.len(), 3);
-        assert!(results.values().all(|r| r.is_ok()));
+        assert!(results.values().all(std::result::Result::is_ok));
     }
 
     fn panicky() -> Box<dyn Installer> {
@@ -348,8 +360,7 @@ mod tests {
         std::process::Command::new(bin)
             .arg("--version")
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+            .is_ok_and(|o| o.status.success())
     }
 
     /// `go` has no `--version` flag (only the `version` subcommand) --
@@ -361,8 +372,7 @@ mod tests {
         std::process::Command::new("go")
             .arg("version")
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+            .is_ok_and(|o| o.status.success())
     }
 
     #[tokio::test]
@@ -392,9 +402,7 @@ mod tests {
             let result = &results[&ecosystem];
             assert!(
                 result.is_ok(),
-                "real installer for {:?} failed: {:?}",
-                ecosystem,
-                result
+                "real installer for {ecosystem:?} failed: {result:?}"
             );
         }
     }
@@ -414,6 +422,44 @@ mod tests {
         install_go()
             .await
             .expect("a second install_go call should be a no-op success, not an error");
+    }
+
+    /// `paws_core`'s registry names the provisioning ecosystem for each
+    /// toolchain as a string, because `paws-core` can't depend on this crate.
+    /// That string is only useful if it always parses — a typo, or an
+    /// ecosystem named there before its installer exists here, would
+    /// otherwise silently mean "not provisionable" and skip the install.
+    #[test]
+    fn every_provisioned_toolchain_names_a_real_ecosystem() {
+        for info in paws_core::TOOLCHAINS {
+            let Some(name) = info.provisions else {
+                continue;
+            };
+            let parsed = name.parse::<Ecosystem>().unwrap_or_else(|_| {
+                panic!(
+                    "toolchain {} claims provisioning ecosystem {name:?}, which Ecosystem::FromStr \
+                     does not recognize",
+                    info.name
+                )
+            });
+            assert_eq!(
+                Ecosystem::for_toolchain(info.toolchain),
+                Some(parsed),
+                "Ecosystem::for_toolchain disagrees with the registry for {}",
+                info.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_toolchain_with_no_installer_provisions_nothing() {
+        assert_eq!(Ecosystem::for_toolchain(Toolchain::Java), None);
+        assert_eq!(Ecosystem::for_toolchain(Toolchain::Ruby), None);
+        // A Tauri build is a Node build underneath, so it does have one.
+        assert_eq!(
+            Ecosystem::for_toolchain(Toolchain::Tauri),
+            Some(Ecosystem::Node)
+        );
     }
 
     #[test]

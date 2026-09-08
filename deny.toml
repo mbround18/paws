@@ -1,0 +1,57 @@
+# `cargo deny` configuration for paws's own dependency tree.
+#
+# `paws audit` runs cargo-audit against *consumer* repos; this is the same
+# discipline applied to this repo, which previously had none. Run with
+# `cargo deny check` (install: `cargo install cargo-deny`).
+
+[advisories]
+# Fail on any RUSTSEC advisory affecting the tree. Add an `id` to `ignore`
+# only with a comment saying why it does not apply here.
+yanked = "deny"
+ignore = [
+    # RUSTSEC-2023-0071 — Marvin Attack, a timing sidechannel in the `rsa`
+    # crate. Reached only via jsonwebtoken -> rsa, which `paws-environment`
+    # uses in exactly one place: signing a GitHub App JWT with RS256
+    # (`github_app_jwt`, using the operator's own private key). The advisory
+    # is about *decryption* timing observable by an attacker who can submit
+    # ciphertexts and measure responses; nothing here decrypts, and no
+    # attacker-controlled input reaches the RSA operation.
+    #
+    # There is no fixed `rsa` release to upgrade to ("No safe upgrade is
+    # available"). Revisit when RustCrypto ships one, or if `paws` ever grows
+    # an RSA decryption path — at which point this entry must be removed, not
+    # re-justified.
+    "RUSTSEC-2023-0071",
+]
+
+[licenses]
+# paws is MIT; these are the licenses it can redistribute against.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# A duplicated dependency is a warning, not a failure: this tree pulls a lot
+# of transitive crates and pinning every duplicate away is not worth blocking
+# a release over. Deliberately-banned crates go in `deny` with a reason.
+multiple-versions = "warn"
+wildcards = "deny"
+# The workspace's own crates depend on each other by `path` with no version,
+# which reads as a wildcard. They are unpublished and versioned together, so
+# that is correct here — this keeps the check meaningful for third-party
+# wildcards without flagging every intra-workspace edge.
+allow-wildcard-paths = true
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
