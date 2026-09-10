@@ -9,7 +9,8 @@ see [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) for how a new stack actually gets ad
 Confirmed directly against the code, not from memory:
 
 - **`paws ci --toolchain <x>`** (build/lint/test execution): `rust`, `node`, `python`, `go`,
-  `java`, `kotlin`, `ruby`, `php`, `dotnet`, `elixir`, `tauri`, `tauri-android`, `flatpak`,
+  `java`, `kotlin`, `ruby`, `php`, `dotnet`, `elixir`, `ansible`, `tauri`, `tauri-android`,
+  `flatpak`,
   `esp32` (`crates/paws-cli-core/src/lib.rs`)
   — see "Embedded (ESP32 / no_std targets)" below for `esp32`'s full write-up. `java`
   (2026-08-22, `crates/paws-java`) is a new native implementation too — `gh-reusable` only ever
@@ -513,6 +514,19 @@ local.rebar --force`, `mix deps.get`, `mix compile --warnings-as-errors`, `mix t
   special handling — `mix` already fans out across `apps/`. Verified against
   `examples/elixir-fixture`. No OTP-release (`mix release`) step: that's a packaging concern,
   same call as Ruby's `gem build`.
+
+- **`ansible`** (`crates/paws-ansible`, `astral/uv:python<version>-trixie-slim`) — `uv sync
+--all-groups [--frozen]`, `ansible-galaxy install -r requirements.yml`, `ansible-lint`, then
+  `ansible-playbook --syntax-check <playbook>` once per playbook. Galaxy runs first because both
+  of the steps after it resolve module names, and a playbook using anything outside `ansible-core`
+  passes locally (where the collection happens to be installed) and fails in a clean container.
+  A repo with no `pyproject.toml` gets `uv pip install --system ansible-core ansible-lint` and
+  runs the tools directly instead. Unlike the four above, this one *is* both a `paws provision`
+  target and a `paws-audit` `LanguageFamily` — Python for both, since that is genuinely what an
+  Ansible repo's dependency tree is. Molecule is the deliberate gap: it drives a real container
+  per role, so it needs a Docker daemon a Dagger build doesn't have. Scenarios are detected and
+  named in the log rather than silently skipped, and the intended shape is a separate CI job on a
+  Docker-enabled runner. Verified against `examples/ansible-fixture`.
 
 None of the four are `paws provision` targets, and none add a `paws-audit` `LanguageFamily` —
 the same deliberate gaps `java`/`kotlin` have. `paws ci` runs each entirely inside its container,
