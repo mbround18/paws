@@ -12,8 +12,9 @@ New flags, all opt-in (default `false`/unset), additive to the existing `DockerA
 | `--tag-pr` | bool | `event_name == "pull_request"` **and** a PR number parses out of `git_ref` (R5) |
 | `--tag-schedule` | bool | `event_name == "schedule"` |
 | `--version-prefix` | string | Doesn't add a tag. Sets one prefix for `Version` and both rollup kinds, applied after stripping any leading `v` from the version (`""` gives `3.2.1` / `3.2` / `3`). Unset keeps `v` on `Version` and no prefix on rollups. Git-sha versions keep `sha-` either way |
+| `--no-prefix` | bool | Shorthand for `--version-prefix ""`. Conflicts with `--version-prefix` |
 
-Omitting all six flags MUST produce output byte-identical to today's `generate_tags` (FR-005,
+Omitting all seven flags MUST produce output byte-identical to today's `generate_tags` (FR-005,
 SC-001) — this is the contract's non-negotiable backward-compatibility floor.
 
 ## 2) `paws-docker::generate_tags` contract

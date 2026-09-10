@@ -467,6 +467,12 @@ pub struct DockerArgs {
     #[arg(long)]
     #[serde(default)]
     pub version_prefix: Option<String>,
+    /// Shorthand for `--version-prefix ""`: publish the version tag and its
+    /// `--tag-rollup` cascade with no prefix at all (`:3.2.1`, `:3.2`, `:3`).
+    /// Can't be combined with `--version-prefix`.
+    #[arg(long, conflicts_with = "version_prefix")]
+    #[serde(default)]
+    pub no_prefix: bool,
     /// Also include a `sha-<sha>` tag unconditionally, alongside whatever
     /// other tags this build already produces — not only as the fallback
     /// primary tag when no version/ref-based tag applies (that fallback
@@ -779,6 +785,20 @@ pub struct ReleaseArgs {
     pub skip_smoke_test: bool,
 }
 
+impl DockerArgs {
+    /// The version-tag prefix `paws docker` applies, with `--no-prefix`
+    /// folded in as `--version-prefix ""`. `None` keeps the original tag
+    /// scheme. Over MCP, where clap's conflict check doesn't run,
+    /// `no_prefix` wins if both are given.
+    pub fn effective_version_prefix(&self) -> Option<String> {
+        if self.no_prefix {
+            Some(String::new())
+        } else {
+            self.version_prefix.clone()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::DockerArgs;
@@ -802,5 +822,31 @@ mod tests {
 
         let parsed = DockerCli::try_parse_from(["paws"]).unwrap();
         assert_eq!(parsed.docker.version_prefix, None);
+    }
+
+    #[test]
+    fn no_prefix_is_shorthand_for_an_empty_version_prefix() {
+        let parsed = DockerCli::try_parse_from(["paws", "--no-prefix"]).unwrap();
+        assert_eq!(
+            parsed.docker.effective_version_prefix().as_deref(),
+            Some("")
+        );
+
+        let parsed = DockerCli::try_parse_from(["paws", "--version-prefix", "v"]).unwrap();
+        assert_eq!(
+            parsed.docker.effective_version_prefix().as_deref(),
+            Some("v")
+        );
+
+        let parsed = DockerCli::try_parse_from(["paws"]).unwrap();
+        assert_eq!(parsed.docker.effective_version_prefix(), None);
+    }
+
+    #[test]
+    fn no_prefix_conflicts_with_version_prefix() {
+        let err = DockerCli::try_parse_from(["paws", "--no-prefix", "--version-prefix", "v"])
+            .err()
+            .expect("--no-prefix and --version-prefix together should be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }
