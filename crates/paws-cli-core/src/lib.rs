@@ -939,6 +939,7 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
         tag_branch,
         tag_pr,
         tag_schedule,
+        version_prefix,
     } = args;
 
     let image = image
@@ -970,6 +971,7 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
             tag_branch,
             tag_pr,
             tag_schedule,
+            version_prefix,
         },
         &DockerGithubContext {
             workspace: workspace.clone(),

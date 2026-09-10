@@ -213,6 +213,9 @@ pub struct DockerFactsInput {
     pub tag_branch: bool,
     pub tag_pr: bool,
     pub tag_schedule: bool,
+    /// Prefix for the version tag and its `--tag-rollup` cascade. `None`
+    /// keeps the original scheme; see [`TagMatrixOptions::version_prefix`].
+    pub version_prefix: Option<String>,
 }
 
 /// Inputs mirroring `DockerParityGithubContext`, minus `eventPath` — callers
@@ -356,7 +359,7 @@ impl TagKind {
 /// image/version/registries/target inputs [`generate_tags`] already takes —
 /// every field opt-in and `false` by default, so omitting all of them
 /// reproduces [`generate_tags`]'s exact output (FR-005).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TagMatrixOptions {
     pub with_latest: bool,
     pub tag_rollup: bool,
@@ -364,6 +367,13 @@ pub struct TagMatrixOptions {
     pub tag_branch: bool,
     pub tag_pr: bool,
     pub tag_schedule: bool,
+    /// One prefix for the whole version cascade: the version tag and both
+    /// `--tag-rollup` tags get exactly this prefix, after any leading `v` is
+    /// stripped from the version. `Some("")` gives `3.2.1` / `3.2` / `3` and
+    /// `Some("v")` gives `v3.2.1` / `v3.2` / `v3`. `None` keeps the original
+    /// scheme: `v3.2.1` with unprefixed `3.2` / `3`. Git-sha versions keep
+    /// their `sha-` tag either way.
+    pub version_prefix: Option<String>,
 }
 
 fn strip_registry(image: &str) -> String {
@@ -456,10 +466,14 @@ pub fn generate_tag_matrix(
         String::new()
     };
 
-    let version_value = if version.starts_with('v') {
-        version.to_string()
-    } else if is_git_sha(version) {
+    // A `v`-prefixed string can never be a hex sha, so checking for a sha
+    // first changes nothing for the original scheme.
+    let version_value = if is_git_sha(version) {
         format!("sha-{version}")
+    } else if let Some(prefix) = &options.version_prefix {
+        format!("{prefix}{}", version.strip_prefix('v').unwrap_or(version))
+    } else if version.starts_with('v') {
+        version.to_string()
     } else {
         format!("v{version}")
     };
@@ -474,9 +488,12 @@ pub fn generate_tag_matrix(
         && let Some((major, minor)) = rollup_components(version)
     {
         // Minor before major, matching spec.md's stated order (Acceptance
-        // Scenario 1: "{image}:v3.2.1, {image}:3.2, and {image}:3").
-        kinds.push(TagKind::RollupMinor(minor));
-        kinds.push(TagKind::RollupMajor(major));
+        // Scenario 1: "{image}:v3.2.1, {image}:3.2, and {image}:3"). An
+        // explicit --version-prefix covers the rollups too, so the cascade
+        // shares one prefix; the original scheme leaves them unprefixed.
+        let prefix = options.version_prefix.as_deref().unwrap_or("");
+        kinds.push(TagKind::RollupMinor(format!("{prefix}{minor}")));
+        kinds.push(TagKind::RollupMajor(format!("{prefix}{major}")));
     }
     if options.tag_sha && is_git_sha(version) {
         kinds.push(TagKind::Sha(version.to_string()));
@@ -628,6 +645,7 @@ pub fn resolve_docker_facts(input: &DockerFactsInput, github: &GithubContext) ->
             tag_branch: input.tag_branch,
             tag_pr: input.tag_pr,
             tag_schedule: input.tag_schedule,
+            version_prefix: input.version_prefix.clone(),
         },
     );
 
@@ -1330,6 +1348,86 @@ mod tests {
         let baseline = generate_tags("image", "v3.2.1", &[], false, "refs/tags/v3.2.1", "", false);
         assert_eq!(with_matrix, baseline);
         assert_eq!(with_matrix, vec!["image:v3.2.1".to_string()]);
+    }
+
+    // --- --version-prefix: one prefix across the version tag and its rollups ---
+
+    /// A release-tag build with `--with-latest` and `--tag-rollup` on.
+    fn release_matrix(version: &str, prefix: Option<&str>, registries: &[String]) -> Vec<String> {
+        generate_tag_matrix(
+            "image",
+            version,
+            registries,
+            "refs/tags/v3.2.1",
+            "push",
+            "",
+            false,
+            &TagMatrixOptions {
+                with_latest: true,
+                tag_rollup: true,
+                version_prefix: prefix.map(String::from),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn empty_version_prefix_drops_the_v_across_the_cascade() {
+        let expected = vec!["image:3.2.1", "image:latest", "image:3.2", "image:3"];
+        // Whether or not the input version carries a `v`, the tags don't.
+        assert_eq!(release_matrix("v3.2.1", Some(""), &[]), expected);
+        assert_eq!(release_matrix("3.2.1", Some(""), &[]), expected);
+    }
+
+    #[test]
+    fn v_version_prefix_applies_to_the_rollups_too() {
+        assert_eq!(
+            release_matrix("3.2.1", Some("v"), &[]),
+            vec!["image:v3.2.1", "image:latest", "image:v3.2", "image:v3"]
+        );
+    }
+
+    #[test]
+    fn unset_version_prefix_keeps_the_original_scheme() {
+        assert_eq!(
+            release_matrix("v3.2.1", None, &[]),
+            vec!["image:v3.2.1", "image:latest", "image:3.2", "image:3"]
+        );
+    }
+
+    #[test]
+    fn version_prefix_is_mirrored_to_every_registry() {
+        let tags = release_matrix("v3.2.1", Some(""), &["ghcr.io".to_string()]);
+        for expected in [
+            "image:3.2.1",
+            "ghcr.io/image:3.2.1",
+            "ghcr.io/image:3.2",
+            "ghcr.io/image:3",
+        ] {
+            assert!(
+                tags.contains(&expected.to_string()),
+                "missing {expected} in {tags:?}"
+            );
+        }
+        assert!(!tags.iter().any(|t| t.contains(":v")), "{tags:?}");
+    }
+
+    #[test]
+    fn version_prefix_leaves_git_sha_versions_alone() {
+        let tags = generate_tag_matrix(
+            "app",
+            "e4a17f4",
+            &[],
+            "refs/heads/main",
+            "push",
+            "",
+            false,
+            &TagMatrixOptions {
+                version_prefix: Some(String::new()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(tags, vec!["app:sha-e4a17f4".to_string()]);
     }
 
     #[test]

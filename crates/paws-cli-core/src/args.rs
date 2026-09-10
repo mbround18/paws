@@ -458,6 +458,15 @@ pub struct DockerArgs {
     #[arg(long)]
     #[serde(default)]
     pub tag_rollup: bool,
+    /// Prefix for the version tag and its `--tag-rollup` cascade, applied to
+    /// all of them after any leading `v` is stripped from `--version`:
+    /// `--version-prefix ""` publishes `:3.2.1`, `:3.2` and `:3`, and
+    /// `--version-prefix v` publishes `:v3.2.1`, `:v3.2` and `:v3`. Omitted
+    /// (the default), the original scheme is kept: `:v3.2.1` with unprefixed
+    /// `:3.2` / `:3`. Git-sha versions keep their `sha-` tag either way.
+    #[arg(long)]
+    #[serde(default)]
+    pub version_prefix: Option<String>,
     /// Also include a `sha-<sha>` tag unconditionally, alongside whatever
     /// other tags this build already produces — not only as the fallback
     /// primary tag when no version/ref-based tag applies (that fallback
@@ -768,4 +777,30 @@ pub struct ReleaseArgs {
     #[arg(long)]
     #[serde(default)]
     pub skip_smoke_test: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DockerArgs;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct DockerCli {
+        #[command(flatten)]
+        docker: DockerArgs,
+    }
+
+    // `--version-prefix ""` must reach paws-docker as an empty prefix, not be
+    // rejected or read as "unset", or there'd be no way to publish `:3.2.1`.
+    #[test]
+    fn version_prefix_accepts_an_empty_value() {
+        let parsed = DockerCli::try_parse_from(["paws", "--version-prefix", ""]).unwrap();
+        assert_eq!(parsed.docker.version_prefix.as_deref(), Some(""));
+
+        let parsed = DockerCli::try_parse_from(["paws", "--version-prefix", "v"]).unwrap();
+        assert_eq!(parsed.docker.version_prefix.as_deref(), Some("v"));
+
+        let parsed = DockerCli::try_parse_from(["paws"]).unwrap();
+        assert_eq!(parsed.docker.version_prefix, None);
+    }
 }
