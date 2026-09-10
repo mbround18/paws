@@ -28,7 +28,7 @@ After step 3, restart/reload the MCP client (or start a new session) so it picks
 
 ## paws ci
 
-Build and test a language target (node, rust, python, go, java, kotlin, ruby, php, dotnet, elixir, tauri, tauri-android, flatpak, esp32)
+Build and test a language target (node, rust, python, go, java, kotlin, ruby, php, dotnet, elixir, ansible, tauri, tauri-android, flatpak, esp32)
 
 - `--source` — Directory to build, relative to the current one. Defaults to the current directory
 - `--toolchain` — Which toolchain to build. Clap lists the accepted values from `paws_core::TOOLCHAINS`, so `--help` can't fall behind what `paws ci` actually dispatches
