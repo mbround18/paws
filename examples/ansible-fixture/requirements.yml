@@ -1,0 +1,6 @@
+---
+# `ansible.posix` is not bundled with ansible-core, so the playbook below
+# only resolves in a clean container because this file installs it — which
+# is exactly the galaxy step the pipeline runs first.
+collections:
+  - name: ansible.posix

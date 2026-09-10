@@ -1,0 +1,10 @@
+---
+- name: Say hello
+  ansible.builtin.debug:
+    msg: "hello from the paws ansible fixture"
+
+- name: Prove an out-of-core collection resolves
+  ansible.posix.synchronize:
+    src: /dev/null
+    dest: /dev/null
+  when: false

@@ -29,6 +29,7 @@ pub enum Toolchain {
     Node,
     Rust,
     Python,
+    Ansible,
     Go,
     Java,
     Kotlin,
@@ -115,6 +116,27 @@ pub const TOOLCHAINS: &[ToolchainInfo] = &[
         toolchain: Toolchain::Python,
         name: "python",
         markers: &["pyproject.toml"],
+        provisions: Some("python"),
+        version_files: &[
+            VersionSource::Bare(".python-version"),
+            VersionSource::ToolVersions("python"),
+        ],
+        default_version: "3.13",
+        image_template: Some("astral/uv:python{version}-trixie-slim"),
+    },
+    ToolchainInfo {
+        toolchain: Toolchain::Ansible,
+        name: "ansible",
+        // An Ansible control repo pins its own tooling through
+        // `pyproject.toml`, so marker-based detection on that file would
+        // report both `python` and `ansible` for one project and generate
+        // two CI steps — the same reason `tauri` carries no markers. And
+        // `ansible.cfg` is not a reliable marker either: it is optional, and
+        // a role-only repo has none. Detection lives in `paws-ansible`.
+        markers: &[],
+        // The pipeline runs on the `astral/uv` image and drives every tool
+        // through `uv`, so provisioning an Ansible build is provisioning
+        // Python.
         provisions: Some("python"),
         version_files: &[
             VersionSource::Bare(".python-version"),
@@ -401,6 +423,7 @@ mod tests {
             Toolchain::Node,
             Toolchain::Rust,
             Toolchain::Python,
+            Toolchain::Ansible,
             Toolchain::Go,
             Toolchain::Java,
             Toolchain::Kotlin,

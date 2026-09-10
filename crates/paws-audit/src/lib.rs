@@ -54,7 +54,11 @@ impl LanguageFamily {
             // Tauri and its Android variant are Node projects with a Rust
             // core; the Node half is what the JS scanners see.
             Toolchain::Node | Toolchain::Tauri | Toolchain::TauriAndroid => Some(Self::Node),
-            Toolchain::Python => Some(Self::Python),
+            // An Ansible control repo's dependency tree *is* a Python
+            // dependency tree — `ansible-core`, `ansible-lint` and
+            // `molecule` all arrive through `pyproject.toml`/`uv.lock` — so
+            // the Python scanners are exactly the right ones for it too.
+            Toolchain::Python | Toolchain::Ansible => Some(Self::Python),
             Toolchain::Go => Some(Self::Go),
             // Buildable, but no scanner suite is wired for these yet. The
             // cross-language scanners (semgrep, gitleaks) still run on the

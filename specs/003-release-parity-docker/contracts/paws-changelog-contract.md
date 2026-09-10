@@ -49,9 +49,12 @@ No secret-bearing flag exists — the GitHub token is resolved exclusively via
   newly appended section (FR-008; SC-003).
 - First-run (file doesn't exist): created fresh with a single section, not an error (User Story 2
   Acceptance Scenario 2).
-- Section content: one dated, version-headed Markdown section per run, one line per commit/PR in
-  range, each either a PR title or (FR-009 fallback) a raw commit subject — exact Markdown
-  structure is a `paws`-native format (Out of Scope: not a byte-for-byte `mbround18/auto` clone).
+- Section content: one dated, version-headed Markdown section per run. Each pull request in range
+  gets one line with its title, and `(#<number>)` when the provider reports a number, however many
+  of its commits are in range. Each commit with no pull request gets its own line with its raw
+  subject (FR-009 fallback). Commits whose subject carries `[skip ci]` or `[ci skip]`, such as the
+  changelog's own commit-back commits, are left out. The exact Markdown structure is a
+  `paws`-native format (Out of Scope: not a byte-for-byte `mbround18/auto` clone).
 
 ## 5) Compatibility contract with `valheim-docker`'s current `mbround18/auto` flow
 

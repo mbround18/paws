@@ -1,0 +1,7 @@
+---
+- name: Greet the fixture host
+  hosts: all
+  gather_facts: false
+
+  roles:
+    - role: greeting

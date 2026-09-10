@@ -20,6 +20,15 @@ pub struct HistoryCommit {
     pub subject: String,
 }
 
+/// The pull request associated with a commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestRef {
+    /// The PR number, when the provider reports one. It's what identifies a
+    /// PR across its commits; see [`build_entry`].
+    pub number: Option<u64>,
+    pub title: String,
+}
+
 /// What changelog generation needs from a commit/PR history source
 /// (FR-017). This spec ships exactly one implementation
 /// ([`GitHubHistoryProvider`]); the trait itself — not any particular
@@ -41,6 +50,22 @@ pub trait HistoryProvider: Send + Sync {
     /// [`ChangelogLine::RawCommit`] in either case — a commit is never
     /// silently dropped.
     async fn pr_title_for_commit(&self, sha: &str) -> Result<Option<String>>;
+
+    /// The pull request associated with `sha`, including its number when the
+    /// provider knows it. Same fallback rules as
+    /// [`pr_title_for_commit`](Self::pr_title_for_commit). The number is what
+    /// lets [`build_entry`] collapse a PR's many commits into one line. The
+    /// default only has the title to go on, so a provider that can report
+    /// numbers should override this.
+    async fn pull_request_for_commit(&self, sha: &str) -> Result<Option<PullRequestRef>> {
+        Ok(self
+            .pr_title_for_commit(sha)
+            .await?
+            .map(|title| PullRequestRef {
+                number: None,
+                title,
+            }))
+    }
 }
 
 /// GitHub REST API implementation of [`HistoryProvider`] — the sole
@@ -122,6 +147,10 @@ impl HistoryProvider for GitHubHistoryProvider {
     }
 
     async fn pr_title_for_commit(&self, sha: &str) -> Result<Option<String>> {
+        Ok(self.pull_request_for_commit(sha).await?.map(|pr| pr.title))
+    }
+
+    async fn pull_request_for_commit(&self, sha: &str) -> Result<Option<PullRequestRef>> {
         if sha.is_empty() {
             return Ok(None);
         }
@@ -142,16 +171,18 @@ impl HistoryProvider for GitHubHistoryProvider {
             Ok(body) => body,
             Err(_) => return Ok(None),
         };
-        let Some(prs) = body.as_array() else {
-            return Ok(None);
-        };
-
-        Ok(prs
-            .first()
-            .and_then(|pr| pr.get("title"))
-            .and_then(|t| t.as_str())
-            .map(String::from))
+        Ok(pull_request_from_response(&body))
     }
+}
+
+/// The first pull request in a `commits/{sha}/pulls` response, if any. Kept
+/// separate from the HTTP call so the response handling is testable without
+/// a live API.
+fn pull_request_from_response(body: &serde_json::Value) -> Option<PullRequestRef> {
+    let pr = body.as_array()?.first()?;
+    let title = pr.get("title")?.as_str()?.to_string();
+    let number = pr.get("number").and_then(serde_json::Value::as_u64);
+    Some(PullRequestRef { number, title })
 }
 
 /// Selects a [`HistoryProvider`] automatically based on the running
@@ -178,8 +209,17 @@ pub async fn detect_history_provider() -> Result<Box<dyn HistoryProvider>> {
 /// commit subject (FR-009 fallback when no PR is found).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChangelogLine {
-    PullRequest { title: String, sha: String },
-    RawCommit { subject: String, sha: String },
+    /// `sha` is the first commit of the PR in range; `number` is rendered in
+    /// its place when known.
+    PullRequest {
+        title: String,
+        number: Option<u64>,
+        sha: String,
+    },
+    RawCommit {
+        subject: String,
+        sha: String,
+    },
 }
 
 /// One dated, version-headed section to append to `CHANGELOG.md`.
@@ -204,9 +244,16 @@ pub fn render_entry(entry: &ChangelogEntry) -> String {
     for line in &entry.lines {
         use std::fmt::Write as _;
         let _ = match line {
-            ChangelogLine::PullRequest { title, sha } => {
-                writeln!(out, "- {title} ({})", short_sha(sha))
-            }
+            ChangelogLine::PullRequest {
+                title,
+                number: Some(number),
+                ..
+            } => writeln!(out, "- {title} (#{number})"),
+            ChangelogLine::PullRequest {
+                title,
+                number: None,
+                sha,
+            } => writeln!(out, "- {title} ({})", short_sha(sha)),
             ChangelogLine::RawCommit { subject, sha } => {
                 writeln!(out, "- {subject} ({})", short_sha(sha))
             }
@@ -215,9 +262,11 @@ pub fn render_entry(entry: &ChangelogEntry) -> String {
     out
 }
 
-/// Builds a [`ChangelogEntry`] for `version` from every commit in
-/// `(base, head]`, rendering each as a PR title (preferred) or a raw commit
-/// subject (FR-009 fallback) via `provider`.
+/// Builds a [`ChangelogEntry`] for `version` from the commits in
+/// `(base, head]`: one line per pull request (preferred), however many of its
+/// commits are in range, plus one line per commit that has no pull request
+/// (FR-009 fallback). Commits carrying a `[skip ci]`/`[ci skip]` marker are
+/// left out; that includes the changelog commits [`commit_back`] itself makes.
 pub async fn build_entry(
     provider: &dyn HistoryProvider,
     version: &str,
@@ -227,12 +276,27 @@ pub async fn build_entry(
 ) -> Result<ChangelogEntry> {
     let commits = provider.commits_in_range(base, head).await?;
     let mut lines = Vec::with_capacity(commits.len());
+    let mut seen_prs = std::collections::HashSet::new();
     for commit in commits {
-        let line = match provider.pr_title_for_commit(&commit.sha).await? {
-            Some(title) => ChangelogLine::PullRequest {
-                title,
-                sha: commit.sha,
-            },
+        if is_skip_ci(&commit.subject) {
+            continue;
+        }
+        let line = match provider.pull_request_for_commit(&commit.sha).await? {
+            Some(pr) => {
+                // The number identifies a PR. The title is only a fallback key,
+                // for providers that can't report numbers.
+                let key = pr
+                    .number
+                    .map_or_else(|| format!("title:{}", pr.title), |n| format!("#{n}"));
+                if !seen_prs.insert(key) {
+                    continue;
+                }
+                ChangelogLine::PullRequest {
+                    title: pr.title,
+                    number: pr.number,
+                    sha: commit.sha,
+                }
+            }
             None => ChangelogLine::RawCommit {
                 subject: commit.subject,
                 sha: commit.sha,
@@ -245,6 +309,14 @@ pub async fn build_entry(
         date: date.to_string(),
         lines,
     })
+}
+
+/// Whether `subject` carries a CI-skip marker. [`commit_back`] marks its own
+/// commits `[skip ci]`, so without this check every entry would list the
+/// previous run's changelog commit.
+fn is_skip_ci(subject: &str) -> bool {
+    let lower = subject.to_ascii_lowercase();
+    lower.contains("[skip ci]") || lower.contains("[ci skip]")
 }
 
 /// Appends `entry`'s rendered section to the file at `path` — a literal
@@ -383,7 +455,10 @@ mod tests {
     /// fallback behavior without live network access.
     struct FixtureHistoryProvider {
         commits: Vec<HistoryCommit>,
+        /// Title-only PR lookups, like a provider that can't report numbers.
         pr_titles: HashMap<String, String>,
+        /// PRs with numbers, keyed by commit sha. Checked before `pr_titles`.
+        prs: HashMap<String, PullRequestRef>,
         pr_lookup_calls: Mutex<Vec<String>>,
     }
 
@@ -397,6 +472,20 @@ mod tests {
             self.pr_lookup_calls.lock().unwrap().push(sha.to_string());
             Ok(self.pr_titles.get(sha).cloned())
         }
+
+        async fn pull_request_for_commit(&self, sha: &str) -> Result<Option<PullRequestRef>> {
+            if let Some(pr) = self.prs.get(sha) {
+                self.pr_lookup_calls.lock().unwrap().push(sha.to_string());
+                return Ok(Some(pr.clone()));
+            }
+            Ok(self
+                .pr_title_for_commit(sha)
+                .await?
+                .map(|title| PullRequestRef {
+                    number: None,
+                    title,
+                }))
+        }
     }
 
     fn commit(sha: &str, subject: &str) -> HistoryCommit {
@@ -406,12 +495,200 @@ mod tests {
         }
     }
 
+    fn pr(number: u64, title: &str) -> PullRequestRef {
+        PullRequestRef {
+            number: Some(number),
+            title: title.to_string(),
+        }
+    }
+
+    fn fixture(
+        commits: Vec<HistoryCommit>,
+        prs: &[(&str, PullRequestRef)],
+        pr_titles: &[(&str, &str)],
+    ) -> FixtureHistoryProvider {
+        FixtureHistoryProvider {
+            commits,
+            pr_titles: pr_titles
+                .iter()
+                .map(|(sha, title)| (sha.to_string(), title.to_string()))
+                .collect(),
+            prs: prs
+                .iter()
+                .map(|(sha, pr)| (sha.to_string(), pr.clone()))
+                .collect(),
+            pr_lookup_calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    // One line per PR, not per commit: a PR's commits collapse into the line
+    // for its first commit, wherever the rest land in the range.
+    #[tokio::test]
+    async fn build_entry_lists_each_pull_request_once_however_many_commits_it_has() {
+        let provider = fixture(
+            vec![
+                commit("a1", "feat: hexium resolver"),
+                commit("a2", "test: hexium e2e"),
+                commit("b1", "ci: fix workflow path"),
+                commit("a3", "docs: hexium tutorial"),
+            ],
+            &[
+                ("a1", pr(7, "Support Hexium")),
+                ("a2", pr(7, "Support Hexium")),
+                ("b1", pr(8, "Fix CI")),
+                ("a3", pr(7, "Support Hexium")),
+            ],
+            &[],
+        );
+
+        let entry = build_entry(&provider, "v1.3.0", "2026-08-23", "v1.2.0", "v1.3.0")
+            .await
+            .unwrap();
+        assert_eq!(
+            entry.lines,
+            vec![
+                ChangelogLine::PullRequest {
+                    title: "Support Hexium".to_string(),
+                    number: Some(7),
+                    sha: "a1".to_string(),
+                },
+                ChangelogLine::PullRequest {
+                    title: "Fix CI".to_string(),
+                    number: Some(8),
+                    sha: "b1".to_string(),
+                },
+            ]
+        );
+
+        let rendered = render_entry(&entry);
+        assert_eq!(rendered.matches("- Support Hexium (#7)").count(), 1);
+        assert!(rendered.contains("- Fix CI (#8)"));
+    }
+
+    #[tokio::test]
+    async fn build_entry_keeps_distinct_pull_requests_that_share_a_title() {
+        let provider = fixture(
+            vec![commit("a1", "chore: deps"), commit("b1", "chore: deps")],
+            &[("a1", pr(1, "Update deps")), ("b1", pr(2, "Update deps"))],
+            &[],
+        );
+
+        let entry = build_entry(&provider, "v1.3.0", "2026-08-23", "v1.2.0", "v1.3.0")
+            .await
+            .unwrap();
+        assert_eq!(entry.lines.len(), 2, "PRs #1 and #2 are different PRs");
+    }
+
+    // A provider that only reports titles still gets one line per PR, keyed
+    // by title instead of number.
+    #[tokio::test]
+    async fn build_entry_dedupes_by_title_when_the_provider_has_no_pr_numbers() {
+        let provider = fixture(
+            vec![commit("a1", "feat: one"), commit("a2", "feat: two")],
+            &[],
+            &[("a1", "Support Hexium"), ("a2", "Support Hexium")],
+        );
+
+        let entry = build_entry(&provider, "v1.3.0", "2026-08-23", "v1.2.0", "v1.3.0")
+            .await
+            .unwrap();
+        assert_eq!(
+            entry.lines,
+            vec![ChangelogLine::PullRequest {
+                title: "Support Hexium".to_string(),
+                number: None,
+                sha: "a1".to_string(),
+            }]
+        );
+    }
+
+    // FR-009: a commit without a PR is never dropped, even when another
+    // PR-less commit has the same subject.
+    #[tokio::test]
+    async fn build_entry_never_collapses_commits_without_a_pull_request() {
+        let provider = fixture(
+            vec![
+                commit("c1", "chore: bump version"),
+                commit("c2", "chore: bump version"),
+            ],
+            &[],
+            &[],
+        );
+
+        let entry = build_entry(&provider, "v1.3.0", "2026-08-23", "v1.2.0", "v1.3.0")
+            .await
+            .unwrap();
+        assert_eq!(entry.lines.len(), 2);
+        assert!(
+            entry
+                .lines
+                .iter()
+                .all(|line| matches!(line, ChangelogLine::RawCommit { .. }))
+        );
+    }
+
+    // The changelog's own `[skip ci]` commits (and `[ci skip]` ones) are left
+    // out without even looking up a PR for them.
+    #[tokio::test]
+    async fn build_entry_leaves_out_skip_ci_commits() {
+        let provider = fixture(
+            vec![
+                commit("s1", "chore: update CHANGELOG.md [skip ci]"),
+                commit("s2", "Update CHANGELOG.md [CI SKIP]"),
+                commit("f1", "fix: real change"),
+            ],
+            &[("f1", pr(9, "Real change"))],
+            &[],
+        );
+
+        let entry = build_entry(&provider, "v1.3.0", "2026-08-23", "v1.2.0", "v1.3.0")
+            .await
+            .unwrap();
+        assert_eq!(
+            entry.lines,
+            vec![ChangelogLine::PullRequest {
+                title: "Real change".to_string(),
+                number: Some(9),
+                sha: "f1".to_string(),
+            }]
+        );
+        assert_eq!(*provider.pr_lookup_calls.lock().unwrap(), vec!["f1"]);
+    }
+
+    #[test]
+    fn pull_request_from_response_reads_the_first_prs_number_and_title() {
+        let body = serde_json::json!([
+            { "number": 1512, "title": "Rootless uid 1000" },
+            { "number": 1507, "title": "Run steam as uid 1000" }
+        ]);
+        assert_eq!(
+            pull_request_from_response(&body),
+            Some(pr(1512, "Rootless uid 1000"))
+        );
+
+        let no_number = serde_json::json!([{ "title": "Untitled number" }]);
+        assert_eq!(
+            pull_request_from_response(&no_number),
+            Some(PullRequestRef {
+                number: None,
+                title: "Untitled number".to_string(),
+            })
+        );
+
+        assert_eq!(pull_request_from_response(&serde_json::json!([])), None);
+        assert_eq!(
+            pull_request_from_response(&serde_json::json!({ "message": "Not Found" })),
+            None
+        );
+    }
+
     // T035: PR-title rendering against a mocked HistoryProvider.
     #[tokio::test]
     async fn build_entry_prefers_pr_titles_over_raw_subjects() {
         let provider = FixtureHistoryProvider {
             commits: vec![commit("abc1234567", "fix: mod support (#1468)")],
             pr_titles: HashMap::from([("abc1234567".to_string(), "fix/mod support".to_string())]),
+            prs: HashMap::new(),
             pr_lookup_calls: Mutex::new(Vec::new()),
         };
 
@@ -422,6 +699,7 @@ mod tests {
             entry.lines,
             vec![ChangelogLine::PullRequest {
                 title: "fix/mod support".to_string(),
+                number: None,
                 sha: "abc1234567".to_string(),
             }]
         );
@@ -437,6 +715,7 @@ mod tests {
         let provider = FixtureHistoryProvider {
             commits: vec![commit("deadbeef00", "chore: direct push, no PR")],
             pr_titles: HashMap::new(),
+            prs: HashMap::new(),
             pr_lookup_calls: Mutex::new(Vec::new()),
         };
 

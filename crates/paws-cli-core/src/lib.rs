@@ -290,6 +290,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
         }
         Some(Toolchain::TauriAndroid) => ci_tauri_android(&source_dir, silent).await?,
         Some(Toolchain::Python) => ci_python(&source_dir, silent, image.as_deref()).await?,
+        Some(Toolchain::Ansible) => ci_ansible(&source_dir, silent, image.as_deref()).await?,
         Some(Toolchain::Rust) => ci_rust(&source_dir, silent, coverage, image.as_deref()).await?,
         Some(Toolchain::Go) => ci_go(&source_dir, silent, &targets, image.as_deref()).await?,
         Some(Toolchain::Java) => ci_java(&source_dir, silent).await?,
@@ -582,7 +583,63 @@ async fn ci_kotlin(source_dir: &std::path::Path, silent: bool) -> anyhow::Result
     Ok(())
 }
 
-/// `paws ci` for Bundler projects.
+/// `paws ci` for Ansible control repos and role/collection repos.
+async fn ci_ansible(
+    source_dir: &std::path::Path,
+    silent: bool,
+    image: Option<&str>,
+) -> anyhow::Result<()> {
+    let dir = source_dir.to_path_buf();
+    let project = paws_ansible::detect_project(&dir)
+        .context("failed to detect an Ansible project in the current directory")?;
+    println!(
+        "ci: ansible project ({}, {} playbook(s)) ({})",
+        match project.packaging {
+            paws_ansible::Packaging::Uv { has_lockfile: true } => "uv.lock present",
+            paws_ansible::Packaging::Uv {
+                has_lockfile: false,
+            } => "no uv.lock",
+            paws_ansible::Packaging::Bare => "no pyproject.toml",
+        },
+        project.playbooks.len(),
+        dir.display()
+    );
+    // Caught here rather than by the pipeline's own `uv run ansible-lint`,
+    // which only fails after a full sync has already run.
+    if project.lint_plan() == paws_ansible::LintPlan::MissingAnsibleLint {
+        anyhow::bail!(
+            "this project pins no ansible-lint — add it to pyproject.toml's \
+             [dependency-groups] (e.g. `dev = [\"ansible-lint\"]`) so \
+             `uv sync --all-groups` puts it on PATH"
+        );
+    }
+    if project.requirements_file.is_none() {
+        println!(
+            "ci: no requirements.yml — playbooks using a collection outside \
+             ansible-core will fail to resolve it in a clean container"
+        );
+    }
+    if !project.molecule_scenarios.is_empty() {
+        println!(
+            "ci: {} molecule scenario(s) found ({}) — not run here: molecule \
+             drives a container per role and this build has no docker daemon. \
+             Run them on a docker-enabled runner as a separate job.",
+            project.molecule_scenarios.len(),
+            project.molecule_scenarios.join(", ")
+        );
+    }
+    let args = image.map_or_else(
+        || paws_ansible::dagger_pipeline_args(&project, &dir.to_string_lossy()),
+        |image| {
+            paws_ansible::dagger_pipeline_args_with_image(&project, &dir.to_string_lossy(), image)
+        },
+    );
+    run_dagger_core(&args, silent).await?;
+    println!("ci: ansible lint/syntax-check succeeded");
+    Ok(())
+}
+
+/// `paws ci` for Ruby projects.
 async fn ci_ruby(
     source_dir: &std::path::Path,
     silent: bool,
