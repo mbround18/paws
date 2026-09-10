@@ -32,6 +32,7 @@ paws-ruby = { path = "../paws-ruby" }
 paws-php = { path = "../paws-php" }
 paws-dotnet = { path = "../paws-dotnet" }
 paws-elixir = { path = "../paws-elixir" }
+paws-ansible = { path = "../paws-ansible" }
 paws-esp32 = { path = "../paws-esp32" }
 paws-publish = { path = "../paws-publish" }
 paws-flatpak = { path = "../paws-flatpak" }

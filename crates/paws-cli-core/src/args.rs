@@ -90,7 +90,8 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Build and test a language target (node, rust, python, go, java, kotlin, ruby,
-    /// php, dotnet, elixir, tauri, tauri-android, flatpak, esp32).
+    /// php, dotnet, elixir, ansible, tauri, tauri-android, flatpak,
+    /// esp32).
     Ci(CiArgs),
     /// Build and gate a container image the same way `docker-facts` + `docker-release` do.
     Docker(DockerArgs),
@@ -287,7 +288,9 @@ pub struct CiArgs {
     /// `elixir` (Mix) each detect their own project layout too: the Ruby
     /// test runner (`rake` vs `rspec`), and whether a `PHPUnit` suite or a
     /// `Microsoft.NET.Test.Sdk` test project exists at all before running
-    /// one.
+    /// one. `ansible` installs the repo's collections, lints, and
+    /// syntax-checks every playbook; molecule scenarios are named but not
+    /// run, since they need a docker daemon this build has none of.
     #[arg(long)]
     #[serde(default)]
     pub toolchain: Option<Toolchain>,

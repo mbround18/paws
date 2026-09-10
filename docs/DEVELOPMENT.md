@@ -175,6 +175,22 @@ pytest` against `astral/uv:python<version>-trixie-slim`, a plain `container from
   skips the step (`examples/python-no-tests-fixture`); one with tests but no declared pytest is
   an error raised before the container is built, since that combination is a mistake, not a
   project without tests.
+- `crates/paws-ansible` — the Ansible toolchain behind `paws ci --toolchain ansible`. Runs on the
+  same `astral/uv:python<version>-trixie-slim` image as `paws-python`, because an Ansible control
+  repo pins `ansible-core`/`ansible-lint`/`molecule` through ordinary Python packaging: `uv sync
+--all-groups [--frozen]`, `ansible-galaxy install -r requirements.yml` when the repo has one,
+  `ansible-lint`, then one `ansible-playbook --syntax-check` per playbook (one invocation each, so
+  a failure names the playbook that broke). A repo with no `pyproject.toml` at all — the shape
+  Galaxy publishes roles and collections in — takes a second path that installs `ansible-core` and
+  `ansible-lint` into the image and runs them directly, with no `uv run` prefix. Two things it
+  deliberately does not do: it does not run Molecule (every scenario drives a real container per
+  role and a Dagger build has no Docker daemon to give it — scenarios are detected and named in
+  the log so CI can run them as a separate job on a Docker-enabled runner, rather than being
+  silently skipped and looking green), and it refuses up front, before the container is built, on
+  a `uv` project that pins no `ansible-lint`, the same call `paws-python` makes about a missing
+  `pytest`. Detection is structural — `ansible.cfg`, a `playbooks/` directory, or a role with real
+  task files — and the toolchain carries no markers, since `pyproject.toml` would otherwise report
+  both `python` and `ansible` for one repo. Verified against `examples/ansible-fixture`.
 - `crates/paws-ruby`, `crates/paws-php`, `crates/paws-dotnet`, `crates/paws-elixir` — the
   Ruby/PHP/.NET/Elixir toolchains behind `paws ci --toolchain ruby`/`php`/`dotnet`/`elixir`. Each
   is a detect-then-build-an-argument-list crate in the same shape as `paws-python`/`paws-go` (no
@@ -250,15 +266,15 @@ package` with `--package` — against every chart it finds, via `builders/helm/D
   on external infrastructure (a Dagger engine, `gh-reusable` being reachable on GitHub) the fast
   unit-test job doesn't need.
 - **`ci-e2e-languages`** — the same FR-008 rule for `--toolchain java`/`kotlin`/`ruby`/`php`/
-  `dotnet`/`elixir`, one matrix leg per (toolchain, fixture) pair — nine of them, since `java` has
-  two build systems plus the JDK-25 toolchain fixture to cover and `kotlin` has the mixed
-  Java/Kotlin one. Matrixed rather than appended to `ci-e2e`'s step list because each leg is
+  `dotnet`/`elixir`/`ansible`, one matrix leg per (toolchain, fixture) pair — ten of them, since
+  `java` has two build systems plus the JDK-25 toolchain fixture to cover and `kotlin` has the
+  mixed Java/Kotlin one. Matrixed rather than appended to `ci-e2e`'s step list because each leg is
   independent and individually slow (a cold Gradle or .NET run is minutes of image pull plus
   dependency resolution), so the job's wall clock is the slowest leg instead of their sum.
   `fail-fast: false` — one language's regression shouldn't hide another's. Gated to
   `pull_request` only (`if: github.event_name == 'pull_request'`), unlike `ci-e2e` above, which
   runs on every trigger including the release gate: these nine legs pull real dependencies from
-  rubygems/packagist/nuget.org/hex.pm at run time, and a release shouldn't be blocked by an
+  rubygems/packagist/nuget.org/hex.pm/galaxy.ansible.com at run time, and a release shouldn't be blocked by an
   outage at a registry it doesn't otherwise depend on. Not a latency decision — measured, the
   nine legs run in parallel at 0-1m each inside a 2-minute CI gate whose critical path is
   `paws ci end-to-end (dagger)` regardless. Inside a reusable workflow `github.event_name` is the

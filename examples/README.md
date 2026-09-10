@@ -184,6 +184,14 @@ test` pipeline, run against the plain Node base image through Dagger — verifie
   emitted a `.slnx`, not a `.sln`, which is why both formats are detected — and its
   `Microsoft.NET.Test.Sdk` test-project check, with `dotnet restore`/`build`/`test` all running
   for real through Dagger (2 xUnit tests passing on .NET 10).
+- `ansible-fixture/` — a `uv`-managed Ansible control repo in miniature (an `ansible.cfg`, a
+  `pyproject.toml` pinning `ansible-core` + `ansible-lint`, a `requirements.yml`, one playbook,
+  one role); the target for `paws ci --toolchain ansible`. Exercises `crates/paws-ansible`'s
+  detection and the full `uv sync` → `ansible-galaxy install -r` → `ansible-lint` →
+  `ansible-playbook --syntax-check` chain against `astral/uv:python3.13-trixie-slim` through
+  Dagger. The role's one `ansible.posix` task is `when: false` and never runs — it is there so the
+  playbook genuinely fails to resolve when the galaxy step is missing, which is what makes that
+  step's ordering testable end to end rather than by assertion alone.
 - `elixir-fixture/` — a minimal Mix project (`mix.exs` with no dependencies, a `Calculator`
   module, and an ExUnit suite); the target for `paws ci --toolchain elixir`. Exercises
   `crates/paws-elixir`'s `mix.exs` detection and the full Hex/rebar → `deps.get` → `compile

@@ -1,0 +1,10 @@
+[project]
+name = "paws-ansible-fixture"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["ansible-core>=2.17"]
+
+[dependency-groups]
+# `paws ci --toolchain ansible` errors out without this pin rather than
+# failing at the end of a sync — the fixture proves the happy path.
+dev = ["ansible-lint>=25"]

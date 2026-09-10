@@ -163,8 +163,9 @@ subcommand-by-subcommand walkthrough with real example output.
 
 ## Language / stack support
 
-`paws ci --toolchain <x>` accepts fourteen values today: `rust`, `node`, `python`, `go`, `java`,
-`kotlin`, `ruby`, `php`, `dotnet`, `elixir`, `tauri`, `tauri-android`, `flatpak`, and `esp32`.
+`paws ci --toolchain <x>` accepts fifteen values today: `rust`, `node`, `python`, `ansible`, `go`,
+`java`, `kotlin`, `ruby`, `php`, `dotnet`, `elixir`, `tauri`, `tauri-android`, `flatpak`, and
+`esp32`.
 `paws ci --help` prints that list from the same registry the dispatch itself reads
 (`paws_core::TOOLCHAINS`), so it is always current — this paragraph is the summary, `--help` is
 the source of truth.
@@ -173,7 +174,13 @@ Each toolchain detects its own project layout rather than needing extra flags: N
 four major package managers (npm, yarn, pnpm, bun) with Vite/Next.js framework detection and
 automatic Playwright e2e handling, `uv`-based Python, Maven vs Gradle for Java, the Ruby test
 runner (`rake` vs `rspec`), and whether a PHPUnit or `Microsoft.NET.Test.Sdk` suite exists at all
-before trying to run one. ### Toolchain versions
+before trying to run one. `ansible` covers both shapes an Ansible repo comes in — a `uv`-managed
+control repo (`ansible-galaxy install -r requirements.yml`, `ansible-lint`, then
+`ansible-playbook --syntax-check` per playbook, all under `uv run`) and a bare role/collection
+repo with no Python packaging, which gets `ansible-core` and `ansible-lint` installed into the
+image instead. Molecule scenarios are detected and named, but not run: molecule drives a real
+container per role, and a Dagger build has no Docker daemon to hand it — run those as a separate
+job on a Docker-enabled runner. ### Toolchain versions
 
 `paws` reads the version file your ecosystem already uses, so `paws ci` builds
 against the same toolchain a local build does — no extra configuration:
@@ -182,7 +189,7 @@ against the same toolchain a local build does — no extra configuration:
 | --- | --- |
 | `rust`, `esp32` | `rust-toolchain.toml`, `rust-toolchain`, `.tool-versions` |
 | `node`, `tauri` | `.nvmrc`, `.node-version`, `.tool-versions` |
-| `python` | `.python-version`, `.tool-versions` |
+| `python`, `ansible` | `.python-version`, `.tool-versions` |
 | `go` | `go.mod`'s `go` directive, `.go-version`, `.tool-versions` |
 | `ruby` | `.ruby-version`, `.tool-versions` |
 | `php`, `dotnet`, `elixir`, `java`, `kotlin` | their conventional file, `.tool-versions` |
