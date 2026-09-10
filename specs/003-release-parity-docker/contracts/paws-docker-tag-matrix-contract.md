@@ -11,8 +11,10 @@ New flags, all opt-in (default `false`/unset), additive to the existing `DockerA
 | `--tag-branch` | bool | `event_name` implies a branch-push build (not a tag, not `pull_request`, not `schedule`) |
 | `--tag-pr` | bool | `event_name == "pull_request"` **and** a PR number parses out of `git_ref` (R5) |
 | `--tag-schedule` | bool | `event_name == "schedule"` |
+| `--version-prefix` | string | Doesn't add a tag. Sets one prefix for `Version` and both rollup kinds, applied after stripping any leading `v` from the version (`""` gives `3.2.1` / `3.2` / `3`). Unset keeps `v` on `Version` and no prefix on rollups. Git-sha versions keep `sha-` either way |
+| `--no-prefix` | bool | Shorthand for `--version-prefix ""`. Conflicts with `--version-prefix` |
 
-Omitting all five flags MUST produce output byte-identical to today's `generate_tags` (FR-005,
+Omitting all seven flags MUST produce output byte-identical to today's `generate_tags` (FR-005,
 SC-001) — this is the contract's non-negotiable backward-compatibility floor.
 
 ## 2) `paws-docker::generate_tags` contract
@@ -40,9 +42,9 @@ path.
 
 | `ghaction-docker-meta` `type=` | `paws docker` equivalent | Byte-identical string? |
 |---|---|---|
-| `semver,pattern={{version}}` | existing `version_tag` (unchanged) | Yes (already shipped) |
-| `semver,pattern={{major}}.{{minor}}` | `--tag-rollup`'s `RollupMinor` | No — format decided by this feature, not a `ghaction-docker-meta` clone (Out of Scope) |
-| `semver,pattern={{major}}` | `--tag-rollup`'s `RollupMajor` | No, same reason |
+| `semver,pattern={{version}}` | existing `version_tag` | Only with `--version-prefix ""`. By default paws adds a `v` (`v3.2.1`), while `{{version}}` has none (`3.2.1`) |
+| `semver,pattern={{major}}.{{minor}}` | `--tag-rollup`'s `RollupMinor` | Yes when unprefixed (the default, or `--version-prefix ""`) |
+| `semver,pattern={{major}}` | `--tag-rollup`'s `RollupMajor` | Yes when unprefixed (the default, or `--version-prefix ""`) |
 | `ref,event=branch` | `--tag-branch`'s `BranchRef` | No |
 | `ref,event=pr` | `--tag-pr`'s `PrRef` (`pr-{number}`) | No |
 | `schedule` | `--tag-schedule`'s `Schedule` | No |

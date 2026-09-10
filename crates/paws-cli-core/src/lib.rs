@@ -917,6 +917,8 @@ pub async fn run_docker(args: DockerArgs) -> anyhow::Result<()> {
 // helpers callable in exactly one order.
 #[allow(clippy::too_many_lines)]
 async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
+    // Folds --no-prefix into --version-prefix "" before `args` is taken apart.
+    let version_prefix = args.effective_version_prefix();
     let DockerArgs {
         image,
         version,
@@ -939,6 +941,8 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
         tag_branch,
         tag_pr,
         tag_schedule,
+        version_prefix: _,
+        no_prefix: _,
     } = args;
 
     let image = image
@@ -970,6 +974,7 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
             tag_branch,
             tag_pr,
             tag_schedule,
+            version_prefix,
         },
         &DockerGithubContext {
             workspace: workspace.clone(),
