@@ -356,9 +356,12 @@ pub struct DockerArgs {
     /// A registry host here selects the registry to publish to — "ghcr.io/..."
     /// publishes to ghcr.io without also needing --registries. An unqualified
     /// name ("owner/app") is a Docker Hub reference, as docker itself reads it.
-    #[arg(long)]
+    ///
+    /// Comma-separated (or repeated) to build several images in one run: one
+    /// name per --target, in the same order.
+    #[arg(long, value_delimiter = ',')]
     #[serde(default)]
-    pub image: Option<String>,
+    pub image: Vec<String>,
     /// Version to tag with. Falls back to $`GITHUB_SHA` (short).
     #[arg(long)]
     #[serde(default)]
@@ -396,11 +399,18 @@ pub struct DockerArgs {
     pub with_latest: bool,
     /// Build a specific stage of a multi-stage Dockerfile instead of the
     /// final stage.
-    #[arg(long)]
+    ///
+    /// Comma-separated (or repeated) to build several stages in one run,
+    /// against one engine: whatever they share — a `builder` stage, a compile,
+    /// a package install — is built once for all of them, not once per
+    /// invocation. Give one --image per stage, or a single --image with
+    /// --prepend-target so their tags don't collide.
+    #[arg(long, value_delimiter = ',')]
     #[serde(default)]
-    pub target: Option<String>,
+    pub target: Vec<String>,
     /// Prefix the image tag with `--target`'s name, e.g. `<target>-<version>`
-    /// instead of just `<version>`. Only used with `--target`.
+    /// instead of just `<version>`. Only used with `--target`, and required
+    /// when several targets share one --image.
     #[arg(long)]
     #[serde(default)]
     pub prepend_target: bool,

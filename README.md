@@ -143,6 +143,12 @@ paws docker --image ghcr.io/you/app --version 1.0.0
 # $GHCR_USERNAME env fallbacks)
 DOCKER_TOKEN=*** paws docker --image you/app --with-latest --dockerhub-username you
 
+# Build several images out of one Dockerfile in a single run - one --image
+# per --target, in order. They build against one engine, so whatever the
+# stages share (a builder stage, the compile inside it) is built once for
+# all of them instead of once per `paws docker` process
+paws docker --image you/cli,you/server --target cli,server
+
 # Also publish to a private registry / Artifactory / anything else beyond
 # docker.io+ghcr.io (needs $<REGISTRY>_TOKEN, e.g. $MYCO_JFROG_IO_TOKEN
 # for myco.jfrog.io - built natively through Dagger, not gh-reusable,
