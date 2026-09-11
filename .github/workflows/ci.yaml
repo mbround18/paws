@@ -361,6 +361,19 @@ jobs:
           end=$(date +%s)
           echo "duration=$((end - start))" >> "$GITHUB_OUTPUT"
 
+      # A second paws call in the same job must not restore the cache over the
+      # engine the first call left running (that corrupted its snapshot store:
+      # `failed to rename ... file exists`), and must not re-upload an entry
+      # that already exists.
+      - name: paws docker again in the same job
+        working-directory: examples/docker-fixture
+        run: |
+          set -euo pipefail
+          output="$(paws docker --image ghcr.io/example/paws-cache-e2e-fixture --dockerfile Dockerfile --default-branch __none__ 2>&1)"
+          echo "$output"
+          grep -q "already restored earlier in this job" <<<"$output"
+          grep -q "already exists" <<<"$output"
+
       # SC-003: informational, not a hard gate — wall-clock timing across two
       # independent GitHub-hosted runners is noisy enough (neighbor
       # contention, registry pull variance) that failing the whole required
