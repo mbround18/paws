@@ -52,7 +52,7 @@ Build and gate a container image the same way `docker-facts` + `docker-release` 
 - `--push` — Force push regardless of branch/tag/label gating
 - `--with-latest` — Also tag and push `:latest` alongside `--version`, but only when the build is actually pushing and the ref is a real (non-prerelease) version tag — a plain branch/PR build never gets `:latest` regardless of this flag
 - `--target` — Build a specific stage of a multi-stage Dockerfile instead of the final stage
-- `--prepend-target` — Prefix the image tag with `--target`'s name, e.g. `<target>-<version>` instead of just `<version>`. Only used with `--target`
+- `--prepend-target` — Prefix the image tag with `--target`'s name, e.g. `<target>-<version>` instead of just `<version>`. Only used with `--target`, and required when several targets share one --image
 - `--labels` — PR labels to check against --canary-label, comma-separated
 - `--default-branch` (default: `main`) — The repo's default branch. A push directly to this branch, or any tag push, always pushes the image — --canary-label/--push only matter for everything else (feature branches, PRs)
 - `--dockerhub-username` — Docker Hub username to authenticate publishing with. Falls back to $`DOCKERHUB_USERNAME`. Required (here or via env) to actually push to docker.io — without it, `dockerRelease` builds but can't authenticate, so `push=true` still publishes nothing
