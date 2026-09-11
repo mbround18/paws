@@ -670,6 +670,14 @@ impl CacheTransport {
         }
     }
 
+    /// Whether an entry for `key` already exists, without downloading it.
+    async fn exists(&self, key: &str) -> Result<bool> {
+        Ok(match self {
+            Self::V1(c) => c.find_entry(key).await?.is_some(),
+            Self::V2(c) => c.find_entry(key).await?.is_some(),
+        })
+    }
+
     async fn upload(&self, key: &str, data: &[u8]) -> Result<()> {
         match self {
             Self::V1(c) => {
@@ -740,6 +748,16 @@ async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
     };
     let volume = find_engine_volume(&container).await?;
     let key = engine_cache_key().await?;
+
+    // Actions cache entries are immutable: once one exists for this key the upload is
+    // refused with 409. Checking first skips stopping the engine and archiving its whole
+    // volume (minutes on a real build) only to have the result thrown away.
+    if client.exists(&key).await? {
+        eprintln!(
+            "cache: github-actions cache entry {key} already exists; entries can't be overwritten, skipping save"
+        );
+        return Ok(());
+    }
 
     let archive_path = std::env::temp_dir().join("paws-dagger-cache-save.tar.gz");
     // A bind mount onto a host path that doesn't exist yet gets created as
@@ -813,12 +831,46 @@ pub async fn restore_cache_backend() -> CacheBackend {
         version,
     } = &backend
     {
-        let client = CacheTransport::new(base_url, token.clone(), *version);
-        if let Err(err) = restore_github_actions_cache(&client).await {
-            eprintln!("cache: restore failed, continuing with a cold build: {err:#}");
+        if claim_restore(&restore_marker_path()) {
+            let client = CacheTransport::new(base_url, token.clone(), *version);
+            if let Err(err) = restore_github_actions_cache(&client).await {
+                eprintln!("cache: restore failed, continuing with a cold build: {err:#}");
+            }
+        } else {
+            eprintln!(
+                "cache: engine state was already restored earlier in this job; using the running engine as is"
+            );
         }
     }
     backend
+}
+
+/// Where [`restore_cache_backend`] records that this job has had its restore.
+/// `$RUNNER_TEMP` is private to each job on GitHub Actions runners; elsewhere
+/// this falls back to the OS temp dir.
+fn restore_marker_path() -> std::path::PathBuf {
+    std::env::var_os("RUNNER_TEMP")
+        .filter(|dir| !dir.is_empty())
+        .map_or_else(std::env::temp_dir, std::path::PathBuf::from)
+        .join("paws-dagger-cache-restored")
+}
+
+/// Claims the one restore a job gets: `true` the first time (recording it in
+/// `marker`), `false` on every later call, whether that first restore was a
+/// hit or a miss. A second restore would extract the cached archive over an
+/// engine that already holds this job's newer state; the stale metadata then
+/// hands out snapshot IDs that already exist on disk, and the next build
+/// fails with `failed to rename ... snapshots/<n>: file exists`. If the marker
+/// can't be written at all, the restore goes ahead as before.
+fn claim_restore(marker: &std::path::Path) -> bool {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker)
+    {
+        Ok(_) => true,
+        Err(err) => err.kind() != std::io::ErrorKind::AlreadyExists,
+    }
 }
 
 /// Saves the engine's persistent state back to `backend`'s cache, if
@@ -1477,6 +1529,91 @@ mod tests {
             let _ = restore_github_actions_cache(&client).await;
         }
         backend.clone()
+    }
+
+    #[test]
+    fn claim_restore_is_granted_once_per_marker() {
+        let marker = std::env::temp_dir().join(format!(
+            "paws-dagger-restore-marker-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        assert!(
+            claim_restore(&marker),
+            "the first call in a job should restore"
+        );
+        assert!(
+            !claim_restore(&marker),
+            "a later call must not restore over the engine the first one left running"
+        );
+        std::fs::remove_file(&marker).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_marker_lives_in_runner_temp_when_set() {
+        let _guard = ENV_LOCK.lock().await;
+        let saved = std::env::var_os("RUNNER_TEMP");
+        unsafe {
+            std::env::set_var("RUNNER_TEMP", "/tmp/paws-runner-temp-fixture");
+        }
+        let path = restore_marker_path();
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("RUNNER_TEMP", value),
+                None => std::env::remove_var("RUNNER_TEMP"),
+            }
+        }
+        assert_eq!(
+            path,
+            std::path::Path::new("/tmp/paws-runner-temp-fixture/paws-dagger-cache-restored")
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_transport_exists_reports_a_hit_and_a_miss() {
+        // A local stand-in for the v1 cache API: the first lookup is a hit,
+        // the second a clean miss (204). `exists` must only look, never
+        // download, so the fixture never serves an archive.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind fixture listener");
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let hit_body = r#"{"archiveLocation":"https://example.invalid/archive.tar.gz"}"#;
+            let responses = [
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{hit_body}",
+                    hit_body.len()
+                ),
+                "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".to_string(),
+            ];
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 4096];
+                let _ = socket.read(&mut buf).await.unwrap();
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let transport = CacheTransport::V1(ActionsCacheClient::new(
+            &format!("http://{addr}"),
+            "fixture-token".to_string(),
+        ));
+        assert!(
+            transport
+                .exists("fixture-key")
+                .await
+                .expect("hit lookup should succeed")
+        );
+        assert!(
+            !transport
+                .exists("fixture-key")
+                .await
+                .expect("miss lookup should succeed")
+        );
+        server.await.unwrap();
     }
 
     #[tokio::test]
