@@ -1082,6 +1082,83 @@ pub fn native_publish_pipeline_args(
     args
 }
 
+/// One image built from one stage of the Dockerfile. `paws docker` builds a
+/// list of these in a single invocation, against one engine, so a multi-stage
+/// Dockerfile whose stages share work — the usual `builder` stage feeding
+/// several runtime stages — does that work once per run instead of once per
+/// invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildUnit {
+    pub image: String,
+    /// The Dockerfile stage, or `None` for its final stage.
+    pub target: Option<String>,
+}
+
+/// Pairs `--image` with `--target` into the builds one `paws docker` run
+/// performs, in the order given.
+///
+/// - One image, no target: the single build `paws docker` has always done.
+/// - One image per target: each target publishes under its own name, which is
+///   how a repo ships, say, `owner/cli` and `owner/server` from one Dockerfile.
+/// - One image, several targets: every target publishes under that one name, so
+///   their tags have to differ — `--prepend-target` is what makes them differ,
+///   and without it the last target would simply overwrite the previous one's
+///   tags.
+/// - Several images, one target (or none): each image publishes the same build
+///   under its own name.
+///
+/// # Errors
+/// When the counts don't line up, or when several targets would publish
+/// colliding tags under one image name.
+pub fn plan_build_units(
+    images: &[String],
+    targets: &[String],
+    prepend_target: bool,
+) -> Result<Vec<BuildUnit>, String> {
+    if images.is_empty() {
+        return Err("--image is required (or set $GITHUB_REPOSITORY)".to_string());
+    }
+
+    match (images.len(), targets.len()) {
+        (_, 0 | 1) => {
+            let target = targets.first().cloned();
+            Ok(images
+                .iter()
+                .map(|image| BuildUnit {
+                    image: image.clone(),
+                    target: target.clone(),
+                })
+                .collect())
+        }
+        (1, _) if !prepend_target => Err(format!(
+            "{} targets all publish to {}, so they would overwrite each other's tags — \
+             pass --prepend-target to tag them `<target>-<version>`, or give one --image \
+             per --target",
+            targets.len(),
+            images[0]
+        )),
+        (1, _) => Ok(targets
+            .iter()
+            .map(|target| BuildUnit {
+                image: images[0].clone(),
+                target: Some(target.clone()),
+            })
+            .collect()),
+        (image_count, target_count) if image_count == target_count => Ok(images
+            .iter()
+            .zip(targets)
+            .map(|(image, target)| BuildUnit {
+                image: image.clone(),
+                target: Some(target.clone()),
+            })
+            .collect()),
+        (image_count, target_count) => Err(format!(
+            "--image was given {image_count} names and --target {target_count} stages — \
+             pass one --image per --target, or a single --image for all of them"
+        )),
+    }
+}
+
 /// The build inputs [`native_publish_pipeline_args`] needs — a borrowed
 /// view over the same fields [`DockerFacts`] already carries, so callers
 /// can pass `&facts` fields straight through without repackaging.
@@ -1107,6 +1184,111 @@ pub struct NativeRegistryPublish<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_image_and_no_target_is_a_single_build() {
+        let units = plan_build_units(&["owner/app".to_string()], &[], false).unwrap();
+        assert_eq!(
+            units,
+            vec![BuildUnit {
+                image: "owner/app".to_string(),
+                target: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_image_per_target_pairs_them_in_order() {
+        let units = plan_build_units(
+            &["owner/odin".to_string(), "owner/valheim".to_string()],
+            &["odin".to_string(), "valheim".to_string()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            units,
+            vec![
+                BuildUnit {
+                    image: "owner/odin".to_string(),
+                    target: Some("odin".to_string()),
+                },
+                BuildUnit {
+                    image: "owner/valheim".to_string(),
+                    target: Some("valheim".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn several_targets_under_one_image_need_prepend_target() {
+        // Without it every target resolves the same tag list, so the last
+        // build would quietly overwrite what the others just published.
+        let err = plan_build_units(
+            &["owner/app".to_string()],
+            &["cli".to_string(), "server".to_string()],
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("--prepend-target"), "{err}");
+        assert!(err.contains("owner/app"), "{err}");
+
+        let units = plan_build_units(
+            &["owner/app".to_string()],
+            &["cli".to_string(), "server".to_string()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            units.iter().map(|u| u.image.as_str()).collect::<Vec<_>>(),
+            vec!["owner/app", "owner/app"]
+        );
+        assert_eq!(
+            units
+                .iter()
+                .map(|u| u.target.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["cli", "server"]
+        );
+    }
+
+    #[test]
+    fn one_target_publishes_under_every_image_name() {
+        let units = plan_build_units(
+            &["owner/app".to_string(), "ghcr.io/owner/app".to_string()],
+            &["runtime".to_string()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            units
+                .iter()
+                .map(|u| (u.image.as_str(), u.target.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("owner/app", Some("runtime")),
+                ("ghcr.io/owner/app", Some("runtime")),
+            ]
+        );
+    }
+
+    #[test]
+    fn mismatched_image_and_target_counts_are_rejected() {
+        let err = plan_build_units(
+            &["a".to_string(), "b".to_string()],
+            &["x".to_string(), "y".to_string(), "z".to_string()],
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("2 names"), "{err}");
+        assert!(err.contains("3 stages"), "{err}");
+    }
+
+    #[test]
+    fn no_image_at_all_is_rejected() {
+        let err = plan_build_units(&[], &["runtime".to_string()], false).unwrap_err();
+        assert!(err.contains("--image is required"), "{err}");
+    }
 
     fn fixtures_dir() -> PathBuf {
         // crates/paws-docker -> repo root -> examples

@@ -365,6 +365,36 @@ jobs:
       # engine the first call left running (that corrupted its snapshot store:
       # `failed to rename ... file exists`), and must not re-upload an entry
       # that already exists.
+      # One invocation, two images out of one Dockerfile. Both builds run
+      # against this job's engine, so the stage they share is built for the
+      # first and reused by the second.
+      - name: paws docker builds two targets in one invocation
+        working-directory: examples/docker-multi-target-fixture
+        run: |
+          set -euo pipefail
+          output="$(paws docker \
+            --image ghcr.io/example/paws-multi-alpha,ghcr.io/example/paws-multi-beta \
+            --target alpha,beta \
+            --dockerfile Dockerfile --default-branch __none__ 2>&1)"
+          echo "$output"
+          grep -q "build 1/2 — image=ghcr.io/example/paws-multi-alpha target=alpha" <<<"$output"
+          grep -q "build 2/2 — image=ghcr.io/example/paws-multi-beta target=beta" <<<"$output"
+          [ "$(grep -c "docker: build succeeded" <<<"$output")" -eq 2 ]
+
+      # Several stages under one image name collide on tags unless they are
+      # prefixed, so that combination is refused rather than silently
+      # publishing one over the other.
+      - name: paws docker refuses two targets sharing one image name
+        working-directory: examples/docker-multi-target-fixture
+        run: |
+          set -euo pipefail
+          if output="$(paws docker --image ghcr.io/example/paws-multi --target alpha,beta \
+            --dockerfile Dockerfile --default-branch __none__ 2>&1)"; then
+            echo "expected a failure, got:"; echo "$output"; exit 1
+          fi
+          echo "$output"
+          grep -q -- "--prepend-target" <<<"$output"
+
       - name: paws docker again in the same job
         working-directory: examples/docker-fixture
         run: |

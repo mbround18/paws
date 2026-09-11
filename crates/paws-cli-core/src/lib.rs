@@ -901,11 +901,57 @@ async fn ci_esp32(
 /// restore-before/save-after `CacheBackend` cycle — see [`run_ci`]'s doc
 /// comment for why this happens once per invocation rather than once per
 /// `paws_dagger::core`/`core_streaming` call.
+///
+/// `--image`/`--target` may name several builds (see
+/// [`paws_docker::plan_build_units`]). They run in order against the one
+/// engine this invocation starts, so stages they share — a `builder` stage
+/// and the compile inside it, most often — are built for the first of them
+/// and reused by the rest, instead of being rebuilt by a second `paws docker`
+/// process that restores and saves the cache all over again.
 pub async fn run_docker(args: DockerArgs) -> anyhow::Result<()> {
+    let images = if args.image.is_empty() {
+        std::env::var("GITHUB_REPOSITORY")
+            .ok()
+            .into_iter()
+            .collect()
+    } else {
+        args.image.clone()
+    };
+    let units = paws_docker::plan_build_units(&images, &args.target, args.prepend_target)
+        .map_err(|err| anyhow::anyhow!(err))?;
+
     let backend = paws_dagger::restore_cache_backend().await;
-    let result = run_docker_pipeline(args).await;
+    let result = run_docker_units(&units, &args).await;
     paws_dagger::save_cache_backend(&backend).await;
     result
+}
+
+/// Builds each unit in turn, on the engine the first one starts.
+async fn run_docker_units(
+    units: &[paws_docker::BuildUnit],
+    args: &DockerArgs,
+) -> anyhow::Result<()> {
+    let total = units.len();
+    for (index, unit) in units.iter().enumerate() {
+        if total > 1 {
+            println!(
+                "docker: build {}/{total} — image={} target={}",
+                index + 1,
+                unit.image,
+                unit.target.as_deref().unwrap_or("<final stage>")
+            );
+        }
+        run_docker_pipeline(unit, args).await.with_context(|| {
+            format!(
+                "failed to build {}{}",
+                unit.image,
+                unit.target
+                    .as_deref()
+                    .map_or_else(String::new, |t| format!(" (target {t})"))
+            )
+        })?;
+    }
+    Ok(())
 }
 
 // One linear transaction: resolve facts from flags + compose + the GitHub
@@ -916,11 +962,14 @@ pub async fn run_docker(args: DockerArgs) -> anyhow::Result<()> {
 // left here is the I/O sequence, which splitting would spread across private
 // helpers callable in exactly one order.
 #[allow(clippy::too_many_lines)]
-async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
+async fn run_docker_pipeline(
+    unit: &paws_docker::BuildUnit,
+    args: &DockerArgs,
+) -> anyhow::Result<()> {
     // Folds --no-prefix into --version-prefix "" before `args` is taken apart.
     let version_prefix = args.effective_version_prefix();
     let DockerArgs {
-        image,
+        image: _,
         version,
         registries,
         dockerfile,
@@ -928,7 +977,7 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
         canary_label,
         push,
         with_latest,
-        target,
+        target: _,
         prepend_target,
         labels,
         default_branch,
@@ -943,11 +992,11 @@ async fn run_docker_pipeline(args: DockerArgs) -> anyhow::Result<()> {
         tag_schedule,
         version_prefix: _,
         no_prefix: _,
-    } = args;
+    } = args.clone();
 
-    let image = image
-        .or_else(|| std::env::var("GITHUB_REPOSITORY").ok())
-        .ok_or_else(|| anyhow::anyhow!("--image is required (or set $GITHUB_REPOSITORY)"))?;
+    // Which of `--image`/`--target`'s pairings this call builds.
+    let image = unit.image.clone();
+    let target = unit.target.clone();
     let version = version.unwrap_or_else(|| {
         std::env::var("GITHUB_SHA")
             .map(|sha| sha.chars().take(7).collect())
