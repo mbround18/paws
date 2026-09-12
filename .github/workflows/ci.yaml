@@ -371,6 +371,34 @@ jobs:
           grep -q "restored the newest github-actions cache entry under paws-dagger-engine-state-v2-" /tmp/paws-warm.log
           grep -q "was already saved earlier in this run" /tmp/paws-warm.log
 
+      # Labels have to reach the built image, not just the command line: registries
+      # read org.opencontainers.image.source to link a package back to its repository,
+      # and an image published without it loses that link. Build args have to reach the
+      # build itself, which the fixture echoes.
+      - name: paws docker applies labels and build args
+        working-directory: examples/docker-labels-fixture
+        run: |
+          set -euo pipefail
+          output="$(paws docker --image ghcr.io/example/paws-label-fixture \
+            --dockerfile Dockerfile --default-branch __none__ \
+            --label org.opencontainers.image.source=https://github.com/example/repo \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --build-arg BUILD_ARG_PROBE=passed-through 2>&1)"
+          echo "$output"
+          grep -q "build-arg-probe=passed-through" <<<"$output"
+
+          # Read the labels back off an image built the same way. `paws docker` without
+          # a registry to publish to only builds, so there is nothing to inspect from
+          # the run above itself.
+          dagger core host directory --path=. docker-build --dockerfile=Dockerfile \
+            with-label --name=org.opencontainers.image.source --value=https://github.com/example/repo \
+            export --path=/tmp/paws-labelled.tar
+          # Extract first rather than piping tar into grep: `grep -q` exits at the
+          # first match, tar dies of SIGPIPE, and pipefail fails the step.
+          mkdir -p /tmp/paws-labelled
+          tar -xf /tmp/paws-labelled.tar -C /tmp/paws-labelled
+          grep -rq "org.opencontainers.image.source" /tmp/paws-labelled
+
       # One invocation, two images out of one Dockerfile. Both builds run
       # against this job's engine, so the stage they share is built for the
       # first and reused by the second.

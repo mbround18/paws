@@ -451,6 +451,20 @@ pub struct DockerArgs {
     #[arg(long, value_delimiter = ',')]
     #[serde(default)]
     pub registry_username: Vec<String>,
+    /// Image label as "KEY=VALUE", repeatable. Applied to the built image
+    /// before it is published, which is where the OCI
+    /// `org.opencontainers.image.*` set belongs — registries read
+    /// `image.source` to link a package back to its repository, and an image
+    /// published without it loses that link and its provenance.
+    #[arg(long = "label")]
+    #[serde(default)]
+    pub labels_kv: Vec<String>,
+    /// Docker build argument as "KEY=VALUE", repeatable. Merged over any
+    /// build args a `compose.yml` service already declares, so a workflow can
+    /// pass `GITHUB_SHA` and friends without a compose file.
+    #[arg(long = "build-arg")]
+    #[serde(default)]
+    pub build_args: Vec<String>,
     /// Suppress dagger's live build/publish progress; only print output
     /// once each pipeline finishes (or on failure). Default is streamed
     /// live.

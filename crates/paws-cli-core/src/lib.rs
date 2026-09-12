@@ -990,6 +990,8 @@ async fn run_docker_pipeline(
         tag_branch,
         tag_pr,
         tag_schedule,
+        labels_kv,
+        build_args: build_arg_flags,
         version_prefix: _,
         no_prefix: _,
     } = args.clone();
@@ -1033,6 +1035,18 @@ async fn run_docker_pipeline(
             pr_labels: labels.clone(),
         },
     );
+
+    // --build-arg wins over a compose service's own value for the same key, so a
+    // workflow can override what the file declares.
+    let mut build_args = facts.build_args.clone();
+    for (key, value) in paws_docker::parse_key_value_pairs(&build_arg_flags, "--build-arg")
+        .map_err(|err| anyhow::anyhow!(err))?
+    {
+        build_args.retain(|(existing, _)| existing != &key);
+        build_args.push((key, value));
+    }
+    let image_labels = paws_docker::parse_key_value_pairs(&labels_kv, "--label")
+        .map_err(|err| anyhow::anyhow!(err))?;
 
     println!(
         "docker: resolved -> context={} dockerfile={} target={} push={}",
@@ -1147,7 +1161,8 @@ async fn run_docker_pipeline(
                         context: &facts.context,
                         dockerfile: &facts.dockerfile,
                         target: &facts.target,
-                        build_args: &facts.build_args,
+                        build_args: &build_args,
+                        labels: &image_labels,
                     },
                     &paws_docker::NativeRegistryPublish {
                         registry,
@@ -1209,7 +1224,8 @@ async fn run_docker_pipeline(
             context: &facts.context,
             dockerfile: &facts.dockerfile,
             target: &facts.target,
-            build_args: &facts.build_args,
+            build_args: &build_args,
+            labels: &image_labels,
         });
         run_dagger_core(&build_only_args, silent).await?;
         println!("docker: build succeeded");
