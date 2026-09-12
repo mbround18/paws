@@ -286,18 +286,68 @@ fn short_cache_version(key: &str) -> String {
         })
 }
 
-/// A stable cache key for the engine-state archive — scoped to the
-/// `dagger` CLI's own version (a cache built by one engine version isn't
-/// guaranteed compatible with another) plus a fixed prefix so it's easy to
-/// recognize/invalidate deliberately.
-async fn engine_cache_key() -> Result<String> {
+/// How the engine-state archive is keyed in the Actions cache.
+///
+/// Entries there can't be overwritten, so a single fixed key freezes the
+/// cache at whatever the first run saved: everything built afterwards is
+/// rebuilt from scratch, every run, forever. Each run therefore saves under
+/// its own key and restores by the prefix they all share, which is what
+/// `actions/cache`'s own `restore-keys` do — the newest matching entry wins,
+/// so the cache moves forward with the repo.
+///
+/// Both keys share one `version` (the hash the cache API pairs with a key),
+/// derived from the prefix rather than the full key — a prefix match only
+/// ever returns entries whose version matches the request's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EngineCacheKey {
+    /// Shared by every run on this `dagger` version; what restores match on.
+    prefix: String,
+    /// This run's own key, which the save writes.
+    save: String,
+}
+
+impl EngineCacheKey {
+    fn version(&self) -> String {
+        short_cache_version(&self.prefix)
+    }
+}
+
+/// Builds the key pair from the `dagger` version (a cache built by one
+/// engine version isn't guaranteed compatible with another) and something
+/// unique to this run. On a runner that's the run id and attempt, so a
+/// re-run saves its own entry rather than colliding with the original's;
+/// elsewhere it's a timestamp.
+fn engine_cache_key_parts(dagger_version: &str, run_marker: &str) -> EngineCacheKey {
+    let prefix = format!("paws-dagger-engine-state-v2-{dagger_version}");
+    EngineCacheKey {
+        save: format!("{prefix}-{run_marker}"),
+        prefix,
+    }
+}
+
+/// `$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT` on a runner, a timestamp anywhere
+/// else — either way, unique to this run and stable within it, so two
+/// `paws` invocations in one job resolve the same save key (and the second
+/// then finds the first's entry already there rather than colliding).
+fn run_marker() -> String {
+    let id = std::env::var("GITHUB_RUN_ID").unwrap_or_default();
+    if !id.is_empty() {
+        let attempt = std::env::var("GITHUB_RUN_ATTEMPT").unwrap_or_else(|_| "1".to_string());
+        return format!("{id}-{attempt}");
+    }
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or_else(|_| "0".to_string(), |since| since.as_secs().to_string())
+}
+
+async fn engine_cache_key() -> Result<EngineCacheKey> {
     let output = Command::new("dagger")
         .arg("version")
         .output()
         .await
         .context("failed to spawn `dagger version` for the cache key")?;
     let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(format!("paws-dagger-engine-state-v2-{version}"))
+    Ok(engine_cache_key_parts(&version, &run_marker()))
 }
 
 /// Minimal client for the GitHub Actions Cache Service **v1 REST API**
@@ -327,12 +377,14 @@ impl ActionsCacheClient {
         )
     }
 
-    /// `GET _apis/artifactcache/cache?keys=<key>&version=<hash>` — `None`
+    /// `GET _apis/artifactcache/cache?keys=<keys>&version=<hash>` — `None`
     /// on a cache miss (204/404), else the signed archive download URL.
-    async fn find_entry(&self, key: &str) -> Result<Option<String>> {
-        let version = short_cache_version(key);
+    /// `keys` is the API's own comma-separated list: the first is preferred
+    /// and the rest match as prefixes, newest entry first.
+    async fn find_entry(&self, keys: &[&str], version: &str) -> Result<Option<String>> {
+        let keys = keys.join(",");
         let url = format!(
-            "{}/_apis/artifactcache/cache?keys={key}&version={version}",
+            "{}/_apis/artifactcache/cache?keys={keys}&version={version}",
             self.base_url
         );
         let response = self
@@ -383,9 +435,9 @@ impl ActionsCacheClient {
     /// non-optimal, use of the API — chunked multi-part upload for very
     /// large archives is a documented follow-up, not a correctness gap for
     /// this first cut).
-    async fn reserve(&self, key: &str, size: u64) -> Result<u64> {
+    async fn reserve(&self, key: &str, version: &str, size: u64) -> Result<u64> {
         let url = format!("{}/_apis/artifactcache/caches", self.base_url);
-        let body = serde_json::json!({ "key": key, "version": short_cache_version(key), "cacheSize": size });
+        let body = serde_json::json!({ "key": key, "version": version, "cacheSize": size });
         let response = self
             .auth_headers(self.client.post(&url))
             .json(&body)
@@ -540,8 +592,14 @@ impl ActionsCacheClientV2 {
     /// `GetCacheEntryDownloadURL` — `Ok(None)` on a cache miss (`ok: false`
     /// in the response, not an HTTP error — Twirp still returns 200 for a
     /// clean miss), else the signed Azure Blob download URL.
-    async fn find_entry(&self, key: &str) -> Result<Option<String>> {
-        let body = serde_json::json!({ "key": key, "restore_keys": [], "version": short_cache_version(key) });
+    async fn find_entry(
+        &self,
+        key: &str,
+        restore_keys: &[&str],
+        version: &str,
+    ) -> Result<Option<String>> {
+        let body =
+            serde_json::json!({ "key": key, "restore_keys": restore_keys, "version": version });
         let response = self.call("GetCacheEntryDownloadURL", body).await?;
         if !response
             .get("ok")
@@ -571,8 +629,8 @@ impl ActionsCacheClientV2 {
 
     /// `CreateCacheEntry` — reserves the entry and returns the signed Azure
     /// Blob upload URL the archive bytes get `PUT` to directly.
-    async fn create_entry(&self, key: &str) -> Result<String> {
-        let body = serde_json::json!({ "key": key, "version": short_cache_version(key) });
+    async fn create_entry(&self, key: &str, version: &str) -> Result<String> {
+        let body = serde_json::json!({ "key": key, "version": version });
         let response = self.call("CreateCacheEntry", body).await?;
         if !response
             .get("ok")
@@ -614,8 +672,9 @@ impl ActionsCacheClientV2 {
 
     /// `FinalizeCacheEntryUpload` — makes the just-uploaded blob visible to
     /// future `GetCacheEntryDownloadURL` lookups.
-    async fn finalize(&self, key: &str, size: u64) -> Result<()> {
-        let body = serde_json::json!({ "key": key, "version": short_cache_version(key), "size_bytes": size.to_string() });
+    async fn finalize(&self, key: &str, version: &str, size: u64) -> Result<()> {
+        let body =
+            serde_json::json!({ "key": key, "version": version, "size_bytes": size.to_string() });
         let response = self.call("FinalizeCacheEntryUpload", body).await?;
         if !response
             .get("ok")
@@ -650,18 +709,26 @@ impl CacheTransport {
     }
 
     /// `Ok(true)` and `dest` populated on a cache hit, `Ok(false)` on a
-    /// clean miss.
-    async fn find_and_download(&self, key: &str, dest: &std::path::Path) -> Result<bool> {
+    /// clean miss. Prefers this run's own entry (a re-run picking up where
+    /// it left off), then falls back to the newest entry sharing the
+    /// prefix — every earlier run's.
+    async fn find_and_download(
+        &self,
+        key: &EngineCacheKey,
+        dest: &std::path::Path,
+    ) -> Result<bool> {
+        let version = key.version();
         match self {
             Self::V1(c) => {
-                let Some(location) = c.find_entry(key).await? else {
+                let Some(location) = c.find_entry(&[&key.save, &key.prefix], &version).await?
+                else {
                     return Ok(false);
                 };
                 c.download(&location, dest).await?;
                 Ok(true)
             }
             Self::V2(c) => {
-                let Some(url) = c.find_entry(key).await? else {
+                let Some(url) = c.find_entry(&key.save, &[&key.prefix], &version).await? else {
                     return Ok(false);
                 };
                 c.download(&url, dest).await?;
@@ -670,26 +737,30 @@ impl CacheTransport {
         }
     }
 
-    /// Whether an entry for `key` already exists, without downloading it.
-    async fn exists(&self, key: &str) -> Result<bool> {
+    /// Whether this run's own entry already exists, without downloading it
+    /// — no prefix fallback, since an earlier run's entry is exactly what a
+    /// save is meant to supersede.
+    async fn saved_this_run(&self, key: &EngineCacheKey) -> Result<bool> {
+        let version = key.version();
         Ok(match self {
-            Self::V1(c) => c.find_entry(key).await?.is_some(),
-            Self::V2(c) => c.find_entry(key).await?.is_some(),
+            Self::V1(c) => c.find_entry(&[&key.save], &version).await?.is_some(),
+            Self::V2(c) => c.find_entry(&key.save, &[], &version).await?.is_some(),
         })
     }
 
-    async fn upload(&self, key: &str, data: &[u8]) -> Result<()> {
+    async fn upload(&self, key: &EngineCacheKey, data: &[u8]) -> Result<()> {
+        let version = key.version();
         match self {
             Self::V1(c) => {
-                let cache_id = c.reserve(key, data.len() as u64).await?;
+                let cache_id = c.reserve(&key.save, &version, data.len() as u64).await?;
                 c.upload(cache_id, data).await?;
                 c.commit(cache_id, data.len() as u64).await?;
                 Ok(())
             }
             Self::V2(c) => {
-                let upload_url = c.create_entry(key).await?;
+                let upload_url = c.create_entry(&key.save, &version).await?;
                 c.upload(&upload_url, data).await?;
-                c.finalize(key, data.len() as u64).await?;
+                c.finalize(&key.save, &version, data.len() as u64).await?;
                 Ok(())
             }
         }
@@ -707,7 +778,10 @@ async fn restore_github_actions_cache(client: &CacheTransport) -> Result<()> {
     let key = engine_cache_key().await?;
     let archive_path = std::env::temp_dir().join("paws-dagger-cache-restore.tar.gz");
     if !client.find_and_download(&key, &archive_path).await? {
-        eprintln!("cache: no existing github-actions cache entry for {key}, starting cold");
+        eprintln!(
+            "cache: no existing github-actions cache entry under {}, starting cold",
+            key.prefix
+        );
         return Ok(());
     }
 
@@ -731,7 +805,10 @@ async fn restore_github_actions_cache(client: &CacheTransport) -> Result<()> {
     let _ = tokio::fs::remove_file(&archive_path).await;
     extract.context("failed to extract the cached engine state into the Dagger volume")?;
 
-    eprintln!("cache: restored github-actions cache entry {key}");
+    eprintln!(
+        "cache: restored the newest github-actions cache entry under {}",
+        key.prefix
+    );
     Ok(())
 }
 
@@ -749,12 +826,14 @@ async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
     let volume = find_engine_volume(&container).await?;
     let key = engine_cache_key().await?;
 
-    // Actions cache entries are immutable: once one exists for this key the upload is
-    // refused with 409. Checking first skips stopping the engine and archiving its whole
-    // volume (minutes on a real build) only to have the result thrown away.
-    if client.exists(&key).await? {
+    // Entries are immutable, and every invocation in one run resolves the same save key,
+    // so the first `paws` call of a run saves and the rest would be refused with 409.
+    // Checking first skips stopping the engine and archiving its whole volume (minutes on
+    // a real build) only to have the result thrown away.
+    if client.saved_this_run(&key).await? {
         eprintln!(
-            "cache: github-actions cache entry {key} already exists; entries can't be overwritten, skipping save"
+            "cache: github-actions cache entry {} was already saved earlier in this run; entries can't be overwritten, skipping save",
+            key.save
         );
         return Ok(());
     }
@@ -798,7 +877,8 @@ async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
 
     client.upload(&key, &data).await?;
     eprintln!(
-        "cache: saved github-actions cache entry {key} ({} bytes)",
+        "cache: saved github-actions cache entry {} ({} bytes)",
+        key.save,
         data.len()
     );
     Ok(())
@@ -1532,6 +1612,72 @@ mod tests {
     }
 
     #[test]
+    fn each_run_saves_under_its_own_key_below_one_shared_prefix() {
+        let first = engine_cache_key_parts("dagger v0.21.9 linux/amd64", "1001-1");
+        let second = engine_cache_key_parts("dagger v0.21.9 linux/amd64", "1002-1");
+
+        assert_eq!(
+            first.prefix, second.prefix,
+            "runs on one dagger version must restore from the same prefix"
+        );
+        assert_ne!(
+            first.save, second.save,
+            "a fixed save key is what froze the cache at the first run's state"
+        );
+        assert!(first.save.starts_with(&first.prefix), "{}", first.save);
+        assert_eq!(
+            first.version(),
+            second.version(),
+            "a prefix match only returns entries whose version matches the request's, so \
+             every run must send the version of the shared prefix"
+        );
+    }
+
+    #[test]
+    fn a_new_dagger_version_gets_its_own_prefix() {
+        let old = engine_cache_key_parts("dagger v0.21.9 linux/amd64", "1001-1");
+        let new = engine_cache_key_parts("dagger v0.22.0 linux/amd64", "1001-1");
+        assert_ne!(old.prefix, new.prefix);
+        assert_ne!(
+            old.version(),
+            new.version(),
+            "state from another engine version must not be restorable into this one"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_marker_follows_the_run_and_its_attempt() {
+        let _guard = ENV_LOCK.lock().await;
+        let saved = (
+            std::env::var_os("GITHUB_RUN_ID"),
+            std::env::var_os("GITHUB_RUN_ATTEMPT"),
+        );
+        unsafe {
+            std::env::set_var("GITHUB_RUN_ID", "424242");
+            std::env::set_var("GITHUB_RUN_ATTEMPT", "3");
+        }
+        let marker = run_marker();
+        unsafe {
+            std::env::remove_var("GITHUB_RUN_ATTEMPT");
+        }
+        let without_attempt = run_marker();
+        unsafe {
+            match saved.0 {
+                Some(value) => std::env::set_var("GITHUB_RUN_ID", value),
+                None => std::env::remove_var("GITHUB_RUN_ID"),
+            }
+            match saved.1 {
+                Some(value) => std::env::set_var("GITHUB_RUN_ATTEMPT", value),
+                None => std::env::remove_var("GITHUB_RUN_ATTEMPT"),
+            }
+        }
+        // A re-run is a new attempt of the same run: it must not collide
+        // with the entry the first attempt already wrote.
+        assert_eq!(marker, "424242-3");
+        assert_eq!(without_attempt, "424242-1");
+    }
+
+    #[test]
     fn claim_restore_is_granted_once_per_marker() {
         let marker = std::env::temp_dir().join(format!(
             "paws-dagger-restore-marker-test-{}",
@@ -1570,10 +1716,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_transport_exists_reports_a_hit_and_a_miss() {
+    async fn cache_transport_saved_this_run_reports_a_hit_and_a_miss() {
         // A local stand-in for the v1 cache API: the first lookup is a hit,
-        // the second a clean miss (204). `exists` must only look, never
-        // download, so the fixture never serves an archive.
+        // the second a clean miss (204). `saved_this_run` must only look,
+        // never download, so the fixture never serves an archive.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("failed to bind fixture listener");
@@ -1601,15 +1747,16 @@ mod tests {
             &format!("http://{addr}"),
             "fixture-token".to_string(),
         ));
+        let key = engine_cache_key_parts("v0.0.0-fixture", "run-1");
         assert!(
             transport
-                .exists("fixture-key")
+                .saved_this_run(&key)
                 .await
                 .expect("hit lookup should succeed")
         );
         assert!(
             !transport
-                .exists("fixture-key")
+                .saved_this_run(&key)
                 .await
                 .expect("miss lookup should succeed")
         );
@@ -1647,7 +1794,7 @@ mod tests {
         let client =
             ActionsCacheClient::new(&format!("http://{addr}"), "fixture-token".to_string());
         let location = client
-            .find_entry("fixture-key")
+            .find_entry(&["fixture-key", "fixture-"], "fixture-version")
             .await
             .expect("find_entry against the fixture should succeed");
         assert_eq!(
@@ -1656,10 +1803,11 @@ mod tests {
         );
 
         let request = server.await.unwrap();
-        assert!(request.starts_with(&format!(
-            "GET /_apis/artifactcache/cache?keys=fixture-key&version={}",
-            short_cache_version("fixture-key")
-        )));
+        // Every key in one comma-separated `keys` list, exact first and the
+        // prefix after it, which is how the API itself takes restore keys.
+        assert!(request.starts_with(
+            "GET /_apis/artifactcache/cache?keys=fixture-key,fixture-&version=fixture-version"
+        ));
         assert!(
             request.contains("authorization: bearer fixture-token")
                 || request

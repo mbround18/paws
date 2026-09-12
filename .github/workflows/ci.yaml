@@ -357,14 +357,20 @@ jobs:
         run: |
           set -euo pipefail
           start=$(date +%s)
-          paws docker --image ghcr.io/example/paws-cache-e2e-fixture --dockerfile Dockerfile --default-branch __none__
+          paws docker --image ghcr.io/example/paws-cache-e2e-fixture --dockerfile Dockerfile --default-branch __none__ 2>&1 | tee /tmp/paws-warm.log
           end=$(date +%s)
           echo "duration=$((end - start))" >> "$GITHUB_OUTPUT"
 
-      # A second paws call in the same job must not restore the cache over the
-      # engine the first call left running (that corrupted its snapshot store:
-      # `failed to rename ... file exists`), and must not re-upload an entry
-      # that already exists.
+      # The cold job saved under a key of its own; this job finds that entry
+      # through the prefix every run shares. A single fixed key instead froze
+      # the cache at whatever the first run ever saved. The save here is then
+      # skipped because the cold job already wrote this run's key.
+      - name: Verify the rolling cache key restored the cold job's entry
+        run: |
+          set -euo pipefail
+          grep -q "restored the newest github-actions cache entry under paws-dagger-engine-state-v2-" /tmp/paws-warm.log
+          grep -q "was already saved earlier in this run" /tmp/paws-warm.log
+
       # One invocation, two images out of one Dockerfile. Both builds run
       # against this job's engine, so the stage they share is built for the
       # first and reused by the second.
@@ -395,6 +401,10 @@ jobs:
           echo "$output"
           grep -q -- "--prepend-target" <<<"$output"
 
+      # A second paws call in the same job must not restore the cache over the
+      # engine the first call left running (that corrupted its snapshot store:
+      # `failed to rename ... file exists`), and must not re-upload an entry
+      # this run already saved.
       - name: paws docker again in the same job
         working-directory: examples/docker-fixture
         run: |
@@ -402,7 +412,7 @@ jobs:
           output="$(paws docker --image ghcr.io/example/paws-cache-e2e-fixture --dockerfile Dockerfile --default-branch __none__ 2>&1)"
           echo "$output"
           grep -q "already restored earlier in this job" <<<"$output"
-          grep -q "already exists" <<<"$output"
+          grep -q "was already saved earlier in this run" <<<"$output"
 
       # SC-003: informational, not a hard gate — wall-clock timing across two
       # independent GitHub-hosted runners is noisy enough (neighbor
