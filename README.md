@@ -37,6 +37,7 @@ provider-specific scripting.
 | `paws docs` | Build workspace documentation |
 | `paws release` | Cross-compile, smoke-test, package, and publish a release binary for Linux, Windows, and macOS |
 | `paws helm` | Lint, package, and publish Helm chart(s) as a real `index.yaml` repo |
+| `paws assign` | Assign an issue or PR to its `CODEOWNERS`: PRs by the files they change, issues by the catch-all `*` rule |
 
 Run `paws --help` or `paws <command> --help` for the full flag reference.
 
@@ -192,6 +193,41 @@ paws helm
 # Publish them as a real chart repo (needs $GITHUB_TOKEN/$GH_TOKEN) —
 # per-chart GitHub Release + index.yaml, so `helm repo add` just works
 GITHUB_TOKEN=*** paws helm --publish --repository you/your-charts
+
+# See who CODEOWNERS would assign PR #42 to, without assigning anyone
+GITHUB_TOKEN=*** paws assign --repository you/app --number 42 --dry-run
+```
+
+### Auto-assigning issues and PRs
+
+GitHub has no default-assignee setting, and `CODEOWNERS` on its own only requests reviews. Drop
+this into any repo with a `CODEOWNERS` file and new issues and PRs get assigned to their owners
+(teams and emails are skipped, since GitHub can't assign them; anything already assigned is left
+alone unless you pass `--force`):
+
+```yaml
+name: Auto assign
+on:
+  issues:
+    types: [opened]
+  # `pull_request_target` so PRs from forks get a token that can assign. Safe here: the job
+  # never checks out PR code, and `paws assign` reads CODEOWNERS from the default branch.
+  pull_request_target:
+    types: [opened]
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: mbround18/paws/actions/paws-up@main
+        with:
+          install-dagger: "false"
+      - run: paws assign --skip-bots
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 ```
 
 See [`specs/001-paws-core-cli/quickstart.md`](specs/001-paws-core-cli/quickstart.md) for a full,

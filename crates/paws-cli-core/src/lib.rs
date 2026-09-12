@@ -177,6 +177,7 @@ pub async fn execute(command: Commands) -> anyhow::Result<()> {
         Commands::Publish(args) => run_publish(args).await,
         Commands::Changelog(args) => run_changelog(args).await,
         Commands::Cache(args) => run_cache(args).await,
+        Commands::Assign(args) => run_assign(args).await,
         Commands::Mcp(McpCommand::Setup(args)) => mcp_setup::run_mcp_setup(args).await,
         Commands::Mcp(McpCommand::Serve(_)) => anyhow::bail!(
             "`paws mcp serve` must be invoked through the `paws` binary directly, not through \
@@ -1442,6 +1443,147 @@ pub async fn run_changelog(args: ChangelogArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+pub async fn run_assign(args: AssignArgs) -> anyhow::Result<()> {
+    let AssignArgs {
+        number,
+        assignees,
+        force,
+        skip_bots,
+        dry_run,
+        repository,
+    } = args;
+
+    let (owner, repo, token) = if let Some(repository) = repository {
+        let (owner, repo) = repository.split_once('/').ok_or_else(|| {
+            anyhow::anyhow!("--repository must be \"owner/repo\", got {repository}")
+        })?;
+        let token = paws_environment::resolve_github_token(owner, repo).await?;
+        (owner.to_string(), repo.to_string(), token)
+    } else {
+        let ctx = paws_environment::CiContext::detect()
+            .await
+            .context("paws assign needs $GITHUB_REPOSITORY (or --repository)")?;
+        (ctx.owner, ctx.repo, ctx.token)
+    };
+
+    let number = match number {
+        Some(number) => number,
+        None => number_from_github_event()?,
+    };
+
+    let client = paws_assign::GitHubAssignClient::new(owner, repo, token);
+    let issue = client.issue(number).await?;
+
+    let owners = if assignees.is_empty() {
+        let Some(owners) = codeowners_for(&client, &issue).await? else {
+            println!("assign: no CODEOWNERS file on the default branch, nothing to do");
+            return Ok(());
+        };
+        owners
+    } else {
+        assignees
+            .iter()
+            .map(|login| format!("@{}", login.trim_start_matches('@')))
+            .collect()
+    };
+
+    let (logins, skipped) = paws_assign::assignable_logins(&owners);
+    if !skipped.is_empty() {
+        eprintln!(
+            "assign: skipping {} (teams and emails can't be assignees)",
+            skipped.join(", ")
+        );
+    }
+
+    let options = paws_assign::PlanOptions { force, skip_bots };
+    let to_add = match paws_assign::plan(&issue, &logins, &options) {
+        paws_assign::Plan::Skip(reason) => {
+            println!("assign: {reason}");
+            return Ok(());
+        }
+        paws_assign::Plan::Assign(to_add) => to_add,
+    };
+
+    if dry_run {
+        println!("assign: would assign #{number} to {}", to_add.join(", "));
+        return Ok(());
+    }
+
+    let assigned = client.add_assignees(number, &to_add).await?;
+    let dropped: Vec<&String> = to_add
+        .iter()
+        .filter(|login| !assigned.iter().any(|a| a.eq_ignore_ascii_case(login)))
+        .collect();
+    if !dropped.is_empty() {
+        eprintln!(
+            "assign: GitHub did not assign {} (they may lack access to the repository)",
+            dropped
+                .iter()
+                .map(|login| login.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    println!(
+        "assign: #{number} is assigned to {}",
+        display_list(&assigned)
+    );
+    paws_environment::write_outputs(&[("assignees", &assigned.join(","))])?;
+    Ok(())
+}
+
+/// The issue or pull request number the running GitHub Actions event is about.
+fn number_from_github_event() -> anyhow::Result<u64> {
+    let path = std::env::var("GITHUB_EVENT_PATH")
+        .context("pass --number, or run from a GitHub Actions issue/pull_request event")?;
+    let event: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path).with_context(|| format!("failed to read {path}"))?,
+    )
+    .with_context(|| format!("{path} is not JSON"))?;
+    paws_assign::number_from_event(&event).with_context(|| {
+        format!("the event in {path} is not about an issue or pull request; pass --number")
+    })
+}
+
+/// Owners from the default branch's `CODEOWNERS`: of the changed files for a
+/// pull request, of the catch-all rule for an issue. `None` when the repo has
+/// no `CODEOWNERS`.
+async fn codeowners_for(
+    client: &paws_assign::GitHubAssignClient,
+    issue: &paws_assign::Issue,
+) -> anyhow::Result<Option<Vec<String>>> {
+    let Some((path, text)) = client.codeowners().await? else {
+        return Ok(None);
+    };
+    let rules = paws_assign::parse_codeowners(&text);
+    let owners = if issue.is_pull_request {
+        let files = client.pull_request_files(issue.number).await?;
+        let owners = paws_assign::owners_for_paths(&rules, &files);
+        eprintln!(
+            "assign: {path} gives {} changed file(s) to {}",
+            files.len(),
+            display_list(&owners)
+        );
+        owners
+    } else {
+        let owners = paws_assign::default_owners(&rules);
+        eprintln!(
+            "assign: {path}'s catch-all rule owns issues: {}",
+            display_list(&owners)
+        );
+        owners
+    };
+    Ok(Some(owners))
+}
+
+fn display_list(items: &[String]) -> String {
+    if items.is_empty() {
+        "no one".to_string()
+    } else {
+        items.join(", ")
+    }
 }
 
 // `async` with nothing to await, deliberately: every `run_*` entry point
