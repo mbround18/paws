@@ -1163,6 +1163,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "paws-assign"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde_json",
+]
+
+[[package]]
 name = "paws-audit"
 version = "0.1.0"
 dependencies = [
@@ -1215,6 +1224,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "paws-ansible",
+ "paws-assign",
  "paws-audit",
  "paws-cache",
  "paws-changelog",

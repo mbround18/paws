@@ -10,8 +10,8 @@ use rmcp::{
 };
 
 use paws_cli_core::{
-    AuditArgs, CacheArgs, CiArgs, DockerArgs, DocsArgs, GithubAppLoginArgs, HelmArgs, InitArgs,
-    ProvisionArgs, ReleaseArgs, SemverArgs, WorkflowGenerateArgs,
+    AssignArgs, AuditArgs, CacheArgs, CiArgs, DockerArgs, DocsArgs, GithubAppLoginArgs, HelmArgs,
+    InitArgs, ProvisionArgs, ReleaseArgs, SemverArgs, WorkflowGenerateArgs,
 };
 
 /// Runs `f`, capturing anything it prints to stdout/stderr instead of
@@ -125,6 +125,14 @@ impl PawsMcpServer {
     )]
     async fn cache(&self, Parameters(args): Parameters<CacheArgs>) -> Result<String, McpError> {
         let (outcome, captured) = capture_output(|| paws_cli_core::run_cache(args)).await;
+        tool_result(outcome, captured)
+    }
+
+    #[tool(
+        description = "Assign a GitHub issue or pull request to its CODEOWNERS (PRs by changed files, issues by the catch-all rule)."
+    )]
+    async fn assign(&self, Parameters(args): Parameters<AssignArgs>) -> Result<String, McpError> {
+        let (outcome, captured) = capture_output(|| paws_cli_core::run_assign(args)).await;
         tool_result(outcome, captured)
     }
 

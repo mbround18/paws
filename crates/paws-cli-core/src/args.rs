@@ -144,6 +144,11 @@ pub enum Commands {
     /// the expected backend actually activated, without grepping build log
     /// text for it).
     Cache(CacheArgs),
+    /// Assign an issue or pull request to its owners from `CODEOWNERS`: a
+    /// PR goes to the owners of the files it changes, an issue to the
+    /// owners of the catch-all `*` rule. GitHub has no default-assignee
+    /// setting, and `CODEOWNERS` alone only requests reviews.
+    Assign(AssignArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -652,6 +657,37 @@ pub struct InitArgs {}
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct AuditArgs {}
+
+#[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct AssignArgs {
+    /// Issue or pull request number. Falls back to the one the triggering
+    /// GitHub Actions event is about (read from $`GITHUB_EVENT_PATH`).
+    #[arg(long)]
+    #[serde(default)]
+    pub number: Option<u64>,
+    /// Logins to assign, comma-separated, instead of reading `CODEOWNERS`.
+    #[arg(long, value_delimiter = ',')]
+    #[serde(default)]
+    pub assignees: Vec<String>,
+    /// Add owners even when the issue or PR already has assignees. Off by
+    /// default so a manual assignment is never piled onto.
+    #[arg(long)]
+    #[serde(default)]
+    pub force: bool,
+    /// Leave issues and PRs opened by bots (Renovate, Dependabot)
+    /// unassigned.
+    #[arg(long)]
+    #[serde(default)]
+    pub skip_bots: bool,
+    /// Print who would be assigned without assigning anyone.
+    #[arg(long)]
+    #[serde(default)]
+    pub dry_run: bool,
+    /// "owner/repo" to operate against. Falls back to $`GITHUB_REPOSITORY`.
+    #[arg(long)]
+    #[serde(default)]
+    pub repository: Option<String>,
+}
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct CacheArgs {
