@@ -1026,6 +1026,32 @@ fn dockerfile_relative_to_context(context: &str, dockerfile: &str) -> String {
         .map_or_else(|| dockerfile.to_string(), |rest| format!("./{rest}"))
 }
 
+/// Parses `KEY=VALUE` CLI entries (`--build-arg`, `--label`) into pairs,
+/// keeping everything after the first `=` as the value so a label like
+/// `org.opencontainers.image.source=https://github.com/o/r` survives intact.
+///
+/// # Errors
+/// When an entry has no `=`, or an empty key.
+pub fn parse_key_value_pairs(
+    entries: &[String],
+    flag: &str,
+) -> Result<Vec<(String, String)>, String> {
+    entries
+        .iter()
+        .map(|entry| {
+            let (key, value) = entry
+                .split_once('=')
+                .ok_or_else(|| format!("{flag} entries must be \"KEY=VALUE\", got {entry:?}"))?;
+            if key.is_empty() {
+                return Err(format!(
+                    "{flag} entries need a key before the \"=\", got {entry:?}"
+                ));
+            }
+            Ok((key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
 fn docker_build_pipeline_prefix(build: &BuildSpec<'_>) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "host".into(),
@@ -1048,6 +1074,15 @@ fn docker_build_pipeline_prefix(build: &BuildSpec<'_>) -> Vec<String> {
             .collect::<Vec<_>>()
             .join(",");
         args.push(format!("--build-args={joined}"));
+    }
+    // `with-label` takes one name/value pair per call, so a label set is a chain
+    // of them on the container the build produced.
+    for (name, value) in build.labels {
+        args.extend([
+            "with-label".into(),
+            format!("--name={name}"),
+            format!("--value={value}"),
+        ]);
     }
     args
 }
@@ -1168,6 +1203,11 @@ pub struct BuildSpec<'a> {
     pub dockerfile: &'a str,
     pub target: &'a str,
     pub build_args: &'a [(String, String)],
+    /// Image labels, applied to the built container before it is published.
+    /// The OCI `org.opencontainers.image.*` set lives here — registries read
+    /// `image.source` to link a package back to its repository, so an image
+    /// published without them loses that link and its provenance.
+    pub labels: &'a [(String, String)],
 }
 
 /// Where and how [`native_publish_pipeline_args`] authenticates and
@@ -1184,6 +1224,97 @@ pub struct NativeRegistryPublish<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn labels_become_a_with_label_chain_before_publish() {
+        let args = native_publish_pipeline_args(
+            &BuildSpec {
+                context: ".",
+                dockerfile: "./Dockerfile",
+                target: "runtime",
+                build_args: &[],
+                labels: &[
+                    (
+                        "org.opencontainers.image.source".to_string(),
+                        "https://github.com/owner/repo".to_string(),
+                    ),
+                    (
+                        "org.opencontainers.image.revision".to_string(),
+                        "abc123".to_string(),
+                    ),
+                ],
+            },
+            &NativeRegistryPublish {
+                registry: "ghcr.io",
+                username: "owner",
+                token_env_var: "GHCR_TOKEN",
+                tag_address: "ghcr.io/owner/repo:1.0.0",
+            },
+        );
+
+        let label_at = args
+            .iter()
+            .position(|a| a == "with-label")
+            .expect("labels must reach the pipeline");
+        let publish_at = args.iter().position(|a| a == "publish").expect("publish");
+        assert!(
+            label_at < publish_at,
+            "labels have to be set on the container before it is published: {args:?}"
+        );
+        assert_eq!(
+            args.iter().filter(|a| *a == "with-label").count(),
+            2,
+            "one with-label call per label: {args:?}"
+        );
+        assert!(args.contains(&"--name=org.opencontainers.image.source".to_string()));
+        assert!(args.contains(&"--value=https://github.com/owner/repo".to_string()));
+    }
+
+    #[test]
+    fn no_labels_leaves_the_pipeline_exactly_as_it_was() {
+        let spec = BuildSpec {
+            context: ".",
+            dockerfile: "./Dockerfile",
+            target: "",
+            build_args: &[],
+            labels: &[],
+        };
+        assert!(!build_only_pipeline_args(&spec).contains(&"with-label".to_string()));
+    }
+
+    #[test]
+    fn key_value_pairs_keep_everything_after_the_first_equals() {
+        // A URL value carries its own `=` in query strings, and the OCI source
+        // label is a URL.
+        let parsed = parse_key_value_pairs(
+            &[
+                "org.opencontainers.image.source=https://github.com/o/r?a=b".to_string(),
+                "GITHUB_SHA=abc123".to_string(),
+            ],
+            "--label",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                (
+                    "org.opencontainers.image.source".to_string(),
+                    "https://github.com/o/r?a=b".to_string()
+                ),
+                ("GITHUB_SHA".to_string(), "abc123".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pair_without_an_equals_or_a_key_is_rejected() {
+        let err = parse_key_value_pairs(&["justakey".to_string()], "--build-arg").unwrap_err();
+        assert!(err.contains("--build-arg"), "{err}");
+        assert!(err.contains("KEY=VALUE"), "{err}");
+
+        let err = parse_key_value_pairs(&["=value".to_string()], "--label").unwrap_err();
+        assert!(err.contains("key"), "{err}");
+    }
 
     #[test]
     fn one_image_and_no_target_is_a_single_build() {
@@ -2352,6 +2483,7 @@ mod tests {
             dockerfile: "./Dockerfile",
             target: "base",
             build_args: &[],
+            labels: &[],
         });
         assert_eq!(
             args,
@@ -2384,6 +2516,7 @@ mod tests {
             dockerfile: "./app/Dockerfile",
             target: "runtime",
             build_args: &[],
+            labels: &[],
         });
         assert_eq!(
             args,
@@ -2408,6 +2541,7 @@ mod tests {
                 dockerfile: "./Dockerfile",
                 target: "base",
                 build_args: &build_args,
+                labels: &[],
             },
             &NativeRegistryPublish {
                 registry: "myco.jfrog.io",
@@ -2445,6 +2579,7 @@ mod tests {
                 dockerfile: "./Dockerfile",
                 target: "",
                 build_args: &[],
+                labels: &[],
             },
             &NativeRegistryPublish {
                 registry: "myco.jfrog.io",

@@ -143,6 +143,13 @@ paws docker --image ghcr.io/you/app --version 1.0.0
 # $GHCR_USERNAME env fallbacks)
 DOCKER_TOKEN=*** paws docker --image you/app --with-latest --dockerhub-username you
 
+# Label the image and pass build args (OCI labels are how a registry links a
+# package back to its repository)
+paws docker --image you/app \
+  --label org.opencontainers.image.source=https://github.com/you/app \
+  --label org.opencontainers.image.revision="$GITHUB_SHA" \
+  --build-arg GITHUB_SHA="$GITHUB_SHA"
+
 # Build several images out of one Dockerfile in a single run - one --image
 # per --target, in order. They build against one engine, so whatever the
 # stages share (a builder stage, the compile inside it) is built once for
