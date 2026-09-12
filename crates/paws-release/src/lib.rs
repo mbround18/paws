@@ -468,6 +468,25 @@ impl std::fmt::Debug for GitHubReleaseClient {
     }
 }
 
+/// The name GitHub actually stores an uploaded asset under. It rewrites
+/// anything outside `A-Za-z0-9._-` to `.`, so `odin+huginn-3.8.2-….zip` is
+/// published as `odin.huginn-3.8.2-….zip`. Matching an asset by the local
+/// file name alone therefore misses it: the upload succeeds and the
+/// verification that follows reports the asset as missing from the release
+/// it was just added to (seen on mbround18/valheim-docker's v3.8.2).
+fn github_asset_name(file_name: &str) -> String {
+    file_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '.'
+            }
+        })
+        .collect()
+}
+
 impl GitHubReleaseClient {
     pub fn new(owner: String, repo: String, token: String) -> Self {
         Self {
@@ -793,6 +812,7 @@ impl GitHubReleaseClient {
         release_id: u64,
         file_name: &str,
     ) -> Result<Option<u64>> {
+        let published_name = github_asset_name(file_name);
         let list_url = format!("{}/releases/{release_id}/assets", self.api_base());
         let response = self
             .auth_headers(self.client.get(&list_url))
@@ -805,7 +825,12 @@ impl GitHubReleaseClient {
         let assets: Vec<serde_json::Value> = response.json().await.unwrap_or_default();
         Ok(assets
             .iter()
-            .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(file_name))
+            .find(|a| {
+                let name = a.get("name").and_then(|n| n.as_str());
+                // GitHub stores the asset under a sanitized name, so a file
+                // whose name it rewrites must be matched by that name too.
+                name == Some(file_name) || name == Some(published_name.as_str())
+            })
             .and_then(|a| a.get("id"))
             .and_then(serde_json::Value::as_u64))
     }
@@ -1133,6 +1158,36 @@ pub enum AssetUploadMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_rewrites_an_asset_name_the_way_it_stores_it() {
+        // The real case: `paws release --binary-name odin,huginn` packages
+        // `odin+huginn-…`, and GitHub publishes it as `odin.huginn-…`.
+        assert_eq!(
+            github_asset_name("odin+huginn-3.8.2-x86_64-unknown-linux-gnu.zip"),
+            "odin.huginn-3.8.2-x86_64-unknown-linux-gnu.zip"
+        );
+    }
+
+    #[test]
+    fn an_already_safe_asset_name_is_left_alone() {
+        for name in [
+            "paws-0.0.1-prerelease.49-x86_64-unknown-linux-gnu.zip",
+            "chart-1.2.3.tgz",
+            "odin_huginn.zip",
+        ] {
+            assert_eq!(
+                github_asset_name(name),
+                name,
+                "{name} should not be rewritten"
+            );
+        }
+    }
+
+    #[test]
+    fn every_character_github_disallows_becomes_a_dot() {
+        assert_eq!(github_asset_name("a b+c,d:e.zip"), "a.b.c.d.e.zip");
+    }
 
     #[test]
     fn detects_the_real_tag_already_exists_error_body() {
