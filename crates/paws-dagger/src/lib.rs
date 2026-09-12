@@ -737,32 +737,116 @@ impl CacheTransport {
         }
     }
 
-    /// Whether this run's own entry already exists, without downloading it
-    /// — no prefix fallback, since an earlier run's entry is exactly what a
-    /// save is meant to supersede.
-    async fn saved_this_run(&self, key: &EngineCacheKey) -> Result<bool> {
+    /// Claims `key` before anything expensive happens. Archiving the engine
+    /// volume takes minutes on a real build, and two jobs of one workflow run
+    /// resolve the same save key — without claiming first, the second packs
+    /// several GB only to have the upload refused with 409. `Ok(None)` means
+    /// another job already claimed it.
+    async fn reserve(&self, key: &EngineCacheKey) -> Result<Option<ReservedUpload>> {
         let version = key.version();
-        Ok(match self {
-            Self::V1(c) => c.find_entry(&[&key.save], &version).await?.is_some(),
-            Self::V2(c) => c.find_entry(&key.save, &[], &version).await?.is_some(),
-        })
+        let reserved = match self {
+            Self::V1(c) => match c.reserve(&key.save, &version, 0).await {
+                Ok(cache_id) => ReservedUpload::V1 { cache_id },
+                Err(err) if is_already_reserved(&err) => return Ok(None),
+                Err(err) => return Err(err),
+            },
+            Self::V2(c) => match c.create_entry(&key.save, &version).await {
+                Ok(upload_url) => ReservedUpload::V2 { upload_url },
+                Err(err) if is_already_reserved(&err) => return Ok(None),
+                Err(err) => return Err(err),
+            },
+        };
+        Ok(Some(reserved))
     }
 
-    async fn upload(&self, key: &EngineCacheKey, data: &[u8]) -> Result<()> {
+    async fn upload(
+        &self,
+        key: &EngineCacheKey,
+        reserved: &ReservedUpload,
+        data: &[u8],
+    ) -> Result<()> {
         let version = key.version();
-        match self {
-            Self::V1(c) => {
-                let cache_id = c.reserve(&key.save, &version, data.len() as u64).await?;
-                c.upload(cache_id, data).await?;
-                c.commit(cache_id, data.len() as u64).await?;
+        match (self, reserved) {
+            (Self::V1(c), ReservedUpload::V1 { cache_id }) => {
+                c.upload(*cache_id, data).await?;
+                c.commit(*cache_id, data.len() as u64).await?;
                 Ok(())
             }
-            Self::V2(c) => {
-                let upload_url = c.create_entry(&key.save, &version).await?;
-                c.upload(&upload_url, data).await?;
+            (Self::V2(c), ReservedUpload::V2 { upload_url }) => {
+                c.upload(upload_url, data).await?;
                 c.finalize(&key.save, &version, data.len() as u64).await?;
                 Ok(())
             }
+            _ => anyhow::bail!("cache reservation does not match the cache API in use"),
+        }
+    }
+}
+
+/// A claimed cache key, carrying whatever the API needs to finish the upload.
+enum ReservedUpload {
+    V1 { cache_id: u64 },
+    V2 { upload_url: String },
+}
+
+/// Whether a reservation failed because someone else already holds the key.
+/// Both cache API generations report it the same way in the body they return.
+fn is_already_reserved(err: &anyhow::Error) -> bool {
+    let text = err.to_string().to_ascii_lowercase();
+    text.contains("already_exists") || text.contains("409")
+}
+
+/// When a run is allowed to write the engine state back to the cache.
+///
+/// Saving is not cheap: the engine volume of a real build runs to several GB,
+/// and every save stops the engine, archives that volume and uploads it. Doing
+/// it on every run of every job costs more than the builds it saves, and on
+/// GitHub it also blows through the 10 GB per-repository cache budget, so
+/// entries start evicting each other and the next restore misses anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheSavePolicy {
+    /// Save only on a push (a branch or a tag), which is where a refreshed
+    /// cache benefits everyone afterwards. Pull-request runs restore and
+    /// build, but do not pay to save. The default.
+    OnPush,
+    /// Always save, whatever the event. Needed by a pipeline that verifies
+    /// caching itself.
+    Always,
+    /// Never save. Restores still happen.
+    Never,
+}
+
+impl CacheSavePolicy {
+    /// Reads `$PAWS_CACHE_SAVE`: `always` / `1`, `never` / `0`, or `auto`
+    /// (anything else, including unset) for [`CacheSavePolicy::OnPush`].
+    pub fn detect() -> Self {
+        match std::env::var("PAWS_CACHE_SAVE")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "always" | "1" | "true" | "yes" => Self::Always,
+            "never" | "0" | "false" | "no" => Self::Never,
+            _ => Self::OnPush,
+        }
+    }
+
+    /// Whether this run may save, given the CI event that started it.
+    fn allows(self, event_name: &str) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::OnPush => matches!(event_name, "push" | "workflow_dispatch" | "schedule" | ""),
+        }
+    }
+
+    fn skip_reason(self, event_name: &str) -> String {
+        match self {
+            Self::Never => "PAWS_CACHE_SAVE=never".to_string(),
+            _ => format!(
+                "this is a {event_name} run and PAWS_CACHE_SAVE is auto, so the engine state \
+                 is only saved on a push; set PAWS_CACHE_SAVE=always to override"
+            ),
         }
     }
 }
@@ -826,17 +910,26 @@ async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
     let volume = find_engine_volume(&container).await?;
     let key = engine_cache_key().await?;
 
-    // Entries are immutable, and every invocation in one run resolves the same save key,
-    // so the first `paws` call of a run saves and the rest would be refused with 409.
-    // Checking first skips stopping the engine and archiving its whole volume (minutes on
-    // a real build) only to have the result thrown away.
-    if client.saved_this_run(&key).await? {
+    let policy = CacheSavePolicy::detect();
+    let event_name = std::env::var("GITHUB_EVENT_NAME").unwrap_or_default();
+    if !policy.allows(&event_name) {
         eprintln!(
-            "cache: github-actions cache entry {} was already saved earlier in this run; entries can't be overwritten, skipping save",
-            key.save
+            "cache: not saving the engine state: {}",
+            policy.skip_reason(&event_name)
         );
         return Ok(());
     }
+
+    // Claim the key before archiving anything. Every invocation in one run resolves the
+    // same save key, and entries are immutable, so without this the second job spends
+    // minutes packing several GB and is then refused with 409.
+    let Some(reserved) = client.reserve(&key).await? else {
+        eprintln!(
+            "cache: github-actions cache entry {} is already claimed by this run; skipping save",
+            key.save
+        );
+        return Ok(());
+    };
 
     let archive_path = std::env::temp_dir().join("paws-dagger-cache-save.tar.gz");
     // A bind mount onto a host path that doesn't exist yet gets created as
@@ -875,7 +968,7 @@ async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
         .context("failed to read the archived engine state back from disk")?;
     let _ = tokio::fs::remove_file(&archive_path).await;
 
-    client.upload(&key, &data).await?;
+    client.upload(&key, &reserved, &data).await?;
     eprintln!(
         "cache: saved github-actions cache entry {} ({} bytes)",
         key.save,
@@ -1716,10 +1809,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_transport_saved_this_run_reports_a_hit_and_a_miss() {
-        // A local stand-in for the v1 cache API: the first lookup is a hit,
-        // the second a clean miss (204). `saved_this_run` must only look,
-        // never download, so the fixture never serves an archive.
+    async fn reserve_claims_the_key_and_yields_when_another_job_has_it() {
+        // A local stand-in for the v1 cache API: the first reservation is
+        // granted, the second is refused because a concurrent job holds the
+        // key. Reserving is what happens *before* the multi-GB archive is
+        // built, so the refusal has to come back as a clean `None`.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("failed to bind fixture listener");
@@ -1727,13 +1821,18 @@ mod tests {
 
         let server = tokio::spawn(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let hit_body = r#"{"archiveLocation":"https://example.invalid/archive.tar.gz"}"#;
+            let granted = r#"{"cacheId":42}"#;
+            let conflict =
+                r#"{"code":"already_exists","msg":"cache entry with the same key exists"}"#;
             let responses = [
                 format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{hit_body}",
-                    hit_body.len()
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{granted}",
+                    granted.len()
                 ),
-                "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".to_string(),
+                format!(
+                    "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{conflict}",
+                    conflict.len()
+                ),
             ];
             for response in responses {
                 let (mut socket, _) = listener.accept().await.unwrap();
@@ -1750,17 +1849,74 @@ mod tests {
         let key = engine_cache_key_parts("v0.0.0-fixture", "run-1");
         assert!(
             transport
-                .saved_this_run(&key)
+                .reserve(&key)
                 .await
-                .expect("hit lookup should succeed")
+                .expect("first reserve")
+                .is_some(),
+            "the first job of a run must get the key"
         );
         assert!(
-            !transport
-                .saved_this_run(&key)
+            transport
+                .reserve(&key)
                 .await
-                .expect("miss lookup should succeed")
+                .expect("a taken key is not an error")
+                .is_none(),
+            "a second job must be told the key is taken, not fail the build"
         );
         server.await.unwrap();
+    }
+
+    #[test]
+    fn save_policy_defaults_to_pushes_only() {
+        // A pull-request run restores and builds, but does not pay to pack and
+        // upload several GB that the next PR run will not even match.
+        assert!(!CacheSavePolicy::OnPush.allows("pull_request"));
+        assert!(CacheSavePolicy::OnPush.allows("push"));
+        assert!(CacheSavePolicy::OnPush.allows("workflow_dispatch"));
+        // Off a CI provider there is no event name; saving locally is fine.
+        assert!(CacheSavePolicy::OnPush.allows(""));
+    }
+
+    #[test]
+    fn save_policy_overrides_ignore_the_event() {
+        assert!(CacheSavePolicy::Always.allows("pull_request"));
+        assert!(!CacheSavePolicy::Never.allows("push"));
+        assert!(
+            CacheSavePolicy::Never
+                .skip_reason("push")
+                .contains("PAWS_CACHE_SAVE=never")
+        );
+        assert!(
+            CacheSavePolicy::OnPush
+                .skip_reason("pull_request")
+                .contains("PAWS_CACHE_SAVE=always"),
+            "the skip message has to say how to override it"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_policy_reads_its_env_var() {
+        let _guard = ENV_LOCK.lock().await;
+        let saved = std::env::var_os("PAWS_CACHE_SAVE");
+        for (value, expected) in [
+            ("always", CacheSavePolicy::Always),
+            ("1", CacheSavePolicy::Always),
+            ("never", CacheSavePolicy::Never),
+            ("0", CacheSavePolicy::Never),
+            ("auto", CacheSavePolicy::OnPush),
+            ("", CacheSavePolicy::OnPush),
+        ] {
+            unsafe {
+                std::env::set_var("PAWS_CACHE_SAVE", value);
+            }
+            assert_eq!(CacheSavePolicy::detect(), expected, "for {value:?}");
+        }
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("PAWS_CACHE_SAVE", value),
+                None => std::env::remove_var("PAWS_CACHE_SAVE"),
+            }
+        }
     }
 
     #[tokio::test]
