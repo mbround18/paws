@@ -103,6 +103,29 @@ cargo install --path crates/paws-cli
 
 </details>
 
+### Build cache on GitHub Actions
+
+Dagger keeps its cache in the engine's own volume, which a fresh runner does not have, so
+`paws` archives that volume into the Actions cache and restores it on the next run. Two
+things about that are worth knowing, because the archive is large (several GB on a real
+project):
+
+- **Restores happen on every run; saves only on a push.** A pull-request run restores and
+  builds but does not pay to pack and upload the volume, which otherwise costs more than
+  the build it is meant to save and burns through GitHub's 10 GB per-repository cache
+  budget. Set `PAWS_CACHE_SAVE` to change it:
+
+  | Value | Behaviour |
+  | --- | --- |
+  | unset, or `auto` | Save on `push`, `workflow_dispatch` and `schedule` runs; skip on pull requests. |
+  | `always` / `1` | Save on every run. For a pipeline that is testing caching itself. |
+  | `never` / `0` | Never save. Restores still happen. |
+
+- **One save per workflow run.** Every job of a run resolves the same cache key, so the
+  first job to claim it saves and the rest say so and move on. Saves are keyed per run and
+  restored by the prefix they share, so the cache follows the repository instead of
+  freezing at whatever the first run ever stored.
+
 ### After installing
 
 Most subcommands also need the `dagger` CLI on your `PATH` — run `paws init` to install it

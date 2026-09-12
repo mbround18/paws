@@ -226,6 +226,10 @@ jobs:
   github-actions-cache-e2e-cold:
     name: GitHub Actions cache backend (real runner, cold)
     runs-on: ubuntu-latest
+    # These jobs exist to exercise saving, and they run on pull_request, where the
+    # default policy deliberately does not save.
+    env:
+      PAWS_CACHE_SAVE: always
     outputs:
       duration: ${{ steps.run.outputs.duration }}
     steps:
@@ -305,6 +309,10 @@ jobs:
     name: GitHub Actions cache backend (real runner, warm)
     needs: github-actions-cache-e2e-cold
     runs-on: ubuntu-latest
+    # These jobs exist to exercise saving, and they run on pull_request, where the
+    # default policy deliberately does not save.
+    env:
+      PAWS_CACHE_SAVE: always
     steps:
       - uses: actions/checkout@v7
 
@@ -369,7 +377,7 @@ jobs:
         run: |
           set -euo pipefail
           grep -q "restored the newest github-actions cache entry under paws-dagger-engine-state-v2-" /tmp/paws-warm.log
-          grep -q "was already saved earlier in this run" /tmp/paws-warm.log
+          grep -q "is already claimed by this run" /tmp/paws-warm.log
 
       # Labels have to reach the built image, not just the command line: registries
       # read org.opencontainers.image.source to link a package back to its repository,
@@ -440,7 +448,7 @@ jobs:
           output="$(paws docker --image ghcr.io/example/paws-cache-e2e-fixture --dockerfile Dockerfile --default-branch __none__ 2>&1)"
           echo "$output"
           grep -q "already restored earlier in this job" <<<"$output"
-          grep -q "was already saved earlier in this run" <<<"$output"
+          grep -q "is already claimed by this run" <<<"$output"
 
       # SC-003: informational, not a hard gate — wall-clock timing across two
       # independent GitHub-hosted runners is noisy enough (neighbor
