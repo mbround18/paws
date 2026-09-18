@@ -973,11 +973,20 @@ async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
         .context("failed to stat the archived engine state")?;
     let size = metadata.len();
     // Default threshold: 100 MiB. Can be overridden with PAWS_CACHE_MAX_BYTES.
+    // For GitHub Actions specifically, PAWS_CACHE_MAX_BYTES_GITHUB may override
+    // the generic PAWS_CACHE_MAX_BYTES to allow provider-specific tuning.
     let default_threshold: u64 = 100 * 1024 * 1024;
-    let threshold = std::env::var("PAWS_CACHE_MAX_BYTES")
-        .ok()
+    let github_override = std::env::var("PAWS_CACHE_MAX_BYTES_GITHUB").ok();
+    let threshold = github_override
+        .as_deref()
         .and_then(|s| s.trim().parse::<u64>().ok())
+        .or_else(|| {
+            std::env::var("PAWS_CACHE_MAX_BYTES")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        })
         .unwrap_or(default_threshold);
+    eprintln!("cache: using upload threshold {} bytes (PAWS_CACHE_MAX_BYTES_GITHUB / PAWS_CACHE_MAX_BYTES)", threshold);
 
     if size > threshold {
         eprintln!(
