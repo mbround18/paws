@@ -305,6 +305,22 @@ jobs:
           end=$(date +%s)
           echo "duration=$((end - start))" >> "$GITHUB_OUTPUT"
 
+      - name: Check for paws artifacts
+        id: check-artifacts
+        run: |
+          if [ -d "$GITHUB_WORKSPACE/paws-artifacts" ] && [ "$(ls -A $GITHUB_WORKSPACE/paws-artifacts)" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload paws artifacts
+        if: steps.check-artifacts.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: paws-engine-state
+          path: paws-artifacts/**
+
   github-actions-cache-e2e-warm:
     name: GitHub Actions cache backend (real runner, warm)
     needs: github-actions-cache-e2e-cold
@@ -368,6 +384,22 @@ jobs:
           paws docker --image ghcr.io/example/paws-cache-e2e-fixture --dockerfile Dockerfile --default-branch __none__ 2>&1 | tee /tmp/paws-warm.log
           end=$(date +%s)
           echo "duration=$((end - start))" >> "$GITHUB_OUTPUT"
+
+      - name: Check for paws artifacts
+        id: check-artifacts
+        run: |
+          if [ -d "$GITHUB_WORKSPACE/paws-artifacts" ] && [ "$(ls -A $GITHUB_WORKSPACE/paws-artifacts)" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload paws artifacts
+        if: steps.check-artifacts.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: paws-engine-state
+          path: paws-artifacts/**
 
       # The cold job saved under a key of its own; this job finds that entry
       # through the prefix every run shares. A single fixed key instead froze

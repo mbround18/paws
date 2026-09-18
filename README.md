@@ -106,6 +106,15 @@ cargo install --path crates/paws-cli
 
 ### Build cache on GitHub Actions
 
+A few additional knobs are available to control cache saves and artifacts:
+
+- PAWS_CACHE_MAX_BYTES: maximum archive size (bytes) to attempt to upload to the Actions cache. Default: 104857600 (100 MiB). If the packed engine-state exceeds this, `paws` skips uploading to avoid 413 errors and excessive memory use.
+- PAWS_UPLOAD_ARTIFACT: when set to `1` or `true` in a GitHub Actions job, `paws` will copy the compressed engine-state archive to `$GITHUB_WORKSPACE/paws-artifacts/` so the workflow can upload it as a normal workflow artifact (useful for debugging oversized archives).
+- PAWS_ARTIFACT_FILENAME: optional filename template for the copied artifact (defaults to `artifact-engine_state-{timestamp}.tar.zst`).
+
+These defaults are conservative to avoid hitting provider limits; set them from your workflow if you want to store larger archives as artifacts for debugging or long-term storage.
+
+
 Dagger keeps its cache in the engine's own volume, which a fresh runner does not have, so
 `paws` archives that volume into the Actions cache and restores it on the next run. Two
 things about that are worth knowing, because the archive is large (several GB on a real
