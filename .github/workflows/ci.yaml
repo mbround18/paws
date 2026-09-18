@@ -13,8 +13,130 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: determine changed scope
+    runs-on: ubuntu-latest
+    outputs:
+      run_languages: ${{ steps.matrix.outputs.run_languages }}
+      language_matrix: ${{ steps.matrix.outputs.language_matrix }}
+      run_cache_e2e: ${{ steps.matrix.outputs.run_cache_e2e }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Detect changed files
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            ci-core:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'deny.toml'
+              - '.github/workflows/ci.yaml'
+              - 'actions/**'
+              - 'scripts/**'
+              - 'crates/paws-cli/**'
+              - 'crates/paws-cli-core/**'
+              - 'crates/paws-core/**'
+              - 'crates/paws-dagger/**'
+              - 'crates/paws-environment/**'
+            java:
+              - 'crates/paws-java/**'
+              - 'builders/java/**'
+              - 'examples/java-maven-fixture/**'
+              - 'examples/java-gradle-fixture/**'
+              - 'examples/java-jdk25-toolchain-fixture/**'
+            kotlin:
+              - 'crates/paws-kotlin/**'
+              - 'builders/java/**'
+              - 'examples/kotlin-fixture/**'
+              - 'examples/java-kotlin-mixed-fixture/**'
+            ruby:
+              - 'crates/paws-ruby/**'
+              - 'builders/ruby/**'
+              - 'examples/ruby-fixture/**'
+            php:
+              - 'crates/paws-php/**'
+              - 'builders/php/**'
+              - 'examples/php-fixture/**'
+            dotnet:
+              - 'crates/paws-dotnet/**'
+              - 'builders/dotnet/**'
+              - 'examples/dotnet-fixture/**'
+            elixir:
+              - 'crates/paws-elixir/**'
+              - 'builders/elixir/**'
+              - 'examples/elixir-fixture/**'
+            ansible:
+              - 'crates/paws-ansible/**'
+              - 'builders/ansible/**'
+              - 'examples/ansible-fixture/**'
+            cache_e2e:
+              - 'crates/paws-cache/**'
+              - 'crates/paws-dagger/**'
+              - 'crates/paws-docker/**'
+              - 'actions/paws-up/**'
+              - 'examples/docker-fixture/**'
+              - 'examples/docker-labels-fixture/**'
+              - 'examples/docker-multi-target-fixture/**'
+
+      - name: Build dynamic matrix and job gates
+        id: matrix
+        run: |
+          set -euo pipefail
+
+          include='[]'
+
+          add_leg() {
+            include="$(jq --arg toolchain "$1" --arg fixture "$2" '. + [{toolchain: $toolchain, fixture: $fixture}]' <<<"$include")"
+          }
+
+          maybe_add_java() {
+            add_leg java java-maven-fixture
+            add_leg java java-gradle-fixture
+            add_leg java java-jdk25-toolchain-fixture
+          }
+
+          if [ "${{ github.event_name }}" != "pull_request" ] || [ "${{ steps.filter.outputs.ci-core }}" = "true" ] || [ "${{ steps.filter.outputs.java }}" = "true" ]; then
+            maybe_add_java
+          fi
+          if [ "${{ github.event_name }}" != "pull_request" ] || [ "${{ steps.filter.outputs.ci-core }}" = "true" ] || [ "${{ steps.filter.outputs.kotlin }}" = "true" ]; then
+            add_leg kotlin kotlin-fixture
+            add_leg kotlin java-kotlin-mixed-fixture
+          fi
+          if [ "${{ github.event_name }}" != "pull_request" ] || [ "${{ steps.filter.outputs.ci-core }}" = "true" ] || [ "${{ steps.filter.outputs.ruby }}" = "true" ]; then
+            add_leg ruby ruby-fixture
+          fi
+          if [ "${{ github.event_name }}" != "pull_request" ] || [ "${{ steps.filter.outputs.ci-core }}" = "true" ] || [ "${{ steps.filter.outputs.php }}" = "true" ]; then
+            add_leg php php-fixture
+          fi
+          if [ "${{ github.event_name }}" != "pull_request" ] || [ "${{ steps.filter.outputs.ci-core }}" = "true" ] || [ "${{ steps.filter.outputs.dotnet }}" = "true" ]; then
+            add_leg dotnet dotnet-fixture
+          fi
+          if [ "${{ github.event_name }}" != "pull_request" ] || [ "${{ steps.filter.outputs.ci-core }}" = "true" ] || [ "${{ steps.filter.outputs.elixir }}" = "true" ]; then
+            add_leg elixir elixir-fixture
+          fi
+          if [ "${{ github.event_name }}" != "pull_request" ] || [ "${{ steps.filter.outputs.ci-core }}" = "true" ] || [ "${{ steps.filter.outputs.ansible }}" = "true" ]; then
+            add_leg ansible ansible-fixture
+          fi
+
+          if [ "$(jq 'length' <<<"$include")" -gt 0 ]; then
+            echo "run_languages=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_languages=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "language_matrix={\"include\":$include}" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" != "pull_request" ] || [ "${{ steps.filter.outputs.ci-core }}" = "true" ] || [ "${{ steps.filter.outputs.cache_e2e }}" = "true" ]; then
+            echo "run_cache_e2e=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_cache_e2e=false" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     name: build, test, lint
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -70,6 +192,7 @@ jobs:
   # dependency.
   ci-e2e:
     name: paws ci end-to-end (dagger)
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -165,32 +288,12 @@ jobs:
     # workflow_dispatch. Every change reaches main through a PR, where
     # these already ran against the identical SHA (the merge is a
     # fast-forward), so nothing goes unverified.
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && needs.changes.outputs.run_languages == 'true'
+    needs: changes
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - toolchain: java
-            fixture: java-maven-fixture
-          - toolchain: java
-            fixture: java-gradle-fixture
-          - toolchain: java
-            fixture: java-jdk25-toolchain-fixture
-          - toolchain: kotlin
-            fixture: kotlin-fixture
-          - toolchain: kotlin
-            fixture: java-kotlin-mixed-fixture
-          - toolchain: ruby
-            fixture: ruby-fixture
-          - toolchain: php
-            fixture: php-fixture
-          - toolchain: dotnet
-            fixture: dotnet-fixture
-          - toolchain: elixir
-            fixture: elixir-fixture
-          - toolchain: ansible
-            fixture: ansible-fixture
+      matrix: ${{ fromJson(needs.changes.outputs.language_matrix) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -225,6 +328,8 @@ jobs:
   # which branch triggered this workflow.
   github-actions-cache-e2e-cold:
     name: GitHub Actions cache backend (real runner, cold)
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.run_cache_e2e == 'true'
     runs-on: ubuntu-latest
     # These jobs exist to exercise saving, and they run on pull_request, where the
     # default policy deliberately does not save.
