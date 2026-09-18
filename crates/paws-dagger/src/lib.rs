@@ -883,8 +883,9 @@ async fn restore_github_actions_cache(client: &CacheTransport) -> Result<()> {
         "alpine:3.20",
         "sh",
         "-c",
-        // Install zstd in the helper container and stream-decompress into tar to avoid extra temp files.
-        "sh -c \"apk add --no-cache zstd >/dev/null && zstd -d /backup.tar.zst -c | tar x -C /data\"",
+        // Restore is backward-compatible with older gzip archives under the same key prefix:
+        // try zstd first, then fall back to gzip if the payload isn't zstd.
+        "sh -c \"apk add --no-cache zstd gzip >/dev/null && ((zstd -t /backup.tar.zst >/dev/null 2>&1 && zstd -d /backup.tar.zst -c) || gzip -dc /backup.tar.zst) | tar x -C /data\"",
     ])
     .await;
     let _ = tokio::fs::remove_file(&archive_path).await;
