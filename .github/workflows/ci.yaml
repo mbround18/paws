@@ -13,8 +13,129 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: determine changed scope
+    runs-on: ubuntu-latest
+    outputs:
+      run_languages: ${{ steps.matrix.outputs.run_languages }}
+      language_matrix: ${{ steps.matrix.outputs.language_matrix }}
+      run_cache_e2e: ${{ steps.matrix.outputs.run_cache_e2e }}
+    steps:
+      - name: Build dynamic matrix and job gates
+        id: matrix
+        uses: actions/github-script@v8
+        with:
+          script: |-
+            const isPullRequest = context.eventName === "pull_request";
+            const files = [];
+            if (isPullRequest) {
+              const number = context.payload.pull_request.number;
+              const changed = await github.paginate(
+                github.rest.pulls.listFiles,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: number,
+                  per_page: 100
+                }
+              );
+              for (const file of changed) files.push(file.filename);
+            }
+
+            const runAll = !isPullRequest;
+            const hasPath = (prefixes) => runAll || files.some((f) => prefixes.some((p) => f.startsWith(p)));
+
+            const ciCore = hasPath([
+              "Cargo.toml",
+              "Cargo.lock",
+              "deny.toml",
+              ".github/workflows/ci.yaml",
+              "actions/",
+              "scripts/",
+              "crates/paws-cli/",
+              "crates/paws-cli-core/",
+              "crates/paws-core/",
+              "crates/paws-dagger/",
+              "crates/paws-environment/"
+            ]);
+
+            const cacheE2E = hasPath([
+              "crates/paws-cache/",
+              "crates/paws-dagger/",
+              "crates/paws-docker/",
+              "actions/paws-up/",
+              "examples/docker-fixture/",
+              "examples/docker-labels-fixture/",
+              "examples/docker-multi-target-fixture/"
+            ]);
+
+            const languageScopes = {
+              java: [
+                "crates/paws-java/",
+                "builders/java/",
+                "examples/java-maven-fixture/",
+                "examples/java-gradle-fixture/",
+                "examples/java-jdk25-toolchain-fixture/"
+              ],
+              kotlin: [
+                "crates/paws-kotlin/",
+                "builders/java/",
+                "examples/kotlin-fixture/",
+                "examples/java-kotlin-mixed-fixture/"
+              ],
+              ruby: [
+                "crates/paws-ruby/",
+                "builders/ruby/",
+                "examples/ruby-fixture/"
+              ],
+              php: [
+                "crates/paws-php/",
+                "builders/php/",
+                "examples/php-fixture/"
+              ],
+              dotnet: [
+                "crates/paws-dotnet/",
+                "builders/dotnet/",
+                "examples/dotnet-fixture/"
+              ],
+              elixir: [
+                "crates/paws-elixir/",
+                "builders/elixir/",
+                "examples/elixir-fixture/"
+              ],
+              ansible: [
+                "crates/paws-ansible/",
+                "builders/ansible/",
+                "examples/ansible-fixture/"
+              ]
+            };
+
+            const include = [];
+            const add = (toolchain, fixture) => include.push({ toolchain, fixture });
+
+            if (ciCore || hasPath(languageScopes.java)) {
+              add("java", "java-maven-fixture");
+              add("java", "java-gradle-fixture");
+              add("java", "java-jdk25-toolchain-fixture");
+            }
+            if (ciCore || hasPath(languageScopes.kotlin)) {
+              add("kotlin", "kotlin-fixture");
+              add("kotlin", "java-kotlin-mixed-fixture");
+            }
+            if (ciCore || hasPath(languageScopes.ruby)) add("ruby", "ruby-fixture");
+            if (ciCore || hasPath(languageScopes.php)) add("php", "php-fixture");
+            if (ciCore || hasPath(languageScopes.dotnet)) add("dotnet", "dotnet-fixture");
+            if (ciCore || hasPath(languageScopes.elixir)) add("elixir", "elixir-fixture");
+            if (ciCore || hasPath(languageScopes.ansible)) add("ansible", "ansible-fixture");
+
+            core.info(`Changed files (${files.length}): ${files.join(", ") || "(non-PR event; full matrix enabled)"}`);
+            core.setOutput("run_languages", include.length > 0 ? "true" : "false");
+            core.setOutput("language_matrix", JSON.stringify({ include }));
+            core.setOutput("run_cache_e2e", (ciCore || cacheE2E) ? "true" : "false");
+
   test:
     name: build, test, lint
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -70,6 +191,7 @@ jobs:
   # dependency.
   ci-e2e:
     name: paws ci end-to-end (dagger)
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -165,32 +287,12 @@ jobs:
     # workflow_dispatch. Every change reaches main through a PR, where
     # these already ran against the identical SHA (the merge is a
     # fast-forward), so nothing goes unverified.
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && needs.changes.outputs.run_languages == 'true'
+    needs: changes
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - toolchain: java
-            fixture: java-maven-fixture
-          - toolchain: java
-            fixture: java-gradle-fixture
-          - toolchain: java
-            fixture: java-jdk25-toolchain-fixture
-          - toolchain: kotlin
-            fixture: kotlin-fixture
-          - toolchain: kotlin
-            fixture: java-kotlin-mixed-fixture
-          - toolchain: ruby
-            fixture: ruby-fixture
-          - toolchain: php
-            fixture: php-fixture
-          - toolchain: dotnet
-            fixture: dotnet-fixture
-          - toolchain: elixir
-            fixture: elixir-fixture
-          - toolchain: ansible
-            fixture: ansible-fixture
+      matrix: ${{ fromJson(needs.changes.outputs.language_matrix) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -225,6 +327,8 @@ jobs:
   # which branch triggered this workflow.
   github-actions-cache-e2e-cold:
     name: GitHub Actions cache backend (real runner, cold)
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.run_cache_e2e == 'true'
     runs-on: ubuntu-latest
     # These jobs exist to exercise saving, and they run on pull_request, where the
     # default policy deliberately does not save.
@@ -305,6 +409,22 @@ jobs:
           end=$(date +%s)
           echo "duration=$((end - start))" >> "$GITHUB_OUTPUT"
 
+      - name: Check for paws artifacts
+        id: check-artifacts
+        run: |
+          if [ -d "$GITHUB_WORKSPACE/paws-artifacts" ] && [ "$(ls -A $GITHUB_WORKSPACE/paws-artifacts)" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload paws artifacts
+        if: steps.check-artifacts.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: paws-engine-state
+          path: paws-artifacts/**
+
   github-actions-cache-e2e-warm:
     name: GitHub Actions cache backend (real runner, warm)
     needs: github-actions-cache-e2e-cold
@@ -368,6 +488,22 @@ jobs:
           paws docker --image ghcr.io/example/paws-cache-e2e-fixture --dockerfile Dockerfile --default-branch __none__ 2>&1 | tee /tmp/paws-warm.log
           end=$(date +%s)
           echo "duration=$((end - start))" >> "$GITHUB_OUTPUT"
+
+      - name: Check for paws artifacts
+        id: check-artifacts
+        run: |
+          if [ -d "$GITHUB_WORKSPACE/paws-artifacts" ] && [ "$(ls -A $GITHUB_WORKSPACE/paws-artifacts)" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload paws artifacts
+        if: steps.check-artifacts.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: paws-engine-state
+          path: paws-artifacts/**
 
       # The cold job saved under a key of its own; this job finds that entry
       # through the prefix every run shares. A single fixed key instead froze

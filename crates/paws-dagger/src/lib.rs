@@ -860,7 +860,7 @@ impl CacheSavePolicy {
 /// every invocation when the container exists but isn't running.
 async fn restore_github_actions_cache(client: &CacheTransport) -> Result<()> {
     let key = engine_cache_key().await?;
-    let archive_path = std::env::temp_dir().join("paws-dagger-cache-restore.tar.gz");
+    let archive_path = std::env::temp_dir().join("paws-dagger-cache-restore.tar.zst");
     if !client.find_and_download(&key, &archive_path).await? {
         eprintln!(
             "cache: no existing github-actions cache entry under {}, starting cold",
@@ -879,11 +879,13 @@ async fn restore_github_actions_cache(client: &CacheTransport) -> Result<()> {
         "-v",
         &format!("{volume}:/data"),
         "-v",
-        &format!("{}:/backup.tar.gz", archive_path.display()),
+        &format!("{}:/backup.tar.zst", archive_path.display()),
         "alpine:3.20",
         "sh",
         "-c",
-        "tar xzf /backup.tar.gz -C /data",
+        // Restore is backward-compatible with older gzip archives under the same key prefix:
+        // try zstd first, then fall back to gzip if the payload isn't zstd.
+        "sh -c \"apk add --no-cache zstd gzip >/dev/null && ((zstd -t /backup.tar.zst >/dev/null 2>&1 && zstd -d /backup.tar.zst -c) || gzip -dc /backup.tar.zst) | tar x -C /data\"",
     ])
     .await;
     let _ = tokio::fs::remove_file(&archive_path).await;
@@ -931,7 +933,7 @@ async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
         return Ok(());
     };
 
-    let archive_path = std::env::temp_dir().join("paws-dagger-cache-save.tar.gz");
+    let archive_path = std::env::temp_dir().join("paws-dagger-cache-save.tar.zst");
     // A bind mount onto a host path that doesn't exist yet gets created as
     // a *directory* by Docker (it can't infer file-vs-dir from a `-v` flag
     // alone) — confirmed for real on a live GitHub-hosted runner (006's own
@@ -950,11 +952,12 @@ async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
         "-v",
         &format!("{volume}:/data"),
         "-v",
-        &format!("{}:/backup.tar.gz", archive_path.display()),
+        &format!("{}:/backup.tar.zst", archive_path.display()),
         "alpine:3.20",
         "sh",
         "-c",
-        "tar czf /backup.tar.gz -C /data .",
+        // Install zstd and stream the tar through it to produce /backup.tar.zst.
+        "sh -c \"apk add --no-cache zstd >/dev/null && tar -C /data -cf - . | zstd -3 -o /backup.tar.zst\"",
     ])
     .await;
     // Restart the engine regardless of whether the tar succeeded — leaving
@@ -963,18 +966,66 @@ async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
     let _ = docker_output(&["start", &container]).await;
     tar_result.context("failed to archive the Dagger volume for the Actions cache")?;
 
+    // Check archive size before reading it into memory and attempting upload.
+    // If the archive exceeds PAWS_CACHE_MAX_BYTES (configurable via env),
+    // skip the upload to avoid 413/oversized uploads and excessive memory use.
+    let metadata = tokio::fs::metadata(&archive_path)
+        .await
+        .context("failed to stat the archived engine state")?;
+    let size = metadata.len();
+    // Default threshold: 100 MiB. Can be overridden with PAWS_CACHE_MAX_BYTES.
+    // For GitHub Actions specifically, PAWS_CACHE_MAX_BYTES_GITHUB may override
+    // the generic PAWS_CACHE_MAX_BYTES to allow provider-specific tuning.
+    let default_threshold: u64 = 100 * 1024 * 1024;
+    let github_override = std::env::var("PAWS_CACHE_MAX_BYTES_GITHUB").ok();
+    let threshold = github_override
+        .as_deref()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .or_else(|| {
+            std::env::var("PAWS_CACHE_MAX_BYTES")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        })
+        .unwrap_or(default_threshold);
+    eprintln!("cache: using upload threshold {threshold} bytes (PAWS_CACHE_MAX_BYTES_GITHUB / PAWS_CACHE_MAX_BYTES)");
+
+    if size > threshold {
+        eprintln!("cache: save skipped — archive {size} bytes exceeds PAWS_CACHE_MAX_BYTES={threshold} bytes");
+        // Optionally copy the large archive to the workspace for inspection if requested
+        if std::env::var("PAWS_UPLOAD_ARTIFACT").is_ok_and(|v| v == "1" || v.to_lowercase() == "true") {
+            copy_archive_for_artifact(&archive_path).await.ok();
+        }
+        let _ = tokio::fs::remove_file(&archive_path).await;
+        return Ok(());
+    }
+
+    // Optionally copy the archive to the workspace for artifact upload before uploading to cache
+    if std::env::var("PAWS_UPLOAD_ARTIFACT").is_ok_and(|v| v == "1" || v.to_lowercase() == "true") {
+        copy_archive_for_artifact(&archive_path).await.ok();
+    }
+
     let data = tokio::fs::read(&archive_path)
         .await
         .context("failed to read the archived engine state back from disk")?;
     let _ = tokio::fs::remove_file(&archive_path).await;
 
     client.upload(&key, &reserved, &data).await?;
-    eprintln!(
-        "cache: saved github-actions cache entry {} ({} bytes)",
-        key.save,
-        data.len()
-    );
+    eprintln!("cache: saved github-actions cache entry {save} ({len} bytes)", save = key.save, len = data.len());
     Ok(())
+}
+
+/// Copy the given archive into $GITHUB_WORKSPACE/paws-artifacts with a
+/// timestamped filename, returning the destination path on success.
+async fn copy_archive_for_artifact(archive_path: &std::path::Path) -> Result<std::path::PathBuf> {
+    let workspace = std::env::var("GITHUB_WORKSPACE")?;
+    let artifacts_dir = std::path::Path::new(&workspace).join("paws-artifacts");
+    tokio::fs::create_dir_all(&artifacts_dir).await?;
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let filename = std::env::var("PAWS_ARTIFACT_FILENAME").unwrap_or_else(|_| format!("artifact-engine_state-{}.{}", timestamp, "tar.zst"));
+    let dest = artifacts_dir.join(filename);
+    tokio::fs::copy(archive_path, &dest).await?;
+    eprintln!("cache: copied archive to {} for artifact upload", dest.display());
+    Ok(dest)
 }
 
 /// Detects the active `CacheBackend` and, if it's `GitHubActionsCache`,
