@@ -25,7 +25,7 @@ jobs:
         id: matrix
         uses: actions/github-script@v8
         with:
-          script: |
+          script: |-
             const isPullRequest = context.eventName === "pull_request";
             const files = [];
             if (isPullRequest) {
