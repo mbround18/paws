@@ -12,12 +12,29 @@ use std::pin::Pin;
 use anyhow::{Context, Result};
 
 /// A semver increment step. Mirrors `increment.js`'s three valid increment strings.
+///
+/// `rename_all = "lowercase"` matters for more than tidiness: `paws-mcp` exposes
+/// each subcommand by deserializing the same argument types the CLI parses, and
+/// without it the derived `Deserialize` expected `"Major"` while the CLI took
+/// `--increment major` — one definition, two incompatible spellings. The
+/// `PascalCase` aliases keep any caller already sending the old spelling working.
+///
+/// Derives `clap::ValueEnum` under the `cli` feature so `--increment` lists its
+/// accepted values in `--help` and suggests the nearest match on a typo, exactly
+/// as `--toolchain` and `--toolchains` do. The hand-written [`std::str::FromStr`]
+/// below is still used by callers that parse a bare string, and is kept in step
+/// with these variants by `increment_parses_the_same_through_both_paths`.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum Increment {
+    #[serde(alias = "Major")]
     Major,
+    #[serde(alias = "Minor")]
     Minor,
+    #[serde(alias = "Patch")]
     Patch,
 }
 
@@ -370,6 +387,22 @@ fn build_new_version(
     sha: &str,
 ) -> Result<String> {
     let version_part = last_tag.strip_prefix(prefix).unwrap_or(last_tag);
+
+    // A bare leading `v` is tolerated when no `--prefix` was configured, and
+    // carried through to the output, so `--base v1.2.3` yields `v1.2.4` rather
+    // than failing to parse. `compute_new_version`'s `refs/tags/` branch
+    // already accepts one "regardless of the configured prefix" (node-semver,
+    // which the original action used, does); this path did not, so the
+    // overwhelmingly common `--base v1.2.3` without `--prefix v` was an error.
+    // Nothing that works today changes behaviour: every input this rescues
+    // currently fails outright.
+    let (prefix, version_part) = match version_part.strip_prefix('v') {
+        Some(without_v) if prefix.is_empty() && semver::Version::parse(without_v).is_ok() => {
+            ("v", without_v)
+        }
+        _ => (prefix, version_part),
+    };
+
     let mut parsed = semver::Version::parse(version_part)
         .with_context(|| format!("invalid semver: {version_part}"))?;
 
@@ -675,6 +708,104 @@ mod tests {
 
         let version = compute_new_version(&tags, &request).await.unwrap();
         assert_eq!(version, "v5.0.1");
+    }
+
+    /// `--base v1.2.3` with no `--prefix` used to fail with "invalid semver:
+    /// v1.2.3" — the `refs/tags/` path tolerated a bare `v` but this one did
+    /// not, so the most natural way to name a base tag was an error.
+    /// `Increment` reaches users through three paths — `--increment` on the CLI,
+    /// a JSON field over MCP, and a bare `str::parse` — and they have to agree.
+    /// The serde derive used to expect `"Major"` while the CLI took `major`.
+    #[test]
+    fn increment_parses_the_same_through_both_paths() {
+        for (text, expected) in [
+            ("major", Increment::Major),
+            ("minor", Increment::Minor),
+            ("patch", Increment::Patch),
+        ] {
+            assert_eq!(text.parse::<Increment>().unwrap(), expected, "FromStr");
+            assert_eq!(
+                serde_json::from_str::<Increment>(&format!("\"{text}\"")).unwrap(),
+                expected,
+                "serde, as paws-mcp deserializes it"
+            );
+            assert_eq!(
+                serde_json::to_string(&expected).unwrap(),
+                format!("\"{text}\""),
+                "serde round-trips to the same spelling the CLI accepts"
+            );
+        }
+
+        assert!(
+            "Major".parse::<Increment>().is_err(),
+            "FromStr has always been lowercase-only; keep it that way"
+        );
+        assert_eq!(
+            serde_json::from_str::<Increment>("\"Major\"").unwrap(),
+            Increment::Major,
+            "the PascalCase alias keeps older MCP callers working"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bare_v_prefixed_base_needs_no_explicit_prefix() {
+        let tags = FixtureTagSource(vec![]);
+        let request = SemverRequest {
+            base: Some("v1.2.3".to_string()),
+            explicit_increment: Some(Increment::Minor),
+            ..base_request()
+        };
+
+        let version = compute_new_version(&tags, &request).await.unwrap();
+        assert_eq!(version, "v1.3.0", "the `v` must survive into the output");
+    }
+
+    /// The `v`-tolerance must not invent a prefix that was never there.
+    #[tokio::test]
+    async fn an_unprefixed_base_stays_unprefixed() {
+        let tags = FixtureTagSource(vec![]);
+        let request = SemverRequest {
+            base: Some("1.2.3".to_string()),
+            explicit_increment: Some(Increment::Patch),
+            ..base_request()
+        };
+
+        let version = compute_new_version(&tags, &request).await.unwrap();
+        assert_eq!(version, "1.2.4");
+    }
+
+    /// An explicit `--prefix` still wins, including one that happens to start
+    /// with something other than `v`.
+    #[tokio::test]
+    async fn an_explicit_prefix_is_not_overridden_by_v_tolerance() {
+        let tags = FixtureTagSource(vec![]);
+        let request = SemverRequest {
+            base: Some("chart-1.2.3".to_string()),
+            prefix: Some("chart-".to_string()),
+            explicit_increment: Some(Increment::Minor),
+            ..base_request()
+        };
+
+        let version = compute_new_version(&tags, &request).await.unwrap();
+        assert_eq!(version, "chart-1.3.0");
+    }
+
+    /// A `v` that isn't a prefix at all (a version string it can't parse
+    /// without one) must still be reported as invalid, not silently rescued.
+    #[tokio::test]
+    async fn a_base_that_is_not_a_version_still_fails() {
+        let tags = FixtureTagSource(vec![]);
+        let request = SemverRequest {
+            base: Some("vNext".to_string()),
+            explicit_increment: Some(Increment::Patch),
+            ..base_request()
+        };
+
+        let err = compute_new_version(&tags, &request).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid semver"),
+            "expected an invalid-semver error, got: {err:#}"
+        );
     }
 
     #[tokio::test]

@@ -1,8 +1,9 @@
 # Development guide
 
 Architecture, crate layout, CI/release internals, and contributor-facing detail. For "what is
-`paws` and how do I use it," see the top-level [`README.md`](../README.md). For what language/
-stack support is planned versus already wired, see [`docs/ROADMAP.md`](ROADMAP.md).
+`paws` and how do I use it," see the top-level [`README.md`](../README.md). For every command and
+flag in one page, plus the conventions the CLI surface holds to, see [`docs/CLI.md`](CLI.md). For
+what language/stack support is planned versus already wired, see [`docs/ROADMAP.md`](ROADMAP.md).
 
 ## Origin
 
@@ -54,7 +55,7 @@ see `docs/ROADMAP.md`'s "Current coverage" for the running tally of what's been 
   captured-then-printed-once behavior for callers that want quiet logs.
 - `crates/paws-semver` — native Rust port of `actions/semver` (no `dagger` CLI needed).
   The pilot crate for eventually evaluating `dagger-sdk`. `paws semver` auto-detects PR labels
-  (2026-08-19) when `--labels` isn't given: `fetch_pr_labels_for_commit` calls GitHub's "list
+  (2026-08-19) when `--pr-labels` isn't given: `fetch_pr_labels_for_commit` calls GitHub's "list
   pull requests associated with a commit" endpoint (`GET
 /repos/{owner}/{repo}/commits/{sha}/pulls`) to find the merged PR for the current commit and
   reads its labels — closes the same gap `gh-reusable`'s original `tagger.yaml` had, where
@@ -375,6 +376,33 @@ existing. `paws-up` is for other consumers of `paws`, not `paws`'s own release p
 [Renovate](https://docs.renovatebot.com/) is configured via `renovate.json`: minor/patch updates
 automerge once CI passes; major updates open a PR for manual review. 0.x packages (where a
 "minor" bump isn't guaranteed backwards compatible under semver) are excluded from automerge.
+
+### Supply-chain checks
+
+CI's gate is `cargo deny check` (`deny.toml`), covering advisories, licenses, banned crates and
+unexpected registries. `cargo audit` covers the advisories subset and is what most people reach for
+locally, so `.cargo/audit.toml` mirrors `deny.toml`'s ignore list — **keep the two in step**, or a
+local run reports a failure the pipeline does not have. The reasoning for each ignored advisory
+lives in `deny.toml` only; `.cargo/audit.toml` points at it rather than duplicating it.
+
+An ignored advisory always names why it does not apply, and names the condition that would make it
+apply again. `RUSTSEC-2023-0071` (`rsa`, reached only through `jsonwebtoken` to sign a GitHub App
+JWT) is the only one today, and has no fixed release to upgrade to.
+
+Two dependencies are deliberately held back rather than tracked to latest, each with the reason in
+the manifest next to it:
+
+- **`reqwest` at 0.12.** 0.13 replaced the `rustls-tls` feature with `rustls`, which is aws-lc-rs
+  (a C/assembly backend needing a C toolchain and cmake) plus `rustls-platform-verifier`, rather
+  than 0.12's pure-Rust ring and bundled webpki roots. `paws release` cross-compiles to six
+  targets including musl and windows-gnu; the alternative, `rustls-no-provider`, needs a
+  process-wide `CryptoProvider` installed at startup — the exact global state
+  `paws-environment`'s `jsonwebtoken` pin exists to avoid. Upgrade once the aws-lc-rs cross-builds
+  are verified against every `builders/*` image.
+- **`serde_yaml` replaced, not upgraded.** It was archived upstream and its last release is
+  `0.9.34+deprecated`, so nothing there will ever be fixed. `paws-docker`, `paws-helm` and
+  `paws-cli-core` use `serde_yaml_ng`, the maintained fork of that same release, with an identical
+  API.
 
 ## Examples / fixtures
 

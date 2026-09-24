@@ -93,10 +93,14 @@ pub enum Commands {
     /// php, dotnet, elixir, ansible, tauri, tauri-android, flatpak,
     /// esp32).
     Ci(CiArgs),
-    /// Build and gate a container image the same way `docker-facts` + `docker-release` do.
+    /// Build a container image, then tag and publish it — to docker.io,
+    /// ghcr.io, or any other registry. Which tags get pushed, and whether
+    /// anything is pushed at all, is decided from the branch/tag/PR-label
+    /// the build is running on.
     Docker(DockerArgs),
-    /// Compute the next semantic version from PR labels or an explicit increment,
-    /// matching `actions/semver`'s current behavior.
+    /// Compute the next semantic version from the merged PR's labels, the
+    /// branch name, or an explicit --increment. `--push` also creates the
+    /// annotated tag and the matching GitHub Release.
     Semver(SemverArgs),
     /// Install the `dagger` CLI (most other subcommands need it on PATH).
     Init(InitArgs),
@@ -132,10 +136,10 @@ pub enum Commands {
     /// Publish a package to its registry (`--target rust-crate` for
     /// crates.io today).
     Publish(PublishArgs),
-    /// Generate a `CHANGELOG.md` entry from commit/PR history between two
-    /// refs — a `paws`-native replacement for `mbround18/auto` (and
-    /// similar changelog actions), standalone so it can be run on its own
-    /// (e.g. to preview an entry) or chained after `paws semver --push`.
+    /// Generate a `CHANGELOG.md` entry from the commit/PR history between
+    /// two refs. Runs standalone (e.g. to preview an entry before tagging)
+    /// or chained after `paws semver --push`; `--commit` writes it back to
+    /// the repo.
     Changelog(ChangelogArgs),
     /// Reports which Dagger build-cache backend (`dagger-cloud`,
     /// `github-actions`, or none) `paws ci`/`paws docker` would select
@@ -169,23 +173,23 @@ pub enum AuthCommand {
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct GithubAppLoginArgs {
     /// The GitHub App's Client ID (the `Iv23...`-style string). Falls back
-    /// to $`GH_APP_CLIENT_ID`.
+    /// to `$GH_APP_CLIENT_ID`.
     #[arg(long)]
     #[serde(default)]
     pub client_id: Option<String>,
     /// The GitHub App's private key, PEM-encoded, given directly. Falls
-    /// back to $`GH_APP_PRIVATE_KEY`. Mutually exclusive with
+    /// back to `$GH_APP_PRIVATE_KEY`. Mutually exclusive with
     /// --private-key-file in practice — if both are given, the file wins.
     #[arg(long)]
     #[serde(default)]
     pub private_key: Option<String>,
     /// Path to a file containing the GitHub App's private key. Falls back
-    /// to $`GH_APP_PRIVATE_KEY_FILE`.
+    /// to `$GH_APP_PRIVATE_KEY_FILE`.
     #[arg(long)]
     #[serde(default)]
     pub private_key_file: Option<String>,
     /// "owner/repo" the App is installed on. Falls back to
-    /// $`GITHUB_REPOSITORY`.
+    /// `$GITHUB_REPOSITORY`.
     #[arg(long)]
     #[serde(default)]
     pub repository: Option<String>,
@@ -257,7 +261,7 @@ pub struct GenerateArgs {
     #[arg(long, default_value = "main")]
     #[serde(default = "field_defaults::main_branch")]
     pub branch: String,
-    /// "owner/repo" to publish to. Falls back to $`GITHUB_REPOSITORY`. Only
+    /// "owner/repo" to publish to. Falls back to `$GITHUB_REPOSITORY`. Only
     /// used with `--publish`.
     #[arg(long)]
     #[serde(default)]
@@ -274,9 +278,9 @@ pub struct CiArgs {
     #[arg(long)]
     #[serde(default)]
     pub source: Option<String>,
-    /// Which toolchain to build. Clap lists the accepted values from
-    /// `paws_core::TOOLCHAINS`, so `--help` can't fall behind what `paws ci`
-    /// actually dispatches.
+    /// Which toolchain to build. The accepted values are listed below, read
+    /// from the same registry `paws ci` dispatches on — so this list cannot
+    /// fall behind what the command actually supports.
     ///
     /// For `node`, the package manager
     /// (npm/yarn/pnpm/bun) and framework (Vite, Next.js, or plain) are
@@ -340,10 +344,10 @@ pub struct CiArgs {
     pub coverage: bool,
     /// After a successful build, upload the built bootloader
     /// (`bootloader.bin`) and firmware ELF as assets on the GitHub Release
-    /// matching the current tag ($`GITHUB_REF_NAME`) — only valid with
+    /// matching the current tag (`$GITHUB_REF_NAME`) — only valid with
     /// `--toolchain esp32` (mirrors `--coverage`'s existing `--toolchain
-    /// rust`-only gating). Needs $`GITHUB_TOKEN/$GH_TOKEN` and
-    /// $`GITHUB_REPOSITORY` set — no new env var name, reusing the same
+    /// rust`-only gating). Needs `$GITHUB_TOKEN`/`$GH_TOKEN` and
+    /// `$GITHUB_REPOSITORY` set — no new env var name, reusing the same
     /// convention every other GitHub-Release-touching `paws` subcommand
     /// already reads (`paws semver --push`, `paws helm --publish`). A
     /// missing token/tag fails with a clear, actionable error rather than a
@@ -357,7 +361,7 @@ pub struct CiArgs {
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct DockerArgs {
-    /// Image name, e.g. "ghcr.io/example/app". Falls back to $`GITHUB_REPOSITORY`.
+    /// Image name, e.g. "ghcr.io/example/app". Falls back to `$GITHUB_REPOSITORY`.
     /// A registry host here selects the registry to publish to — "ghcr.io/..."
     /// publishes to ghcr.io without also needing --registries. An unqualified
     /// name ("owner/app") is a Docker Hub reference, as docker itself reads it.
@@ -367,7 +371,7 @@ pub struct DockerArgs {
     #[arg(long, value_delimiter = ',')]
     #[serde(default)]
     pub image: Vec<String>,
-    /// Version to tag with. Falls back to $`GITHUB_SHA` (short).
+    /// Version to tag with. Falls back to `$GITHUB_SHA` (short).
     #[arg(long)]
     #[serde(default)]
     pub version: Option<String>,
@@ -419,10 +423,12 @@ pub struct DockerArgs {
     #[arg(long)]
     #[serde(default)]
     pub prepend_target: bool,
-    /// PR labels to check against --canary-label, comma-separated.
-    #[arg(long, value_delimiter = ',')]
-    #[serde(default)]
-    pub labels: Vec<String>,
+    /// PR labels to check against --canary-label, comma-separated. Named
+    /// `--pr-labels` to keep it distinct from `--label`, which sets OCI
+    /// labels on the image itself; `--labels` still works as an alias.
+    #[arg(long = "pr-labels", alias = "labels", value_delimiter = ',')]
+    #[serde(default, alias = "labels")]
+    pub pr_labels: Vec<String>,
     /// The repo's default branch. A push directly to this branch, or any
     /// tag push, always pushes the image — --canary-label/--push only
     /// matter for everything else (feature branches, PRs).
@@ -430,29 +436,29 @@ pub struct DockerArgs {
     #[serde(default = "field_defaults::main_branch")]
     pub default_branch: String,
     /// Docker Hub username to authenticate publishing with. Falls back to
-    /// $`DOCKERHUB_USERNAME`. Required (here or via env) to actually push
-    /// to docker.io — without it, `dockerRelease` builds but can't
-    /// authenticate, so `push=true` still publishes nothing.
+    /// `$DOCKERHUB_USERNAME`. Required (here or via env) to actually push
+    /// to docker.io — without it the image still builds, but the push has
+    /// no credentials to authenticate with and publishes nothing.
     #[arg(long)]
     #[serde(default)]
     pub dockerhub_username: Option<String>,
     /// GHCR username to authenticate publishing with. Falls back to
-    /// $`GHCR_USERNAME`. Required (here or via env) to actually push to
-    /// ghcr.io. The password is read from $`GHCR_TOKEN`, falling back to
-    /// $`GITHUB_TOKEN` — which is what a GitHub Actions workflow already has.
+    /// `$GHCR_USERNAME`. Required (here or via env) to actually push to
+    /// ghcr.io. The password is read from `$GHCR_TOKEN`, falling back to
+    /// `$GITHUB_TOKEN` — which is what a GitHub Actions workflow already has.
     #[arg(long)]
     #[serde(default)]
     pub ghcr_username: Option<String>,
     /// Username(s) for registries in --registries other than
     /// docker.io/ghcr.io (Artifactory, a private registry, etc.), as
     /// "<registry>=<username>" pairs, comma-separated — e.g.
-    /// "myco.jfrog.io=deploy-bot". These are built and published
-    /// natively through Dagger (`Container.withRegistryAuth`), not via
-    /// the docker.io/ghcr.io-only `dockerRelease` call. The matching
+    /// "myco.jfrog.io=deploy-bot". Any registry works here — docker.io and
+    /// ghcr.io just have their own flags above because their credentials
+    /// come from well-known env vars. The matching
     /// token/password is read from an env var derived from the
     /// registry: uppercased, every non-alphanumeric character replaced
     /// with `_`, suffixed `_TOKEN` — e.g. "myco.jfrog.io" reads
-    /// $`MYCO_JFROG_IO_TOKEN`.
+    /// `$MYCO_JFROG_IO_TOKEN`.
     #[arg(long, value_delimiter = ',')]
     #[serde(default)]
     pub registry_username: Vec<String>,
@@ -480,10 +486,10 @@ pub struct DockerArgs {
     /// `:3.2` alongside `:v3.2.1`) for release-quality version tags — the
     /// pattern consumers pinning to a major version for stability need.
     /// Gated identically to `--with-latest`: only on a real (non-prerelease)
-    /// version tag build. Off by default; omitting this flag produces
-    /// byte-identical output to before this flag existed. This is a
-    /// `paws`-native tag scheme, not a byte-for-byte port of
-    /// `crazy-max/ghaction-docker-meta`'s semver tag output.
+    /// version tag build. Off by default. Similar in spirit to
+    /// `docker/metadata-action`'s semver tag output, but paws's own scheme
+    /// rather than a byte-for-byte match — check the tags it prints before
+    /// relying on an exact equivalence.
     #[arg(long)]
     #[serde(default)]
     pub tag_rollup: bool,
@@ -585,7 +591,7 @@ pub struct ChangelogArgs {
     #[arg(long)]
     #[serde(default)]
     pub commit: bool,
-    /// "owner/repo" to operate against. Falls back to $`GITHUB_REPOSITORY`.
+    /// "owner/repo" to operate against. Falls back to `$GITHUB_REPOSITORY`.
     #[arg(long)]
     #[serde(default)]
     pub repository: Option<String>,
@@ -621,10 +627,12 @@ pub struct SemverArgs {
     #[arg(long, default_value = "patch")]
     #[serde(default = "field_defaults::patch")]
     pub patch_label: String,
-    /// PR/commit labels to check against major/minor/patch-label, comma-separated.
-    #[arg(long, value_delimiter = ',')]
-    #[serde(default)]
-    pub labels: Vec<String>,
+    /// PR/commit labels to check against major/minor/patch-label,
+    /// comma-separated. Same flag name `paws docker` uses for the same
+    /// thing; `--labels` still works as an alias.
+    #[arg(long = "pr-labels", alias = "labels", value_delimiter = ',')]
+    #[serde(default, alias = "labels")]
+    pub pr_labels: Vec<String>,
     /// Branch name used for fallback inference when no configured label matches.
     #[arg(long, default_value = "main")]
     #[serde(default = "field_defaults::main_branch")]
@@ -661,7 +669,7 @@ pub struct AuditArgs {}
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct AssignArgs {
     /// Issue or pull request number. Falls back to the one the triggering
-    /// GitHub Actions event is about (read from $`GITHUB_EVENT_PATH`).
+    /// GitHub Actions event is about (read from `$GITHUB_EVENT_PATH`).
     #[arg(long)]
     #[serde(default)]
     pub number: Option<u64>,
@@ -683,7 +691,7 @@ pub struct AssignArgs {
     #[arg(long)]
     #[serde(default)]
     pub dry_run: bool,
-    /// "owner/repo" to operate against. Falls back to $`GITHUB_REPOSITORY`.
+    /// "owner/repo" to operate against. Falls back to `$GITHUB_REPOSITORY`.
     #[arg(long)]
     #[serde(default)]
     pub repository: Option<String>,
@@ -711,7 +719,7 @@ pub struct DocsArgs {
     #[arg(long, value_delimiter = ',')]
     #[serde(default)]
     pub provider: Vec<String>,
-    /// "owner/repo" to publish to. Falls back to $`GITHUB_REPOSITORY`. Only
+    /// "owner/repo" to publish to. Falls back to `$GITHUB_REPOSITORY`. Only
     /// used when --provider is given.
     #[arg(long)]
     #[serde(default)]
@@ -726,9 +734,16 @@ pub struct DocsArgs {
 #[derive(Debug, Clone, clap::Args, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct ProvisionArgs {
     /// Comma-separated ecosystems to install, e.g. "rust,node,python,go".
-    #[arg(long, value_delimiter = ',')]
-    #[serde(default)]
-    pub toolchains: Vec<String>,
+    /// Clap lists the accepted values from the same `Ecosystem` enum
+    /// `paws provision` dispatches on, so `--help` can't fall behind what
+    /// actually has an installer — a narrower set than `paws ci --toolchain`,
+    /// which also builds ecosystems paws expects to already be on the runner.
+    ///
+    /// `--toolchain` is accepted as an alias, since `paws ci` spells it
+    /// singular.
+    #[arg(long, alias = "toolchain", value_delimiter = ',')]
+    #[serde(default, alias = "toolchain")]
+    pub toolchains: Vec<paws_provision::Ecosystem>,
     /// Print per-ecosystem provisioning start/elapsed timing to stderr.
     #[arg(long)]
     #[serde(default)]
@@ -759,7 +774,7 @@ pub struct HelmArgs {
     #[serde(default)]
     pub publish: bool,
     /// "owner/repo" to publish releases/index.yaml to. Falls back to
-    /// $`GITHUB_REPOSITORY`. Only used with `--publish`.
+    /// `$GITHUB_REPOSITORY`. Only used with `--publish`.
     #[arg(long)]
     #[serde(default)]
     pub repository: Option<String>,
@@ -822,7 +837,7 @@ pub struct ReleaseArgs {
     #[arg(long)]
     #[serde(default)]
     pub local_build: bool,
-    /// Release tag, e.g. "v0.0.1-prerelease.1". Falls back to $`GITHUB_REF_NAME`.
+    /// Release tag, e.g. "v0.0.1-prerelease.1". Falls back to `$GITHUB_REF_NAME`.
     #[arg(long)]
     #[serde(default)]
     pub tag: Option<String>,
@@ -830,7 +845,7 @@ pub struct ReleaseArgs {
     #[arg(long)]
     #[serde(default)]
     pub prerelease: bool,
-    /// "owner/repo". Falls back to $`GITHUB_REPOSITORY`.
+    /// "owner/repo". Falls back to `$GITHUB_REPOSITORY`.
     #[arg(long)]
     #[serde(default)]
     pub repository: Option<String>,

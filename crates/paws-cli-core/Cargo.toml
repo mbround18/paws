@@ -37,9 +37,9 @@ paws-esp32 = { path = "../paws-esp32" }
 paws-publish = { path = "../paws-publish" }
 paws-flatpak = { path = "../paws-flatpak" }
 paws-helm = { path = "../paws-helm" }
-paws-provision = { path = "../paws-provision" }
+paws-provision = { path = "../paws-provision", features = ["cli"] }
 paws-release = { path = "../paws-release" }
-paws-semver = { path = "../paws-semver" }
+paws-semver = { path = "../paws-semver", features = ["cli"] }
 paws-environment = { path = "../paws-environment" }
 paws-changelog = { path = "../paws-changelog" }
 paws-assign = { path = "../paws-assign" }
@@ -50,10 +50,7 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
-# Not in [workspace.dependencies] — matches how paws-helm/paws-docker each
-# declare it directly rather than centralizing a dependency only three
-# crates need.
-serde_yaml = "0.9"
+serde_yaml_ng = "0.10"   # maintained fork of the archived `serde_yaml`; see paws-docker
 
 [dev-dependencies]
 base64.workspace = true

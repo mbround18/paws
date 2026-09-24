@@ -85,7 +85,7 @@ enum ComposeBuildField {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 enum ComposeBuildArgs {
-    Map(HashMap<String, serde_yaml::Value>),
+    Map(HashMap<String, serde_yaml_ng::Value>),
     List(Vec<String>),
 }
 
@@ -107,8 +107,8 @@ fn parse_build_args(args: Option<ComposeBuildArgs>) -> Vec<(String, String)> {
             .into_iter()
             .map(|(k, v)| {
                 let value = match v {
-                    serde_yaml::Value::String(s) => s,
-                    other => serde_yaml::to_string(&other)
+                    serde_yaml_ng::Value::String(s) => s,
+                    other => serde_yaml_ng::to_string(&other)
                         .unwrap_or_default()
                         .trim()
                         .to_string(),
@@ -134,10 +134,10 @@ pub fn parse_docker_compose(compose_path: &Path, image_name: &str) -> ComposeRes
     let Ok(raw) = std::fs::read_to_string(compose_path) else {
         return ComposeResolution::default();
     };
-    // serde_yaml::Mapping preserves document order, matching the TS source's
+    // serde_yaml_ng::Mapping preserves document order, matching the TS source's
     // `Object.values(compose.services)` iteration over insertion order.
-    let ordered_names: Vec<String> = match serde_yaml::from_str::<serde_yaml::Value>(&raw) {
-        Ok(serde_yaml::Value::Mapping(top)) => top
+    let ordered_names: Vec<String> = match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&raw) {
+        Ok(serde_yaml_ng::Value::Mapping(top)) => top
             .get("services")
             .and_then(|v| v.as_mapping())
             .map(|services| {
@@ -150,7 +150,7 @@ pub fn parse_docker_compose(compose_path: &Path, image_name: &str) -> ComposeRes
         _ => return ComposeResolution::default(),
     };
 
-    let compose: ComposeFile = match serde_yaml::from_str(&raw) {
+    let compose: ComposeFile = match serde_yaml_ng::from_str(&raw) {
         Ok(compose) => compose,
         Err(_) => return ComposeResolution::default(),
     };

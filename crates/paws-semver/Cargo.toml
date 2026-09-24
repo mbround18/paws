@@ -19,3 +19,10 @@ serde_json.workspace = true
 semver.workspace = true
 reqwest.workspace = true
 schemars.workspace = true
+# Only `paws-cli-core` needs `Increment` to be a clap value type; same optional
+# arrangement paws-core and paws-provision use for the same reason.
+clap = { workspace = true, optional = true }
+
+[features]
+default = []
+cli = ["dep:clap"]

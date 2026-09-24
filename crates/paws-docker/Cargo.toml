@@ -14,5 +14,12 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
-serde_yaml = "0.9"
+# `serde_yaml_ng`, not `serde_yaml`: dtolnay archived `serde_yaml` in 2024 and
+# published its last release as `0.9.34+deprecated`, so nothing there will ever
+# be fixed again. `serde_yaml_ng` is the maintained fork of that exact release —
+# same API, so this is a crate rename at the `use` sites and nothing more.
+# Deliberately declared per-crate rather than in `[workspace.dependencies]`:
+# only paws-docker, paws-helm and paws-cli-core parse YAML, and centralizing a
+# three-crate dependency buys nothing.
+serde_yaml_ng = "0.10"
 semver.workspace = true

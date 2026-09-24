@@ -14,7 +14,27 @@ use paws_core::Toolchain;
 use tokio::process::Command;
 use tokio::task::JoinSet;
 
+/// A `paws provision --toolchains <x>` value: the ecosystems `paws` has a real
+/// installer for, which is a narrower set than [`paws_core::Toolchain`] (a JDK
+/// or a Ruby has no single obviously-right version manager — see
+/// `Ecosystem::for_toolchain`).
+///
+/// Derives `clap::ValueEnum` under the `cli` feature so `--toolchains` rejects
+/// an unknown value at parse time and lists the accepted ones in `--help`,
+/// matching `paws ci --toolchain`. Before that the flag was a bare
+/// `Vec<String>` parsed after the fact, so `--help` named none of the values
+/// and a typo surfaced as a plain runtime error with no suggestions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "cli",
+    derive(
+        clap::ValueEnum,
+        serde::Serialize,
+        serde::Deserialize,
+        schemars::JsonSchema
+    )
+)]
+#[cfg_attr(feature = "cli", serde(rename_all = "kebab-case"))]
 pub enum Ecosystem {
     Rust,
     Node,

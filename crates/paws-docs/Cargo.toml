@@ -15,6 +15,11 @@ workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 paws-release = { path = "../paws-release" }
+# `manifest_digest` is persisted on the publish branch and compared against on
+# the *next* run, so it needs a hash whose output is fixed by a specification
+# rather than by whichever std version built the binary. Same version
+# paws-dagger already uses.
+sha2 = "0.11"
 
 [dev-dependencies]
 serde_json.workspace = true

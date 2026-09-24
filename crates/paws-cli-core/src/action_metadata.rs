@@ -56,7 +56,7 @@ struct RawInput {
     #[serde(default)]
     required: bool,
     #[serde(default)]
-    default: Option<serde_yaml::Value>,
+    default: Option<serde_yaml_ng::Value>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -80,12 +80,12 @@ struct RawActionManifest {
 /// A YAML scalar default (e.g. `default: "latest"`) renders as its plain
 /// string; anything non-scalar (unusual for an action input, but not
 /// impossible) falls back to its YAML text rather than being dropped.
-fn default_to_string(value: serde_yaml::Value) -> String {
+fn default_to_string(value: serde_yaml_ng::Value) -> String {
     match value {
-        serde_yaml::Value::String(s) => s,
-        serde_yaml::Value::Bool(b) => b.to_string(),
-        serde_yaml::Value::Number(n) => n.to_string(),
-        other => serde_yaml::to_string(&other)
+        serde_yaml_ng::Value::String(s) => s,
+        serde_yaml_ng::Value::Bool(b) => b.to_string(),
+        serde_yaml_ng::Value::Number(n) => n.to_string(),
+        other => serde_yaml_ng::to_string(&other)
             .unwrap_or_default()
             .trim()
             .to_string(),
@@ -98,7 +98,7 @@ pub fn discover_actions() -> anyhow::Result<Vec<ActionMetadata>> {
     EMBEDDED_ACTIONS
         .iter()
         .map(|(id, yaml)| {
-            let raw: RawActionManifest = serde_yaml::from_str(yaml)
+            let raw: RawActionManifest = serde_yaml_ng::from_str(yaml)
                 .with_context(|| format!("failed to parse embedded actions/{id}/action.yml"))?;
 
             let mut inputs: Vec<ActionInput> = raw

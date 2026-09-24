@@ -1,0 +1,22 @@
+# `cargo audit` configuration.
+#
+# CI's supply-chain gate is `cargo deny check`, which reads `deny.toml`. But
+# `cargo audit` is what most people reach for locally, and it reads this file
+# instead — so without it a developer running `cargo audit` got a failure the
+# pipeline does not have, for an advisory the repo had already reviewed and
+# written down. Same principle as `[workspace.lints]` in Cargo.toml: a local run
+# should be exactly as strict as the pipeline, not differently strict.
+#
+# Keep this list and `deny.toml`'s `[advisories] ignore` identical. The full
+# reasoning for each entry lives in `deny.toml`, next to the licence and
+# banned-crate policy, rather than being duplicated here.
+
+[advisories]
+ignore = [
+    # Marvin Attack (timing sidechannel in `rsa`), reached only via
+    # jsonwebtoken -> rsa for signing a GitHub App JWT. Nothing here decrypts,
+    # and no attacker-controlled input reaches the RSA operation. No fixed
+    # release exists. See deny.toml for the full justification, and remove this
+    # entry — do not re-justify it — if paws ever grows an RSA decryption path.
+    "RUSTSEC-2023-0071",
+]

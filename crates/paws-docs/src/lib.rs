@@ -154,16 +154,42 @@ fn collect_tree_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
 /// `publish_tree` call — mirrors `paws-cli-core::should_publish`'s
 /// single-file "identical bytes -> skip" bar, generalized to a whole tree
 /// (contracts/paws-docs-publish-contract.md §5).
+///
+/// SHA-256, not `DefaultHasher`. This digest is written to [`MANIFEST_PATH`] on
+/// the publish branch and read back on a *later* run, possibly by a binary built
+/// with a different Rust version — and `DefaultHasher`'s algorithm is explicitly
+/// unspecified and allowed to change between releases, which would silently
+/// invalidate every stored digest and force a full republish of unchanged docs.
+/// A specified hash makes "deterministic" true across runs, not just within one.
+///
+/// The length prefixes matter too: hashing `("ab", "c")` and `("a", "bc")` as
+/// bare bytes would collide, so each length goes in ahead of its value — as a
+/// fixed-width `u64`, so the digest does not depend on the host's pointer size
+/// either.
 fn manifest_digest(files: &[(String, Vec<u8>)]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use sha2::{Digest, Sha256};
 
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = Sha256::new();
     for (path, content) in files {
-        path.hash(&mut hasher);
-        content.hash(&mut hasher);
+        // `u64`, not `usize`: `usize::to_le_bytes()` is 8 bytes on a 64-bit host
+        // and 4 on a 32-bit one, which would make a persisted digest disagree
+        // across architectures — the same class of bug as using an unspecified
+        // hash, just triggered by the runner instead of the compiler.
+        hasher.update((path.len() as u64).to_le_bytes());
+        hasher.update(path.as_bytes());
+        hasher.update((content.len() as u64).to_le_bytes());
+        hasher.update(content);
     }
-    format!("{:016x}", hasher.finish())
+    // sha2 0.11's output is an `Array`, which has no `LowerHex` — same
+    // fold-into-a-hex-string as `paws_dagger::short_cache_version`.
+    hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
 }
 
 /// The path the current manifest digest is stashed at on the publish
@@ -408,6 +434,38 @@ mod tests {
 
         server.await.unwrap();
         std::fs::remove_dir_all(&docs_dir).ok();
+    }
+
+    /// The digest is stored on the publish branch and compared against on a
+    /// later run, so its value is part of the on-disk format: a change here
+    /// invalidates every stored manifest and forces a full republish of docs
+    /// that did not change. Pinned literally so that can only happen on purpose.
+    #[test]
+    fn manifest_digest_is_stable_sha256() {
+        let files = vec![
+            ("index.html".to_string(), b"<h1>docs</h1>".to_vec()),
+            ("paws/index.html".to_string(), b"<h1>paws</h1>".to_vec()),
+        ];
+        let digest = manifest_digest(&files);
+
+        assert_eq!(digest.len(), 64, "SHA-256, lowercase hex");
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(digest, manifest_digest(&files), "same input, same digest");
+        assert_eq!(
+            digest, "012fdc59fbb42c3633110f91032fb3ec18d827c52a92e8335d31fd71290e3fdc",
+            "the stored-manifest format changed — see this test's doc comment"
+        );
+    }
+
+    /// Path and content are concatenated into one hash, so without a length
+    /// prefix per value a file named `ab` holding `c` would digest identically
+    /// to one named `a` holding `bc`, and a rename between the two would look
+    /// like "nothing changed" and never publish.
+    #[test]
+    fn manifest_digest_distinguishes_a_shifted_path_boundary() {
+        let left = vec![("ab".to_string(), b"c".to_vec())];
+        let right = vec![("a".to_string(), b"bc".to_vec())];
+        assert_ne!(manifest_digest(&left), manifest_digest(&right));
     }
 
     #[tokio::test]

@@ -138,7 +138,8 @@ fn read_chart_yaml(path: &Path) -> Result<RawChartYaml> {
     }
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    serde_yaml::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))
+    serde_yaml_ng::from_str(&contents)
+        .with_context(|| format!("failed to parse {}", path.display()))
 }
 
 /// Loads the chart at `root`/`rel_dir`, returning it alongside every

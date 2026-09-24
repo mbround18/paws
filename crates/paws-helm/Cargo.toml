@@ -15,7 +15,7 @@ workspace = true
 paws-core = { path = "../paws-core" }
 anyhow.workspace = true
 serde.workspace = true
-serde_yaml = "0.9"
+serde_yaml_ng = "0.10"   # maintained fork of the archived `serde_yaml`; see paws-docker
 
 [dev-dependencies]
 paws-core = { path = "../paws-core", features = ["testing"] }

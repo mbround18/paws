@@ -15,3 +15,14 @@ workspace = true
 paws-core = { path = "../paws-core" }
 anyhow.workspace = true
 tokio.workspace = true
+# Same arrangement as paws-core's `cli` feature, and for the same reason: only
+# `paws-cli-core` needs `Ecosystem` to be a clap value / JSON-schema type, so
+# crates that just want the provisioning API don't compile clap and schemars
+# to get it.
+clap = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+cli = ["dep:clap", "dep:schemars", "dep:serde"]

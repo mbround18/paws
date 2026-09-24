@@ -980,7 +980,7 @@ async fn run_docker_pipeline(
         with_latest,
         target: _,
         prepend_target,
-        labels,
+        pr_labels: labels,
         default_branch,
         dockerhub_username,
         ghcr_username,
@@ -1317,7 +1317,7 @@ pub async fn run_semver(args: SemverArgs) -> anyhow::Result<()> {
         major_label,
         minor_label,
         patch_label,
-        labels,
+        pr_labels: labels,
         branch,
         pr,
         push,
@@ -1325,30 +1325,46 @@ pub async fn run_semver(args: SemverArgs) -> anyhow::Result<()> {
         tagger_email,
     } = args;
 
-    let ctx = paws_environment::CiContext::detect()
-        .await
-        .context("paws semver needs a supported CI provider's env vars")?;
-    let labels = if labels.is_empty() {
-        match paws_semver::fetch_pr_labels_for_commit(&ctx.owner, &ctx.repo, &ctx.sha, &ctx.token)
+    // CI context is optional, and deliberately so: with `--base` given there is
+    // no last tag to look up, and with `--pr-labels` given there are no labels
+    // to fetch — which is exactly the offline invocation README.md's quickstart
+    // documents (`paws semver --base v1.0.0 --prefix v --branch main`). Making
+    // detection a hard precondition made that documented command fail outside a
+    // GitHub Actions runner. The two paths that genuinely cannot work without it
+    // — resolving the last tag, and `--push` — each say so themselves below.
+    let ctx = paws_environment::CiContext::detect().await.ok();
+
+    let labels = match (labels.is_empty(), ctx.as_ref()) {
+        (false, _) => labels,
+        (true, None) => Vec::new(),
+        (true, Some(ctx)) => {
+            match paws_semver::fetch_pr_labels_for_commit(
+                &ctx.owner, &ctx.repo, &ctx.sha, &ctx.token,
+            )
             .await
-        {
-            Ok(found) => {
-                if !found.is_empty() {
-                    eprintln!("semver: auto-detected PR labels: {}", found.join(", "));
+            {
+                Ok(found) => {
+                    if !found.is_empty() {
+                        eprintln!("semver: auto-detected PR labels: {}", found.join(", "));
+                    }
+                    found
                 }
-                found
-            }
-            Err(err) => {
-                eprintln!(
-                    "semver: couldn't auto-detect PR labels for {}, falling back to branch/patch inference: {err:#}",
-                    ctx.sha
-                );
-                Vec::new()
+                Err(err) => {
+                    eprintln!(
+                        "semver: couldn't auto-detect PR labels for {}, falling back to branch/patch inference: {err:#}",
+                        ctx.sha
+                    );
+                    Vec::new()
+                }
             }
         }
-    } else {
-        labels
     };
+
+    anyhow::ensure!(
+        base.is_some() || ctx.is_some(),
+        "paws semver needs either --base, or a supported CI provider's env vars to resolve the last tag from (GitHub Actions: $GITHUB_REPOSITORY plus $GITHUB_TOKEN/$GH_TOKEN)"
+    );
+
     let request = SemverRequest {
         base,
         prefix,
@@ -1358,14 +1374,16 @@ pub async fn run_semver(args: SemverArgs) -> anyhow::Result<()> {
         patch_label,
         labels,
         branch_name: branch,
-        sha: ctx.sha.clone(),
+        sha: ctx.as_ref().map(|c| c.sha.clone()).unwrap_or_default(),
         is_pr: pr,
-        github_ref: ctx.git_ref.clone(),
+        github_ref: ctx.as_ref().and_then(|c| c.git_ref.clone()),
     };
+    // Only consulted when `request.base` is None, which the `ensure!` above
+    // guarantees means `ctx` is present.
     let tag_source = GitHubGraphQlTagSource {
-        owner: ctx.owner.clone(),
-        repo: ctx.repo.clone(),
-        token: ctx.token.clone(),
+        owner: ctx.as_ref().map(|c| c.owner.clone()).unwrap_or_default(),
+        repo: ctx.as_ref().map(|c| c.repo.clone()).unwrap_or_default(),
+        token: ctx.as_ref().map(|c| c.token.clone()).unwrap_or_default(),
     };
 
     let version = compute_new_version(&tag_source, &request).await?;
@@ -1376,6 +1394,9 @@ pub async fn run_semver(args: SemverArgs) -> anyhow::Result<()> {
     paws_environment::write_outputs(&[("version", &version)]).context("writing $GITHUB_OUTPUT")?;
 
     if push {
+        let ctx = ctx.as_ref().context(
+            "paws semver --push needs a supported CI provider's env vars (GitHub Actions:              $GITHUB_REPOSITORY plus $GITHUB_TOKEN/$GH_TOKEN)",
+        )?;
         anyhow::ensure!(
             !ctx.sha.is_empty(),
             "paws semver --push needs a commit sha (GITHUB_SHA was empty)"
@@ -1384,7 +1405,7 @@ pub async fn run_semver(args: SemverArgs) -> anyhow::Result<()> {
             name: &tagger_name,
             email: &tagger_email,
         };
-        paws_environment::push_tag(&ctx, &version, &author)
+        paws_environment::push_tag(ctx, &version, &author)
             .await
             .with_context(|| format!("failed to push tag/release {version}"))?;
         eprintln!("pushed tag {version} and created its release");
@@ -1880,11 +1901,9 @@ pub async fn run_provision(args: ProvisionArgs) -> anyhow::Result<()> {
     if toolchains.is_empty() {
         anyhow::bail!("--toolchains is required (e.g. --toolchains rust,node,python,go)");
     }
-    let ecosystems = toolchains
-        .iter()
-        .map(|t| t.parse::<Ecosystem>())
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    run_provisioning(ecosystems, verbose, MissingInstallerPolicy::Fail).await?;
+    // Already validated by clap (and by serde over MCP) against `Ecosystem`'s
+    // own variants, so there is nothing left to parse here.
+    run_provisioning(toolchains, verbose, MissingInstallerPolicy::Fail).await?;
     println!("provision: all requested toolchains provisioned successfully");
     Ok(())
 }
@@ -2471,6 +2490,96 @@ pub async fn run_workflow_generate(args: WorkflowGenerateArgs) -> anyhow::Result
     Ok(())
 }
 
+/// `paws.toml`, as an `llms.txt` section.
+///
+/// Not derivable from `clap`: it is a config file, not a flag, and an agent
+/// wiring `paws` into a repo has no way to discover it from the command
+/// reference alone.
+const LLMS_TXT_CONFIG_SECTION: &str = "\
+## Configuration: `paws.toml`
+
+Optional, at the repository root. Only needed for toolchains with no native version file, or to \
+pin the tools `paws` itself installs and runs:
+
+```toml
+[toolchains]
+ruby = \"3.3.0\"
+dotnet = \"9.0\"
+
+[tools]
+dagger = \"0.18.10\"    # what `paws init` installs
+semgrep = \"1.99.0\"    # the scanner images `paws audit` runs
+```
+
+`paws ci` resolves a toolchain version from, highest precedence first: `--toolchain-version`, then \
+the ecosystem's own version file (`rust-toolchain.toml`, `.nvmrc`, `.python-version`, \
+`.ruby-version`, `go.mod`, `.tool-versions`, ...), then `paws.toml`, then a built-in default. A \
+native version file deliberately outranks `paws.toml`, so `paws ci` never builds against a \
+different compiler than a local `cargo build` in the same directory. Every run prints which it \
+used and why.
+
+Pinning `dagger` matters more than it looks: unpinned, `paws init` installs whatever the install \
+script currently serves, so two runs weeks apart can leave different engines behind.
+
+";
+
+/// The environment variables `paws` reads, as an `llms.txt` section.
+///
+/// Each one is named in some flag's help text too, but scattered across ~15
+/// subcommands. An agent writing a workflow needs the list in one place to know
+/// which secrets a job has to set.
+const LLMS_TXT_ENVIRONMENT_SECTION: &str = "\
+## Environment variables
+
+Inside GitHub Actions the `GITHUB_*` variables are already set; `secrets`/`vars` supply the rest.
+
+| Variable | Read by |
+| --- | --- |
+| `GITHUB_REPOSITORY` | every subcommand that talks to the GitHub API, as the `--repository` fallback |
+| `GITHUB_TOKEN` / `GH_TOKEN` | `semver --push`, `changelog --commit`, `helm --publish`, `release`, `docs --provider`, `llms generate --publish`, `assign`, `ci --toolchain esp32 --publish-artifacts` |
+| `GH_APP_CLIENT_ID`, `GH_APP_PRIVATE_KEY` (or `GH_APP_PRIVATE_KEY_FILE`) | any of the above, in place of a token: `paws` mints a short-lived installation token itself, so no separate token-minting Action is needed |
+| `GITHUB_SHA`, `GITHUB_REF`, `GITHUB_REF_NAME`, `GITHUB_EVENT_PATH` | `semver`, `docker`, `release`, `assign` — the ref/commit/event a build is for |
+| `DOCKERHUB_USERNAME`, `DOCKER_TOKEN` | `docker`, to publish to docker.io |
+| `GHCR_USERNAME`, `GHCR_TOKEN` | `docker`, to publish to ghcr.io (`GHCR_TOKEN` falls back to `GITHUB_TOKEN`) |
+| `<REGISTRY>_TOKEN` | `docker --registries`, for any other registry: the host uppercased with every non-alphanumeric character replaced by `_`, suffixed `_TOKEN` (`myco.jfrog.io` reads `MYCO_JFROG_IO_TOKEN`) |
+| `PAWS_CACHE_SAVE` | `ci`/`docker`: `auto` (default — save on push/dispatch/schedule, not on pull requests), `always`/`1`, or `never`/`0` |
+| `PAWS_CACHE_MAX_BYTES` | `ci`/`docker`: largest engine-state archive to upload to the Actions cache, default 104857600 (100 MiB) |
+| `PAWS_UPLOAD_ARTIFACT`, `PAWS_ARTIFACT_FILENAME` | `ci`/`docker`: copy the engine-state archive into `$GITHUB_WORKSPACE/paws-artifacts/` for debugging an oversized archive |
+| `ACTIONS_CACHE_URL`, `ACTIONS_RESULTS_URL`, `ACTIONS_RUNTIME_TOKEN` | set by the Actions runner; what `paws cache` detects the `github-actions` backend from |
+
+Run `paws cache --json` to see which build-cache backend would be selected right now, and why.
+
+";
+
+/// Links to the repository's own documentation.
+///
+/// The <https://llmstxt.org> convention is a link list per section; the command
+/// reference above is the exception rather than the shape, so this section
+/// provides the links a reader needs to go deeper.
+const LLMS_TXT_DOCS_SECTION: &str = "\
+## Docs
+
+- [README](https://github.com/mbround18/paws/blob/main/README.md): what `paws` is, installation, and a per-command quickstart
+- [CLI reference](https://github.com/mbround18/paws/blob/main/docs/CLI.md): every subcommand and flag, with the conventions they share
+- [Development guide](https://github.com/mbround18/paws/blob/main/docs/DEVELOPMENT.md): crate layout, CI internals, and how to add a toolchain
+- [Roadmap](https://github.com/mbround18/paws/blob/main/docs/ROADMAP.md): what is built versus planned, per stack
+- [Architecture decision records](https://github.com/mbround18/paws/blob/main/docs/adr/README.md): why container execution goes through Dagger
+- [Contributing](https://github.com/mbround18/paws/blob/main/CONTRIBUTING.md): how to propose a change
+- [Quickstart walkthrough](https://github.com/mbround18/paws/blob/main/specs/001-paws-core-cli/quickstart.md): subcommand-by-subcommand, with real output
+
+";
+
+/// Links a reader on a tight context budget can skip. `## Optional` is a
+/// defined section name in the <https://llmstxt.org> convention, with exactly
+/// that meaning, so it goes last.
+const LLMS_TXT_OPTIONAL_SECTION: &str = "\
+## Optional
+
+- [Adoption tracker](https://github.com/mbround18/paws/blob/main/docs/mbround18.md): which of the author's repos run `paws` today
+- [Example fixtures](https://github.com/mbround18/paws/tree/main/examples): one minimal project per toolchain, used by paws's own end-to-end tests
+- [Builder images](https://github.com/mbround18/paws/tree/main/builders): the Dockerfiles `paws ci`/`paws release` build against
+";
+
 /// Renders one `clap::Command` (and its subcommands) as an `llms.txt`
 /// section. Module-level rather than nested inside `render_llms_txt`: it
 /// recurses, and an item declared after statements reads as if it were
@@ -2487,27 +2596,103 @@ fn render_command(cmd: &clap::Command, prefix: &str, out: &mut String) {
         .filter(|a| a.get_long().is_some())
         .collect();
     if !flags.is_empty() {
+        let _ = writeln!(out, "```sh\npaws {name} [OPTIONS]\n```\n");
         for flag in flags {
-            let long = flag.get_long().unwrap_or_default();
-            let help = flag.get_help().map(ToString::to_string).unwrap_or_default();
-            let default = flag
-                .get_default_values()
-                .first()
-                .map(|v| v.to_string_lossy().to_string());
-            match default {
-                Some(default) if !default.is_empty() => {
-                    let _ = writeln!(out, "- `--{long}` (default: `{default}`) — {help}");
-                }
-                _ => {
-                    let _ = writeln!(out, "- `--{long}` — {help}");
-                }
-            }
+            let _ = writeln!(out, "{}", render_flag(flag));
         }
         out.push('\n');
     }
 
     for sub in cmd.get_subcommands() {
         render_command(sub, &format!("{name} "), out);
+    }
+}
+
+/// One flag as an `llms.txt` bullet.
+///
+/// Renders the *shape* of the flag, not just its name and help text: whether it
+/// takes a value, which values it accepts, whether it repeats, whether it is
+/// required, and what it defaults to. A reader of the old output could not tell
+/// `--coverage` (a boolean) from `--toolchain` (a value out of a fixed set of
+/// fifteen), because every flag rendered identically as `` `--name` — help ``
+/// and the accepted values appeared nowhere in the file — `--toolchain`'s help
+/// text only says that *clap* lists them, which is true of `--help` and was not
+/// true of this file.
+fn render_flag(flag: &clap::Arg) -> String {
+    let long = flag.get_long().unwrap_or_default();
+    // `get_action().takes_values()`, not `get_num_args()`: a boolean switch
+    // leaves `num_args` unset, so reading that made every `--silent`/`--coverage`
+    // render as `--silent <SILENT> (one of true, false)`.
+    let takes_value = flag.get_action().takes_values();
+
+    let mut signature = format!("`--{long}");
+    if takes_value {
+        let placeholder = flag
+            .get_value_names()
+            .and_then(|names| names.first())
+            .map_or_else(
+                || long.to_uppercase().replace('-', "_"),
+                ToString::to_string,
+            );
+        let _ = write!(signature, " <{placeholder}>");
+    }
+    signature.push('`');
+
+    let mut notes = Vec::new();
+
+    // Skipped for a switch, whose "possible values" are the literals
+    // `true`/`false` that nobody types.
+    if takes_value {
+        let values: Vec<String> = flag
+            .get_possible_values()
+            .iter()
+            .map(|v| format!("`{}`", v.get_name()))
+            .collect();
+        if !values.is_empty() {
+            notes.push(format!("one of {}", values.join(", ")));
+        }
+    }
+
+    if let Some(default) = flag.get_default_values().first() {
+        let default = default.to_string_lossy();
+        if !default.is_empty() {
+            notes.push(format!("default `{default}`"));
+        }
+    }
+
+    // A comma-delimited multi-value flag is the single most common thing to get
+    // wrong from prose alone — `--image a,b` versus `--image a --image b`
+    // versus one value only.
+    if let Some(delimiter) = flag.get_value_delimiter() {
+        let separator = if delimiter == ',' {
+            "comma".to_string()
+        } else {
+            format!("`{delimiter}`")
+        };
+        notes.push(format!("{separator}-separated, or repeated"));
+    } else if flag
+        .get_num_args()
+        .is_some_and(|n| n.max_values() > 1 || n.min_values() > 1)
+        || matches!(flag.get_action(), clap::ArgAction::Append)
+    {
+        notes.push("repeatable".to_string());
+    }
+
+    if flag.is_required_set() {
+        notes.push("required".to_string());
+    }
+
+    let help = flag.get_help().map(ToString::to_string).unwrap_or_default();
+    let annotation = if notes.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", notes.join("; "))
+    };
+
+    if help.is_empty() {
+        format!("- {signature}{annotation}")
+    } else {
+        format!("- {signature}{annotation} — {help}")
     }
 }
 
@@ -2565,10 +2750,39 @@ pub fn render_llms_txt() -> String {
          Actions\" section below) — it's the same install, packaged as a composite Action.\n\n",
     );
 
+    out.push_str(LLMS_TXT_CONFIG_SECTION);
+    out.push_str(LLMS_TXT_ENVIRONMENT_SECTION);
+
+    out.push_str("## Command reference\n\n");
+    out.push_str(
+        "Every flag below is generated from this CLI's own `clap` definition, so it cannot drift \
+         from what the binary accepts. A flag shown as `--name <VALUE>` takes a value; one shown \
+         as `--name` is a boolean switch.\n\n",
+    );
+
     for sub in root.get_subcommands() {
         render_command(sub, "", &mut out);
     }
 
+    render_github_actions(&mut out);
+
+    // Last, in that order: <https://llmstxt.org> gives "## Optional" a defined
+    // meaning — a section a reader on a tight context budget can skip — so it
+    // has to be the final one.
+    out.push_str(LLMS_TXT_DOCS_SECTION);
+    out.push_str(LLMS_TXT_OPTIONAL_SECTION);
+
+    out
+}
+
+/// The `## GitHub Actions` section: the composite Actions this repo ships,
+/// read from their embedded `action.yml`.
+///
+/// Split out of [`render_llms_txt`], which was over clippy's `too_many_lines`
+/// bar once the config/environment/docs sections joined it. The split is along
+/// a real seam: everything else in that function renders the CLI, this renders
+/// the Actions beside it.
+fn render_github_actions(out: &mut String) {
     if let Ok(actions) = action_metadata::discover_actions()
         && !actions.is_empty()
     {
@@ -2625,8 +2839,6 @@ pub fn render_llms_txt() -> String {
             }
         }
     }
-
-    out
 }
 
 /// Pure comparison behind `run_llms_generate`'s publish loop-guard —
@@ -3066,6 +3278,115 @@ mod tests {
                 "expected llms.txt to document `paws {name}`, got:\n{rendered}"
             );
         }
+    }
+
+    /// A reader of `llms.txt` has to be able to tell a switch from a
+    /// value-taking flag, and to see which values a constrained flag accepts —
+    /// neither of which the old renderer emitted, so `--toolchain`'s fifteen
+    /// accepted values appeared nowhere in the file it was supposed to
+    /// document them in.
+    #[test]
+    fn llms_txt_renders_flag_shapes_and_accepted_values() {
+        let rendered = render_llms_txt();
+
+        assert!(
+            rendered.contains("- `--toolchain <TOOLCHAIN>` (one of `node`, `rust`"),
+            "expected --toolchain to render with a value placeholder and its accepted values"
+        );
+        for toolchain in paws_core::TOOLCHAINS {
+            assert!(
+                rendered.contains(&format!("`{}`", toolchain.name)),
+                "expected llms.txt to name the `{}` toolchain",
+                toolchain.name
+            );
+        }
+
+        assert!(
+            rendered.contains("- `--silent` —"),
+            "expected the --silent switch to render with no value placeholder"
+        );
+        assert!(
+            !rendered.contains("--silent <SILENT>"),
+            "a boolean switch must not be documented as taking a value"
+        );
+        assert!(
+            !rendered.contains("one of `true`, `false`"),
+            "a boolean switch's true/false possible-values are noise, not documentation"
+        );
+
+        assert!(
+            rendered.contains("(comma-separated, or repeated)"),
+            "expected multi-value flags to say how to pass several values"
+        );
+    }
+
+    /// Writing a dollar sign outside the backticks around a variable name
+    /// satisfies clippy's `doc_markdown` lint, but clap prints doc comments
+    /// verbatim — so that spelling reached both `--help` and this file with the
+    /// backticks showing and the dollar sign stranded outside them.
+    #[test]
+    fn llms_txt_renders_environment_variables_readably() {
+        let rendered = render_llms_txt();
+        assert!(
+            !rendered.contains("$`"),
+            "found a `$`VAR`` artifact in generated output:\n{}",
+            rendered
+                .lines()
+                .filter(|l| l.contains("$`"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert!(rendered.contains("`$GITHUB_REPOSITORY`"));
+    }
+
+    /// The command reference is only half of what an agent wiring `paws` into a
+    /// repo needs: `paws.toml` is a file rather than a flag, the env vars are
+    /// scattered across fifteen subcommands, and <https://llmstxt.org>'s own
+    /// convention is a section of links out to the real docs.
+    #[test]
+    fn llms_txt_documents_config_environment_and_docs_links() {
+        let rendered = render_llms_txt();
+
+        assert!(rendered.contains("## Configuration: `paws.toml`"));
+        assert!(rendered.contains("[toolchains]"));
+        assert!(rendered.contains("[tools]"));
+
+        assert!(rendered.contains("## Environment variables"));
+        for var in [
+            "`GITHUB_REPOSITORY`",
+            "`GH_APP_CLIENT_ID`",
+            "`DOCKERHUB_USERNAME`",
+            "`PAWS_CACHE_SAVE`",
+        ] {
+            assert!(
+                rendered.contains(var),
+                "expected the environment table to name {var}"
+            );
+        }
+
+        assert!(rendered.contains("## Docs"));
+        assert!(
+            rendered.contains("](https://github.com/mbround18/paws/blob/main/docs/CLI.md)"),
+            "expected a link list pointing at the repo's own docs"
+        );
+    }
+
+    /// `paws.toml`/env-var context is only useful *before* the flag-by-flag
+    /// reference; the docs links are the "go deeper" footer and belong after.
+    #[test]
+    fn llms_txt_orders_context_before_the_command_reference() {
+        let rendered = render_llms_txt();
+        let config = rendered.find("## Configuration: `paws.toml`").unwrap();
+        let reference = rendered.find("## Command reference").unwrap();
+        let first_command = rendered.find("## paws ci").unwrap();
+        let docs = rendered.find("## Docs").unwrap();
+
+        assert!(config < reference, "config belongs before the reference");
+        assert!(reference < first_command);
+        assert!(
+            first_command < docs,
+            "docs links belong after the reference"
+        );
     }
 
     #[test]

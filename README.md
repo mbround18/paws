@@ -28,7 +28,7 @@ provider-specific scripting.
 | Command | What it does |
 | --- | --- |
 | `paws init` | Install the `dagger` CLI, which most other subcommands need on `PATH` |
-| `paws ci` | Build, lint, and test a project in any of 14 toolchains — Rust, Node, Python, Go, Java, Kotlin, Ruby, PHP, .NET, Elixir, Tauri (desktop + Android), Flatpak, or ESP32 firmware |
+| `paws ci` | Build, lint, and test a project in any of 15 toolchains — Rust, Node, Python, Ansible, Go, Java, Kotlin, Ruby, PHP, .NET, Elixir, Tauri (desktop + Android), Flatpak, or ESP32 firmware |
 | `paws semver` | Compute the next version from PR labels, branch name, or an explicit bump; `--push` tags and pushes it |
 | `paws docker` | Build/tag/publish a container image to docker.io, ghcr.io, and (natively) any other registry |
 | `paws changelog` | Generate a `CHANGELOG.md` entry from commit/PR history between two refs; `--commit` writes it back to the repo |
@@ -38,8 +38,16 @@ provider-specific scripting.
 | `paws release` | Cross-compile, smoke-test, package, and publish a release binary for Linux, Windows, and macOS |
 | `paws helm` | Lint, package, and publish Helm chart(s) as a real `index.yaml` repo |
 | `paws assign` | Assign an issue or PR to its `CODEOWNERS`: PRs by the files they change, issues by the catch-all `*` rule |
+| `paws publish` | Publish a package to its registry (`--target rust-crate` for crates.io today) |
+| `paws cache` | Report which Dagger build-cache backend `paws ci`/`paws docker` would select right now, and why; `--json` for scripting |
+| `paws workflow generate` | Detect a repo's ecosystem(s) and scaffold a starter CI workflow wiring in `paws-up` |
+| `paws llms generate` | Regenerate [`llms.txt`](llms.txt), a machine-readable summary of this tooling surface; `--publish` commits it |
+| `paws mcp setup` / `serve` | Expose every subcommand as an [MCP](https://modelcontextprotocol.io) tool, calling the same Rust code the CLI does |
+| `paws auth github-app` | Mint a GitHub App installation token and print it, for handing to another tool |
 
-Run `paws --help` or `paws <command> --help` for the full flag reference.
+Run `paws --help` or `paws <command> --help` for the full flag reference, or read
+[`docs/CLI.md`](docs/CLI.md) for every command and flag in one page, plus the conventions they
+share.
 
 ## Status
 
@@ -162,7 +170,7 @@ paws semver --branch main --push
 # --major-label/--minor-label/--patch-label) — no need to thread
 # `github.event.pull_request.labels` through yourself, since that context
 # doesn't exist on a push event anyway. Falls back to branch-name inference,
-# then patch, if there's no labeled PR. Pass --labels explicitly to override
+# then patch, if there's no labeled PR. Pass --pr-labels explicitly to override
 # auto-detection (e.g. from a pull_request-triggered workflow).
 
 # Build and test a project
@@ -261,7 +269,9 @@ control repo (`ansible-galaxy install -r requirements.yml`, `ansible-lint`, then
 repo with no Python packaging, which gets `ansible-core` and `ansible-lint` installed into the
 image instead. Molecule scenarios are detected and named, but not run: molecule drives a real
 container per role, and a Dagger build has no Docker daemon to hand it — run those as a separate
-job on a Docker-enabled runner. ### Toolchain versions
+job on a Docker-enabled runner.
+
+### Toolchain versions
 
 `paws` reads the version file your ecosystem already uses, so `paws ci` builds
 against the same toolchain a local build does — no extra configuration:
