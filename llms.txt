@@ -49,6 +49,7 @@ Run your own commands in a container, the same way locally and in CI: an image (
 - `--toolchain-version` — Override the version `--toolchain` resolves
 - `--image` — Container image to run in. Takes precedence over --toolchain
 - `--apt` — Debian/Ubuntu packages to install first, comma-separated or repeated. Installed in their own image layer, before the source is copied in, so they are only installed again when this list changes
+- `--setup` — A shell command baked into the image after --apt, repeatable, each its own `RUN` layer (e.g. `rustup component add clippy`). Like --apt it runs before the source is copied, so it is cached until it changes
 - `--env` — Environment variable for the commands, repeatable: `NAME=value`, or a bare `NAME` to pass the host's value through (skipped when unset) — how resource caps such as `CARGO_BUILD_JOBS` reach the container
 - `--cache` — Persistent cache volume, repeatable: `PATH` or `NAME=PATH`. A relative PATH is relative to --workdir, so `--cache target` keeps a Rust build directory between runs. Unnamed volumes are scoped by the source directory's name
 - `--exclude` — Extra patterns to leave out of the source, comma-separated or repeated, on top of `.gitignore` and `.git`

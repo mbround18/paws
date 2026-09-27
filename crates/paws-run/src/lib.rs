@@ -48,6 +48,9 @@ pub struct RunSpec {
     pub workdir: String,
     pub image: String,
     pub apt_packages: Vec<String>,
+    /// Shell commands baked into the image after the packages, each its own
+    /// `RUN` layer.
+    pub setup: Vec<String>,
     pub env: Vec<(String, String)>,
     pub caches: Vec<CacheMount>,
     /// Extra patterns left out of the context, beyond `.gitignore`.
@@ -58,9 +61,9 @@ pub struct RunSpec {
 }
 
 /// The Dockerfile a run is built from: the image, then the Debian packages
-/// (before the source copy, so changing a source file never reinstalls
-/// them), then the source.
-pub fn dockerfile(image: &str, apt_packages: &[String]) -> String {
+/// and the `--setup` commands (before the source copy, so changing a source
+/// file never reruns them), then the source.
+pub fn dockerfile(image: &str, apt_packages: &[String], setup: &[String]) -> String {
     let mut lines = vec![format!("FROM {image}")];
     if !apt_packages.is_empty() {
         lines.push(format!(
@@ -68,6 +71,7 @@ pub fn dockerfile(image: &str, apt_packages: &[String]) -> String {
             apt_packages.join(" ")
         ));
     }
+    lines.extend(setup.iter().map(|script| format!("RUN {script}")));
     lines.push(format!("WORKDIR {SOURCE_ROOT}"));
     lines.push(format!("COPY . {SOURCE_ROOT}"));
     lines.join("\n")
@@ -83,6 +87,19 @@ pub fn validate_apt_package(name: &str) -> Result<()> {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-' | ':' | '=' | '~'));
     if !valid {
         bail!("--apt {name:?} is not a Debian package name");
+    }
+    Ok(())
+}
+
+/// Rejects a `--setup` command that would not be one Dockerfile `RUN` line:
+/// an empty one, or one spanning lines (the next line would be read as a new
+/// Dockerfile instruction). Chain commands with `&&` instead.
+pub fn validate_setup(script: &str) -> Result<()> {
+    if script.trim().is_empty() {
+        bail!("--setup is empty");
+    }
+    if script.contains(['\n', '\r']) {
+        bail!("--setup {script:?} spans lines; join its commands with && instead");
     }
     Ok(())
 }
@@ -182,6 +199,9 @@ pub fn dagger_pipeline_args(spec: &RunSpec) -> Result<Vec<String>> {
     for package in &spec.apt_packages {
         validate_apt_package(package)?;
     }
+    for script in &spec.setup {
+        validate_setup(script)?;
+    }
 
     let mut excludes: Vec<String> = DEFAULT_EXCLUDES.iter().map(ToString::to_string).collect();
     excludes.extend(spec.excludes.iter().cloned());
@@ -189,7 +209,7 @@ pub fn dagger_pipeline_args(spec: &RunSpec) -> Result<Vec<String>> {
     let mut pipeline = Pipeline::from_host_context(
         &spec.context_dir,
         &excludes,
-        &dockerfile(&spec.image, &spec.apt_packages),
+        &dockerfile(&spec.image, &spec.apt_packages, &spec.setup),
     );
     for cache in &spec.caches {
         pipeline = pipeline.mount_cache(&cache.path, &cache.name);
@@ -227,6 +247,7 @@ mod tests {
             workdir: "/src".into(),
             image: "rust:1-bookworm".into(),
             apt_packages: vec![],
+            setup: vec![],
             env: vec![],
             caches: vec![],
             excludes: vec![],
@@ -239,18 +260,30 @@ mod tests {
         let file = dockerfile(
             "rust:1-bookworm",
             &["libwebkit2gtk-4.1-dev".into(), "cmake".into()],
+            &["rustup component add clippy rustfmt".into()],
         );
         let lines: Vec<&str> = file.lines().collect();
         assert_eq!(lines[0], "FROM rust:1-bookworm");
         assert!(lines[1].contains("apt-get install"));
         assert!(lines[1].contains("libwebkit2gtk-4.1-dev cmake"));
-        assert_eq!(lines[2], "WORKDIR /src");
-        assert_eq!(lines[3], "COPY . /src");
+        assert_eq!(lines[2], "RUN rustup component add clippy rustfmt");
+        assert_eq!(lines[3], "WORKDIR /src");
+        assert_eq!(lines[4], "COPY . /src");
     }
 
     #[test]
     fn no_packages_means_no_apt_layer() {
-        assert!(!dockerfile("alpine:3", &[]).contains("apt-get"));
+        assert!(!dockerfile("alpine:3", &[], &[]).contains("apt-get"));
+    }
+
+    #[test]
+    fn a_multi_line_setup_is_refused_before_anything_runs() {
+        validate_setup("apt-get update && apt-get install -y x").unwrap();
+        let mut spec = spec();
+        spec.setup = vec!["echo a\nFROM evil".into()];
+        assert!(dagger_pipeline_args(&spec).is_err());
+        spec.setup = vec!["  ".into()];
+        assert!(dagger_pipeline_args(&spec).is_err());
     }
 
     #[test]

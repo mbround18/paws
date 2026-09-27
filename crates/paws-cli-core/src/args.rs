@@ -403,6 +403,12 @@ pub struct RunArgs {
     #[arg(long, value_delimiter = ',')]
     #[serde(default)]
     pub apt: Vec<String>,
+    /// A shell command baked into the image after --apt, repeatable, each
+    /// its own `RUN` layer (e.g. `rustup component add clippy`). Like --apt
+    /// it runs before the source is copied, so it is cached until it changes.
+    #[arg(long)]
+    #[serde(default)]
+    pub setup: Vec<String>,
     /// Environment variable for the commands, repeatable: `NAME=value`, or a
     /// bare `NAME` to pass the host's value through (skipped when unset) —
     /// how resource caps such as `CARGO_BUILD_JOBS` reach the container.
