@@ -20,6 +20,7 @@ directly, with no Docker-in-Docker nesting to work around.
 | Input | Default | Description |
 | --- | --- | --- |
 | `version` | `latest` | A specific tag (e.g. `v0.0.1-prerelease.1`), or `latest` for the most recent GitHub Release. **Prereleases are included** when resolving `latest` — this action exists to dogfood `paws` fast, including prerelease iteration, not just pin to stable. |
+| `git-ref` | `""` | Build `paws` from source at this branch, tag or commit of `mbround18/paws` (`cargo install --locked --git`) instead of downloading a release — for trying an unreleased change. Takes precedence over `version`; needs `cargo` on the runner and takes a few minutes. |
 | `github-token` | `${{ github.token }}` | Used for the release-list/download API calls, to avoid low anonymous rate limits. |
 | `install-dagger` | `true` | Also run `paws init` to install the `dagger` CLI. Set to `"false"` to skip if the runner already has it. |
 
