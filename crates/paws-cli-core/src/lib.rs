@@ -163,6 +163,7 @@ fn collect_repository_signals() -> RepositorySignals {
 pub async fn execute(command: Commands) -> anyhow::Result<()> {
     match command {
         Commands::Ci(args) => run_ci(args).await,
+        Commands::Run(args) => run_run(args).await,
         Commands::Docker(args) => run_docker(args).await,
         Commands::Semver(args) => run_semver(args).await,
         Commands::Init(args) => run_init(args).await,
@@ -199,6 +200,105 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
     let result = run_ci_pipeline(args).await;
     paws_dagger::save_cache_backend(&backend).await;
     result
+}
+
+/// Runs `paws run`, with the same single restore-before/save-after cache
+/// cycle as [`run_ci`].
+pub async fn run_run(args: RunArgs) -> anyhow::Result<()> {
+    let backend = paws_dagger::restore_cache_backend().await;
+    let result = run_run_pipeline(args).await;
+    paws_dagger::save_cache_backend(&backend).await;
+    result
+}
+
+async fn run_run_pipeline(args: RunArgs) -> anyhow::Result<()> {
+    let RunArgs {
+        source,
+        workdir,
+        toolchain,
+        toolchain_version,
+        image,
+        apt,
+        env,
+        cache,
+        exclude,
+        step,
+        silent,
+        command,
+    } = args;
+
+    let source_dir = resolve_source_dir(source.as_deref())?;
+    if let Some(workdir) = workdir.as_deref() {
+        let host_workdir = source_dir.join(workdir);
+        if !host_workdir.is_dir() {
+            anyhow::bail!(
+                "--workdir {workdir} is not a directory in {}",
+                source_dir.display()
+            );
+        }
+    }
+    let container_workdir = paws_run::container_workdir(workdir.as_deref())?;
+
+    let image = match (image, toolchain) {
+        (Some(image), _) => image,
+        (None, Some(toolchain)) => {
+            let (config, _) = paws_core::PawsConfig::discover(&source_dir)?;
+            let version = toolchain.resolve_version(
+                &source_dir,
+                toolchain_version.as_deref(),
+                config.toolchain_version(toolchain.as_str()),
+            );
+            println!("run: {toolchain} {}", version.describe());
+            toolchain.image_for(&version.version).with_context(|| {
+                format!(
+                    "--toolchain {toolchain} builds from a paws builder image, not a pulled one; \
+                     pass --image instead"
+                )
+            })?
+        }
+        (None, None) => anyhow::bail!("paws run needs --image or --toolchain"),
+    };
+
+    let env = env
+        .iter()
+        .map(|entry| paws_run::parse_env(entry, |name| std::env::var(name).ok()))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    let scope = paws_run::cache_scope(&source_dir)?;
+    let caches = cache
+        .iter()
+        .map(|entry| paws_run::parse_cache(entry, &scope, &container_workdir))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let mut commands: Vec<Vec<String>> = step.iter().map(|s| paws_run::shell_step(s)).collect();
+    if !command.is_empty() {
+        commands.push(command);
+    }
+
+    let spec = paws_run::RunSpec {
+        context_dir: source_dir.to_string_lossy().into_owned(),
+        workdir: container_workdir,
+        image,
+        apt_packages: apt,
+        env,
+        caches,
+        excludes: exclude,
+        commands,
+    };
+    let args = paws_run::dagger_pipeline_args(&spec)?;
+    println!(
+        "run: {} step(s) in {} ({} from {})",
+        spec.commands.len(),
+        spec.image,
+        spec.workdir,
+        source_dir.display()
+    );
+    paws_dagger::ensure_available().await?;
+    run_dagger_core(&args, silent).await?;
+    println!("run: succeeded");
+    Ok(())
 }
 
 /// Resolve `--source` against the current directory, failing with a clear

@@ -1250,6 +1250,7 @@ dependencies = [
  "paws-python",
  "paws-release",
  "paws-ruby",
+ "paws-run",
  "paws-rust",
  "paws-semver",
  "paws-tauri",
@@ -1459,6 +1460,14 @@ dependencies = [
 
 [[package]]
 name = "paws-ruby"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "paws-core",
+]
+
+[[package]]
+name = "paws-run"
 version = "0.1.0"
 dependencies = [
  "anyhow",

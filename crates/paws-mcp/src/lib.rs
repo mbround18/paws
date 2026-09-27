@@ -11,7 +11,7 @@ use rmcp::{
 
 use paws_cli_core::{
     AssignArgs, AuditArgs, CacheArgs, CiArgs, DockerArgs, DocsArgs, GithubAppLoginArgs, HelmArgs,
-    InitArgs, ProvisionArgs, ReleaseArgs, SemverArgs, WorkflowGenerateArgs,
+    InitArgs, ProvisionArgs, ReleaseArgs, RunArgs, SemverArgs, WorkflowGenerateArgs,
 };
 
 /// Runs `f`, capturing anything it prints to stdout/stderr instead of
@@ -125,6 +125,14 @@ impl PawsMcpServer {
     )]
     async fn cache(&self, Parameters(args): Parameters<CacheArgs>) -> Result<String, McpError> {
         let (outcome, captured) = capture_output(|| paws_cli_core::run_cache(args)).await;
+        tool_result(outcome, captured)
+    }
+
+    #[tool(
+        description = "Run arbitrary commands in a container (an image or a toolchain's image, optional apt packages, the repo filtered by .gitignore), the same way locally and in CI."
+    )]
+    async fn run(&self, Parameters(args): Parameters<RunArgs>) -> Result<String, McpError> {
+        let (outcome, captured) = capture_output(|| paws_cli_core::run_run(args)).await;
         tool_result(outcome, captured)
     }
 
