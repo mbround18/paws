@@ -14,11 +14,11 @@
 //! ## The `--args` comma convention
 //!
 //! `dagger core with-exec` takes its command as one comma-joined
-//! `--args=a,b,c` value, so an argument containing a literal comma would be
-//! split into two. That constraint is inherited from `dagger core`, not
-//! introduced here; centralizing it means there is now one place to fix it if
-//! `dagger` ever grows a repeatable flag, and one place that checks for it —
-//! see [`Pipeline::exec`].
+//! `--args=a,b,c` value, parsed as a single CSV record, so an argument
+//! containing a literal comma would be split into two. [`csv_join`] quotes
+//! such an argument the way a CSV reader expects (`"a,b"`), which `dagger
+//! core` then hands through as one argument. The same applies to the other
+//! list-valued flags this builder emits, such as `--exclude`.
 
 /// The provenance `--build-args` every `builders/*` image is built with.
 ///
@@ -32,6 +32,34 @@ pub fn builder_build_args() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
     format!("BUILDER_VERSION=dev,BUILDER_REVISION=unknown,BUILDER_CREATED={created_unix}")
+}
+
+/// Where [`Pipeline::from_host_context`] writes its generated Dockerfile,
+/// relative to the build context. It only ever exists inside the engine.
+pub const GENERATED_DOCKERFILE: &str = ".paws.Dockerfile";
+
+/// Joins `parts` into one value for a list-valued `dagger core` flag
+/// (`--args`, `--exclude`), which is read as a single CSV record. A part
+/// containing a comma, a double quote or a line break is wrapped in quotes,
+/// with its own quotes doubled, so it arrives as one element; other parts
+/// pass through untouched, which keeps the common case readable in logs.
+pub fn csv_join<I, S>(parts: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    parts
+        .into_iter()
+        .map(|part| {
+            let part = part.as_ref();
+            if part.contains([',', '"', '\n', '\r']) {
+                format!("\"{}\"", part.replace('"', "\"\""))
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// A `dagger core` invocation under construction.
@@ -88,6 +116,46 @@ impl Pipeline {
         Self::from_host_dockerfile_with_build_args(builder_dir, &builder_build_args())
     }
 
+    /// Builds `dockerfile` against a *filtered* view of the host directory
+    /// `context_dir`: `.gitignore` rules and every `excludes` pattern are
+    /// applied on the host, before anything is uploaded to the engine.
+    ///
+    /// That is the difference from [`Pipeline::mount`], whose host directory
+    /// is sent whole. A Rust checkout's ignored `target/` (tens of gigabytes
+    /// on a busy workstation) or a local `node_modules/` would otherwise be
+    /// uploaded on every run and, worse, seen by the build, which a fresh CI
+    /// checkout never has. `dagger core` only accepts a filter where the host
+    /// directory is opened, and the one way from a directory to a container
+    /// in a single chain is `docker-build`, so the Dockerfile is written into
+    /// the context with `with-new-file` rather than read from the host.
+    ///
+    /// The Dockerfile gets its own `<name>.dockerignore`, which `BuildKit`
+    /// prefers over the context's `.dockerignore`: the repo's own ignore file
+    /// is written for the repo's own images and must not decide what a CI
+    /// step sees, and the generated Dockerfile keeps itself out of the copy.
+    pub fn from_host_context(context_dir: &str, excludes: &[String], dockerfile: &str) -> Self {
+        let mut args = vec![
+            "host".into(),
+            "directory".into(),
+            format!("--path={context_dir}"),
+            "--gitignore".into(),
+        ];
+        if !excludes.is_empty() {
+            args.push(format!("--exclude={}", csv_join(excludes)));
+        }
+        args.extend([
+            "with-new-file".into(),
+            format!("--path={GENERATED_DOCKERFILE}"),
+            format!("--contents={dockerfile}"),
+            "with-new-file".into(),
+            format!("--path={GENERATED_DOCKERFILE}.dockerignore"),
+            format!("--contents={GENERATED_DOCKERFILE}*"),
+            "docker-build".into(),
+            format!("--dockerfile={GENERATED_DOCKERFILE}"),
+        ]);
+        Self { args }
+    }
+
     /// Starts from a caller-supplied prefix, for the few chains that open
     /// with something this builder doesn't model yet. Prefer the constructors
     /// above; this exists so adopting the builder never requires modelling
@@ -133,28 +201,30 @@ impl Pipeline {
 
     /// `with-exec --args=<command joined by commas>`
     ///
-    /// Debug builds assert that no single argument contains a comma, since
-    /// `dagger core` would silently split it into two arguments and the
-    /// failure would surface as a confusing error from the tool being run
-    /// rather than from here.
+    /// Arguments are joined with [`csv_join`], so one containing a comma, a
+    /// double quote or a line break (a `sh -c` script, say) still reaches the
+    /// command as a single argument rather than being split by `dagger core`.
     pub fn exec<I, S>(mut self, command: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let parts: Vec<String> = command
-            .into_iter()
-            .map(|part| {
-                let part = part.as_ref();
-                debug_assert!(
-                    !part.contains(','),
-                    "dagger core joins --args with commas, so {part:?} would be split in two"
-                );
-                part.to_string()
-            })
-            .collect();
+        let joined = csv_join(command);
         self.args.push("with-exec".into());
-        self.args.push(format!("--args={}", parts.join(",")));
+        self.args.push(format!("--args={joined}"));
+        self
+    }
+
+    /// `with-mounted-cache --path=<path> --cache=<name>`: a persistent, named
+    /// cache volume (a package store, a build directory) that outlives this
+    /// pipeline and is shared by every later one naming the same volume.
+    ///
+    /// Its contents never feed into Dagger's step cache keys, so a step is
+    /// still skipped outright when nothing it depends on changed.
+    pub fn mount_cache(mut self, path: &str, name: &str) -> Self {
+        self.args.push("with-mounted-cache".into());
+        self.args.push(format!("--path={path}"));
+        self.args.push(format!("--cache={name}"));
         self
     }
 
@@ -450,8 +520,73 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "would be split in two")]
-    fn a_comma_in_a_command_argument_is_caught_in_debug_builds() {
-        Pipeline::from_image("rust:1-bookworm").exec(["cargo", "build", "--features=a,b"]);
+    fn a_comma_in_a_command_argument_is_quoted_so_it_stays_one_argument() {
+        let args = Pipeline::from_image("rust:1-bookworm")
+            .exec(["cargo", "build", "--features=a,b"])
+            .into_args();
+        assert_eq!(
+            args.last().unwrap(),
+            "--args=cargo,build,\"--features=a,b\""
+        );
+    }
+
+    #[test]
+    fn csv_join_doubles_embedded_quotes_and_quotes_line_breaks() {
+        assert_eq!(
+            csv_join(["sh", "-c", "echo \"hi\""]),
+            "sh,-c,\"echo \"\"hi\"\"\""
+        );
+        assert_eq!(csv_join(["sh", "-c", "a\nb"]), "sh,-c,\"a\nb\"");
+        assert_eq!(csv_join(["plain", "args"]), "plain,args");
+    }
+
+    #[test]
+    fn a_host_context_is_filtered_on_the_host_then_docker_built() {
+        let args = Pipeline::from_host_context(
+            "/host/repo",
+            &["target/".to_string(), ".git".to_string()],
+            "FROM rust:1-bookworm",
+        )
+        .stdout();
+        assert_eq!(
+            args,
+            vec![
+                "host",
+                "directory",
+                "--path=/host/repo",
+                "--gitignore",
+                "--exclude=target/,.git",
+                "with-new-file",
+                "--path=.paws.Dockerfile",
+                "--contents=FROM rust:1-bookworm",
+                "with-new-file",
+                "--path=.paws.Dockerfile.dockerignore",
+                "--contents=.paws.Dockerfile*",
+                "docker-build",
+                "--dockerfile=.paws.Dockerfile",
+                "stdout",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_host_context_without_excludes_omits_the_flag() {
+        let args = Pipeline::from_host_context("/host/repo", &[], "FROM alpine").into_args();
+        assert!(!args.iter().any(|a| a.starts_with("--exclude")));
+    }
+
+    #[test]
+    fn a_cache_volume_is_mounted_by_name() {
+        let args = Pipeline::from_image("rust:1-bookworm")
+            .mount_cache("/usr/local/cargo/registry", "paws-cargo-registry")
+            .into_args();
+        assert_eq!(
+            &args[3..],
+            &[
+                "with-mounted-cache",
+                "--path=/usr/local/cargo/registry",
+                "--cache=paws-cargo-registry",
+            ]
+        );
     }
 }
