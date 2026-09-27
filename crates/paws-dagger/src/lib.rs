@@ -987,12 +987,18 @@ async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
                 .and_then(|s| s.trim().parse::<u64>().ok())
         })
         .unwrap_or(default_threshold);
-    eprintln!("cache: using upload threshold {threshold} bytes (PAWS_CACHE_MAX_BYTES_GITHUB / PAWS_CACHE_MAX_BYTES)");
+    eprintln!(
+        "cache: using upload threshold {threshold} bytes (PAWS_CACHE_MAX_BYTES_GITHUB / PAWS_CACHE_MAX_BYTES)"
+    );
 
     if size > threshold {
-        eprintln!("cache: save skipped — archive {size} bytes exceeds PAWS_CACHE_MAX_BYTES={threshold} bytes");
+        eprintln!(
+            "cache: save skipped — archive {size} bytes exceeds PAWS_CACHE_MAX_BYTES={threshold} bytes"
+        );
         // Optionally copy the large archive to the workspace for inspection if requested
-        if std::env::var("PAWS_UPLOAD_ARTIFACT").is_ok_and(|v| v == "1" || v.to_lowercase() == "true") {
+        if std::env::var("PAWS_UPLOAD_ARTIFACT")
+            .is_ok_and(|v| v == "1" || v.to_lowercase() == "true")
+        {
             copy_archive_for_artifact(&archive_path).await.ok();
         }
         let _ = tokio::fs::remove_file(&archive_path).await;
@@ -1010,7 +1016,11 @@ async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
     let _ = tokio::fs::remove_file(&archive_path).await;
 
     client.upload(&key, &reserved, &data).await?;
-    eprintln!("cache: saved github-actions cache entry {save} ({len} bytes)", save = key.save, len = data.len());
+    eprintln!(
+        "cache: saved github-actions cache entry {save} ({len} bytes)",
+        save = key.save,
+        len = data.len()
+    );
     Ok(())
 }
 
@@ -1021,10 +1031,14 @@ async fn copy_archive_for_artifact(archive_path: &std::path::Path) -> Result<std
     let artifacts_dir = std::path::Path::new(&workspace).join("paws-artifacts");
     tokio::fs::create_dir_all(&artifacts_dir).await?;
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let filename = std::env::var("PAWS_ARTIFACT_FILENAME").unwrap_or_else(|_| format!("artifact-engine_state-{}.{}", timestamp, "tar.zst"));
+    let filename = std::env::var("PAWS_ARTIFACT_FILENAME")
+        .unwrap_or_else(|_| format!("artifact-engine_state-{}.{}", timestamp, "tar.zst"));
     let dest = artifacts_dir.join(filename);
     tokio::fs::copy(archive_path, &dest).await?;
-    eprintln!("cache: copied archive to {} for artifact upload", dest.display());
+    eprintln!(
+        "cache: copied archive to {} for artifact upload",
+        dest.display()
+    );
     Ok(dest)
 }
 
