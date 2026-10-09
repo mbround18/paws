@@ -319,6 +319,16 @@ predicted, so this row is now ✅. Linux-only for now — no macOS/Windows Tauri
 builder exists yet, and the Node-sidecar row is a distinct capability (spawning a persistent Node
 process alongside the Tauri shell) this crate doesn't attempt.
 
+As of 2026-10-09 the build is no longer limited to a standalone app directory. The source is
+sent as a `.gitignore`-filtered context rather than a raw mount (a real app with a 100 GB
+`target/` used to upload all of it), an app that is a member of a parent Cargo workspace is built
+from the workspace root (`--source ui` under a root `Cargo.toml` with `members = ["ui/src-tauri",
+…]`), and `paws ci --toolchain tauri|tauri-android|rust` take the same `--apt`, `--setup`,
+`--env`, `--cache`, `--exclude` and `--export CONTAINER=HOST` flags as `paws run`, so the
+deb/rpm/AppImage come back to the host instead of staying in the container. `--toolchain rust`
+also gained `--workspace`, `--cargo-exclude` and `--cargo-arg` for the workspace whose one
+desktop crate needs libraries the rest doesn't.
+
 **Android** gets its own `builders/tauri-android` Dockerfile (JDK 17 + Android SDK/NDK + Rust's
 Android cross targets + Node) and `paws ci --toolchain tauri-android`, which runs `<package
 manager> run tauri android build`. The builder image itself is build-verified — JDK, `sdkmanager`,

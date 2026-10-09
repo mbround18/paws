@@ -28,8 +28,8 @@ provider-specific scripting.
 | Command | What it does |
 | --- | --- |
 | `paws init` | Install the `dagger` CLI, which most other subcommands need on `PATH` |
-| `paws ci` | Build, lint, and test a project in any of 14 toolchains — Rust, Node, Python, Go, Java, Kotlin, Ruby, PHP, .NET, Elixir, Tauri (desktop + Android), Flatpak, or ESP32 firmware |
-| `paws run` | Run your own commands in a container — an image or a toolchain's, optional apt packages, env passthrough, named cache volumes — against the repo filtered by `.gitignore` on the host, so a local run sees what a fresh CI checkout sees |
+| `paws ci` | Build, lint, and test a project in any of 14 toolchains — Rust, Node, Python, Go, Java, Kotlin, Ruby, PHP, .NET, Elixir, Tauri (desktop + Android), Flatpak, or ESP32 firmware. Rust and Tauri builds take `paws run`'s container flags too (`--apt`, `--env`, `--cache`, `--export`), build from the repo filtered by `.gitignore`, and follow a Tauri app to its Cargo workspace root |
+| `paws run` | Run your own commands in a container — an image or a toolchain's, optional apt packages, env passthrough, named cache volumes, `--export` of a result directory back to the host — against the repo filtered by `.gitignore` on the host, so a local run sees what a fresh CI checkout sees |
 | `paws semver` | Compute the next version from PR labels, branch name, or an explicit bump; `--push` tags and pushes it |
 | `paws docker` | Build/tag/publish a container image to docker.io, ghcr.io, and (natively) any other registry |
 | `paws changelog` | Generate a `CHANGELOG.md` entry from commit/PR history between two refs; `--commit` writes it back to the repo |
