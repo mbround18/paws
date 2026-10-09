@@ -1292,22 +1292,115 @@ pub async fn call(invocation: DaggerCall) -> Result<String> {
 }
 
 async fn core_once(args: &[String]) -> Result<String> {
+    // Plain progress, even though nobody watches it: dagger's default
+    // non-TTY summary says only `! exit code: 1` for a failed step, so a
+    // `paws ci --silent` that failed in `vitest` after a 20-minute build
+    // gave no hint which test. The plain log carries each step's output,
+    // and `failed_step_output` picks the failed step's lines back out.
     let output = Command::new("dagger")
         .arg("core")
+        .arg("--progress=plain")
         .args(args)
         .output()
         .await
         .context("failed to spawn `dagger` CLI - is it installed and on PATH?")?;
 
     if !output.status.success() {
-        anyhow::bail!(
-            "dagger core {}: failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
+        match failed_step_output(&stderr) {
+            Some(step_output) => anyhow::bail!(
+                "dagger core {}: failed: {}\n--- output of the failed step ---\n{step_output}",
+                args.join(" "),
+                dagger_error_line(&stderr).unwrap_or("a step failed"),
+            ),
+            None => anyhow::bail!("dagger core {}: failed: {stderr}", args.join(" ")),
+        }
     }
 
     Ok(String::from_utf8(output.stdout)?)
+}
+
+/// How many lines of a failed step's output a `--silent` failure reports.
+/// The full log stays in dagger's own trace; this is what fits a terminal.
+pub const FAILED_STEP_OUTPUT_LINES: usize = 200;
+
+/// What the failed `with-exec` step(s) printed, from a `--progress=plain`
+/// log: each line there is `<id> : <event>`, a step's own output arrives
+/// as `<id> : [<elapsed>] | <text>`, and the failing step is marked
+/// `<id> : Container.withExec ERROR [...]`. `None` when no exec step
+/// failed (an image pull or Dockerfile build did), so the caller reports
+/// the whole log instead. Keeps the last [`FAILED_STEP_OUTPUT_LINES`].
+pub fn failed_step_output(plain_log: &str) -> Option<String> {
+    let event = |line: &str| -> Option<(String, String)> {
+        let (id, rest) = line.split_once(':')?;
+        let id = id.trim();
+        (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| (id.to_string(), rest.trim_start().to_string()))
+    };
+    let failed: std::collections::BTreeSet<String> = plain_log
+        .lines()
+        .filter_map(event)
+        .filter(|(_, rest)| rest.starts_with("Container.withExec ERROR"))
+        .map(|(id, _)| id)
+        .collect();
+    if failed.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<String> = plain_log
+        .lines()
+        .filter_map(event)
+        .filter(|(id, _)| failed.contains(id))
+        .filter_map(|(_, rest)| {
+            rest.strip_prefix('[')
+                .and_then(|r| r.split_once("] | "))
+                .map(|(_, text)| text.to_string())
+                .or_else(|| rest.strip_prefix("! ").map(ToString::to_string))
+        })
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    if lines.len() > FAILED_STEP_OUTPUT_LINES {
+        let dropped = lines.len() - FAILED_STEP_OUTPUT_LINES;
+        lines.drain(..dropped);
+        lines.insert(0, format!("… {dropped} earlier line(s) omitted"));
+    }
+    Some(lines.join("\n"))
+}
+
+/// `text` without ANSI escape sequences (`ESC [ … m` and friends). Dagger
+/// colours its plain log even into a pipe, which would stop the step
+/// markers above from matching and makes an error message hard to read.
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        // CSI: ESC [ <params> <final byte 0x40..=0x7e>; anything else: ESC + one char.
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&next) {
+                    break;
+                }
+            }
+        } else {
+            chars.next();
+        }
+    }
+    out
+}
+
+/// Dagger's own one-line verdict (`Error: exit code: 1 [traceparent:…]`),
+/// without the trace id, when the plain log has one.
+fn dagger_error_line(plain_log: &str) -> Option<&str> {
+    plain_log
+        .lines()
+        .find_map(|line| line.strip_prefix("Error: "))
+        .map(|rest| rest.split(" [traceparent:").next().unwrap_or(rest).trim())
 }
 
 /// Runs a moduleless `dagger core <args...>` pipeline — chained core
@@ -2052,6 +2145,51 @@ mod tests {
                 "unexpected error: {err}"
             );
         }
+    }
+
+    #[test]
+    fn failed_step_output_picks_the_failed_exec_lines_out_of_a_plain_log() {
+        let log = "\
+17  : Container.withWorkdir DONE [0.0s]
+18  : withExec sh -c 'pnpm test'
+18  : Container.withExec ERROR [0.1s]
+19  : Container.stdout ERROR [0.1s]
+19  : ! exit code: 3
+18  : Container.withExec ERROR [0.1s]
+18  : [0.1s] | FAIL src/a.test.ts > renders
+18  : [0.1s] | expected 1 to be 2
+17  : [0.0s] | not from the failed step
+Error: exit code: 3 [traceparent:995ce601c5ede91580cb3f1d1060ef16-13a2553b6e3f2db8]
+";
+        assert_eq!(
+            failed_step_output(log).unwrap(),
+            "FAIL src/a.test.ts > renders\nexpected 1 to be 2"
+        );
+        assert_eq!(dagger_error_line(log), Some("exit code: 3"));
+        assert_eq!(
+            failed_step_output("5 : Container.from ERROR [1s]\nError: pull failed"),
+            None,
+            "a failure outside with-exec reports the whole log"
+        );
+        let many: String = (0..300)
+            .map(|i| format!("1 : [0.1s] | line {i}\n"))
+            .chain(std::iter::once(
+                "1 : Container.withExec ERROR [0.1s]\n".to_string(),
+            ))
+            .collect();
+        let picked = failed_step_output(&many).unwrap();
+        assert!(picked.starts_with("… 100 earlier line(s) omitted\nline 100\n"));
+        assert!(picked.ends_with("line 299"));
+    }
+
+    #[test]
+    fn strip_ansi_removes_colour_codes_so_step_markers_match() {
+        let coloured = "28  : \u{1b}[1mContainer.withExec\u{1b}[0m \u{1b}[31mERROR\u{1b}[0m [0.6s]\n28  : [0.6s] | \u{1b}[32mok\u{1b}[0m\n";
+        assert_eq!(
+            strip_ansi(coloured),
+            "28  : Container.withExec ERROR [0.6s]\n28  : [0.6s] | ok\n"
+        );
+        assert_eq!(failed_step_output(&strip_ansi(coloured)).unwrap(), "ok");
     }
 
     #[tokio::test]
