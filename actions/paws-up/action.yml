@@ -21,6 +21,14 @@ inputs:
       fast dogfooding iteration, not just stable pins).
     required: false
     default: "latest"
+  git-ref:
+    description: >-
+      Build paws from source at this branch, tag or commit of
+      mbround18/paws instead of downloading a release, for trying a change
+      before it is released. Takes precedence over `version`. Needs `cargo`
+      on the runner (GitHub-hosted runners have it) and takes a few minutes.
+    required: false
+    default: ""
   github-token:
     description: "Token used to query/download releases (avoids low anonymous rate limits)."
     required: false
@@ -45,9 +53,32 @@ runs:
       shell: bash
       env:
         INPUT_VERSION: ${{ inputs.version }}
+        INPUT_GIT_REF: ${{ inputs.git-ref }}
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
+
+        install_dir="$HOME/.local/bin"
+        mkdir -p "$install_dir"
+
+        if [ -n "$INPUT_GIT_REF" ]; then
+          # A full 40-character hex string is a commit; anything else is a
+          # branch or tag name, which cargo resolves with --branch/--tag.
+          if printf '%s' "$INPUT_GIT_REF" | grep -Eq '^[0-9a-f]{40}$'; then
+            ref_flag=(--rev "$INPUT_GIT_REF")
+          elif git ls-remote --exit-code --tags https://github.com/mbround18/paws "$INPUT_GIT_REF" >/dev/null 2>&1; then
+            ref_flag=(--tag "$INPUT_GIT_REF")
+          else
+            ref_flag=(--branch "$INPUT_GIT_REF")
+          fi
+          echo "Building paws from source at ${INPUT_GIT_REF}"
+          cargo install --locked --git https://github.com/mbround18/paws \
+            "${ref_flag[@]}" --root "$HOME/.local" paws-cli
+          echo "$install_dir" >> "$GITHUB_PATH"
+          echo "version=${INPUT_GIT_REF}" >> "$GITHUB_OUTPUT"
+          "$install_dir/paws" --version
+          exit 0
+        fi
 
         case "$(uname -s)" in
           Linux) os=linux ;;
@@ -83,9 +114,6 @@ runs:
             ;;
         esac
         echo "Resolved target: $target"
-
-        install_dir="$HOME/.local/bin"
-        mkdir -p "$install_dir"
 
         tmp_dir="$(mktemp -d)"
         trap 'rm -rf "$tmp_dir"' EXIT

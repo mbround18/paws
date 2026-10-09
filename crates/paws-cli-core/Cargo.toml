@@ -43,6 +43,7 @@ paws-semver = { path = "../paws-semver" }
 paws-environment = { path = "../paws-environment" }
 paws-changelog = { path = "../paws-changelog" }
 paws-assign = { path = "../paws-assign" }
+paws-run = { path = "../paws-run" }
 paws-tauri = { path = "../paws-tauri" }
 clap.workspace = true
 anyhow.workspace = true

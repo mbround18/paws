@@ -9,10 +9,10 @@
 //! and invoking that CLI correctly, with both toolchains available in one
 //! container.
 
-use paws_core::Pipeline;
+use paws_core::{Base, ContainerOptions, container::SOURCE_ROOT};
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use paws_node::NodeProject;
 
 /// A Tauri project is a Node project (package.json at the root) with a
@@ -30,10 +30,10 @@ pub fn is_tauri_project(dir: &Path) -> bool {
 /// `paws`'s own repo, building `paws` itself), a repo-relative
 /// `builders/tauri-linux` path would silently resolve against the wrong
 /// directory the moment `paws` is used the way it's meant to be: as a
-/// general-purpose tool run anywhere. Embedding + materializing to a temp
-/// dir (see [`write_builder_dockerfile`]) makes this correct regardless of
-/// where `paws` is invoked from.
-const TAURI_LINUX_DOCKERFILE: &str = include_str!("../../../builders/tauri-linux/Dockerfile");
+/// general-purpose tool run anywhere. Embedding the text and writing it into
+/// the build context (see [`paws_core::Base::Dockerfile`]) makes this
+/// correct regardless of where `paws` is invoked from.
+pub const TAURI_LINUX_DOCKERFILE: &str = include_str!("../../../builders/tauri-linux/Dockerfile");
 
 /// The Tauri Android builder Dockerfile (JDK + Android SDK/NDK + Rust
 /// Android targets + Node), embedded the same way and for the same reason
@@ -42,32 +42,103 @@ const TAURI_LINUX_DOCKERFILE: &str = include_str!("../../../builders/tauri-linux
 /// whole toolchain runs on Linux, unlike Xcode/`xcodebuild` (see
 /// `builders/tauri-android/Dockerfile`'s header comment, and the iOS note
 /// in `docs/ROADMAP.md`).
-const TAURI_ANDROID_DOCKERFILE: &str = include_str!("../../../builders/tauri-android/Dockerfile");
+pub const TAURI_ANDROID_DOCKERFILE: &str =
+    include_str!("../../../builders/tauri-android/Dockerfile");
 
-/// Writes the embedded Tauri Linux builder Dockerfile to a temp directory
-/// and returns that directory's path, suitable for `dagger_pipeline_args`'s
-/// `builder_dir` argument.
-pub fn write_builder_dockerfile() -> Result<PathBuf> {
-    paws_core::write_builder_dockerfile("tauri-linux", TAURI_LINUX_DOCKERFILE)
+/// Where a Tauri app sits relative to what has to be sent to the container.
+///
+/// A standalone app (its `src-tauri` crate is its own Cargo root) sends
+/// itself. An app inside a Cargo workspace — `ui/src-tauri` a member of the
+/// repo-root workspace, depending on sibling crates — has to send the
+/// workspace root instead, or the Rust build finds neither `Cargo.lock` nor
+/// the crates it depends on; the Tauri CLI then runs from the app's
+/// subdirectory, where its `package.json` and `tauri.conf.json` live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Layout {
+    /// Host directory sent to the container, mounted at
+    /// [`paws_core::container::SOURCE_ROOT`].
+    pub context_dir: PathBuf,
+    /// The app directory, relative to `context_dir` (empty when they are
+    /// the same directory).
+    pub app_subdir: PathBuf,
 }
 
-/// Writes the embedded Tauri Android builder Dockerfile to a temp directory
-/// and returns that directory's path, suitable for
-/// `android_dagger_pipeline_args`'s `builder_dir` argument.
-pub fn write_android_builder_dockerfile() -> Result<PathBuf> {
-    paws_core::write_builder_dockerfile("tauri-android", TAURI_ANDROID_DOCKERFILE)
+impl Layout {
+    /// `/src` or `/src/<app_subdir>`: where the package manager runs.
+    pub fn workdir(&self) -> String {
+        if self.app_subdir.as_os_str().is_empty() {
+            SOURCE_ROOT.to_string()
+        } else {
+            format!("{SOURCE_ROOT}/{}", self.app_subdir.to_string_lossy())
+        }
+    }
+}
+
+/// Finds the directory to send for the Tauri app at `app_dir` (which must
+/// be absolute and canonical): the nearest ancestor of its `src-tauri`
+/// crate whose `Cargo.toml` declares a `[workspace]`, the way `cargo` itself
+/// locates the workspace root — or `app_dir` when that crate is its own
+/// root, or no workspace manifest exists above it.
+pub fn layout(app_dir: &Path) -> Result<Layout> {
+    let crate_dir = app_dir.join("src-tauri");
+    let root = workspace_root(&crate_dir)?.filter(|root| root != &crate_dir);
+    match root {
+        Some(root) if root != app_dir => {
+            let app_subdir = app_dir
+                .strip_prefix(&root)
+                .with_context(|| {
+                    format!(
+                        "{} is the Cargo workspace root but not an ancestor of {}",
+                        root.display(),
+                        app_dir.display()
+                    )
+                })?
+                .to_path_buf();
+            Ok(Layout {
+                context_dir: root,
+                app_subdir,
+            })
+        }
+        _ => Ok(Layout {
+            context_dir: app_dir.to_path_buf(),
+            app_subdir: PathBuf::new(),
+        }),
+    }
+}
+
+/// The nearest directory at or above `dir` whose `Cargo.toml` has a
+/// `[workspace]` table.
+fn workspace_root(dir: &Path) -> Result<Option<PathBuf>> {
+    for candidate in dir.ancestors() {
+        let manifest = candidate.join("Cargo.toml");
+        if !manifest.is_file() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&manifest)
+            .with_context(|| format!("failed to read {}", manifest.display()))?;
+        let parsed: toml::Table = toml::from_str(&text)
+            .with_context(|| format!("failed to parse {}", manifest.display()))?;
+        if parsed.contains_key("workspace") {
+            return Ok(Some(candidate.to_path_buf()));
+        }
+    }
+    Ok(None)
 }
 
 fn pipeline_args(
     project: &NodeProject,
-    source_dir: &str,
-    builder_dir: &str,
+    layout: &Layout,
+    container: &ContainerOptions,
+    dockerfile: &str,
     tauri_subcommand: &[&str],
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     let pm = project.package_manager;
-    let mut pipeline = Pipeline::from_builder_image(builder_dir)
-        .mount("/src", source_dir)
-        .workdir("/src");
+    let mut pipeline = container
+        .open(
+            &layout.context_dir.to_string_lossy(),
+            &Base::Dockerfile(dockerfile),
+        )?
+        .workdir(&layout.workdir());
 
     if let Some(setup) = pm.setup_args() {
         pipeline = pipeline.exec(setup);
@@ -79,45 +150,60 @@ fn pipeline_args(
     let mut tauri_build = pm.run_script_args("tauri");
     tauri_build.extend(tauri_subcommand.iter().map(ToString::to_string));
 
-    pipeline
-        .exec(tauri_build)
-        .exec_if(project.has_test_script, pm.run_script_args("test"))
+    // Cheap checks first: a failing unit test or lint should cost a minute,
+    // not the 20-minute Rust release build it used to follow.
+    let pipeline = pipeline
         .exec_if(project.has_lint_script, pm.run_script_args("lint"))
-        .stdout()
+        .exec_if(project.has_test_script, pm.run_script_args("test"))
+        .exec(tauri_build);
+    Ok(container.finish(pipeline))
 }
 
 /// Builds the `dagger core <chain>` argument list (see `paws_dagger::core`)
-/// that builds the Tauri Linux builder from `builder_dir` (see
-/// [`write_builder_dockerfile`] — Dagger's own `BuildKit` layer caching means
-/// the slow system-dependency install only actually runs once per unchanged
-/// Dockerfile, not on every `paws ci` invocation), then installs
-/// dependencies and runs `<package manager> run tauri build` for `project`
-/// — which itself runs the frontend build (via `tauri.conf.json`'s
+/// that builds the Tauri Linux builder ([`TAURI_LINUX_DOCKERFILE`], plus
+/// `container`'s packages and setup — Dagger's own `BuildKit` layer caching
+/// means the slow system-dependency install only actually runs once per
+/// unchanged Dockerfile, not on every `paws ci` invocation) over the
+/// filtered `layout.context_dir`, then installs dependencies and runs
+/// `<package manager> run tauri build` for `project` from the app's own
+/// directory — which itself runs the frontend build (via `tauri.conf.json`'s
 /// `beforeBuildCommand`) before compiling the Rust shell, so this crate
-/// never has to sequence that itself. Runs `test`/`lint` afterward only if
+/// never has to sequence that itself. Runs `lint`/`test` first, only if
 /// the project actually defines them — unlike `paws-node`'s plain pipeline,
 /// `build`+`test` aren't required here (a fresh Tauri scaffold has neither;
-/// `tauri build` is the meaningful step).
+/// `tauri build` is the meaningful step). With `container.export`, the chain
+/// ends by copying that directory (the bundles, say) back to the host.
 pub fn dagger_pipeline_args(
     project: &NodeProject,
-    source_dir: &str,
-    builder_dir: &str,
-) -> Vec<String> {
-    pipeline_args(project, source_dir, builder_dir, &["build"])
+    layout: &Layout,
+    container: &ContainerOptions,
+) -> Result<Vec<String>> {
+    pipeline_args(
+        project,
+        layout,
+        container,
+        TAURI_LINUX_DOCKERFILE,
+        &["build"],
+    )
 }
 
 /// Same as [`dagger_pipeline_args`], but builds against the Tauri Android
-/// builder (see [`write_android_builder_dockerfile`]) and runs
-/// `<package manager> run tauri android build` instead. Assumes the target
-/// repo has already run `tauri android init` (`src-tauri/gen/android`
-/// committed) — `paws` builds what's there, it doesn't scaffold mobile
-/// projects itself.
+/// builder ([`TAURI_ANDROID_DOCKERFILE`]) and runs `<package manager> run
+/// tauri android build` instead. Assumes the target repo has already run
+/// `tauri android init` (`src-tauri/gen/android` committed) — `paws` builds
+/// what's there, it doesn't scaffold mobile projects itself.
 pub fn android_dagger_pipeline_args(
     project: &NodeProject,
-    source_dir: &str,
-    builder_dir: &str,
-) -> Vec<String> {
-    pipeline_args(project, source_dir, builder_dir, &["android", "build"])
+    layout: &Layout,
+    container: &ContainerOptions,
+) -> Result<Vec<String>> {
+    pipeline_args(
+        project,
+        layout,
+        container,
+        TAURI_ANDROID_DOCKERFILE,
+        &["android", "build"],
+    )
 }
 
 #[cfg(test)]
@@ -134,6 +220,13 @@ mod tests {
         dir
     }
 
+    fn standalone() -> Layout {
+        Layout {
+            context_dir: PathBuf::from("/host/src"),
+            app_subdir: PathBuf::new(),
+        }
+    }
+
     #[test]
     fn detects_tauri_project_from_config_file() {
         let dir = temp_dir("detect");
@@ -144,6 +237,59 @@ mod tests {
         fs::write(dir.join("src-tauri").join("tauri.conf.json"), "{}").unwrap();
         assert!(is_tauri_project(&dir));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_standalone_app_is_its_own_context() {
+        let dir = temp_dir("layout-standalone");
+        fs::write(
+            dir.join("src-tauri/Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[workspace]\n",
+        )
+        .unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let layout = layout(&dir).unwrap();
+        assert_eq!(layout.context_dir, dir);
+        assert_eq!(layout.app_subdir, PathBuf::new());
+        assert_eq!(layout.workdir(), "/src");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_app_without_any_workspace_manifest_is_also_its_own_context() {
+        let dir = temp_dir("layout-no-workspace");
+        fs::write(
+            dir.join("src-tauri/Cargo.toml"),
+            "[package]\nname = \"app\"\n",
+        )
+        .unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let layout = layout(&dir).unwrap();
+        assert_eq!(layout.context_dir, dir);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_workspace_member_sends_the_workspace_root_and_runs_from_the_app_dir() {
+        let root = paws_core::test_support::scratch_dir("tauri", "layout-workspace");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\".\", \"ui/src-tauri\"]\n\n[package]\nname = \"repo\"\n",
+        )
+        .unwrap();
+        let app = root.join("ui");
+        fs::create_dir_all(app.join("src-tauri")).unwrap();
+        fs::write(
+            app.join("src-tauri/Cargo.toml"),
+            "[package]\nname = \"app\"\n",
+        )
+        .unwrap();
+        let root = root.canonicalize().unwrap();
+        let layout = layout(&root.join("ui")).unwrap();
+        assert_eq!(layout.context_dir, root);
+        assert_eq!(layout.app_subdir, PathBuf::from("ui"));
+        assert_eq!(layout.workdir(), "/src/ui");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     fn project() -> NodeProject {
@@ -168,24 +314,30 @@ mod tests {
     }
 
     #[test]
-    fn write_builder_dockerfile_materializes_the_embedded_dockerfile() {
-        let dir = write_builder_dockerfile().unwrap();
-        let contents = fs::read_to_string(dir.join("Dockerfile")).unwrap();
-        assert_eq!(contents, TAURI_LINUX_DOCKERFILE);
-    }
-
-    #[test]
-    fn pipeline_builds_against_the_given_builder_dir() {
-        let args = dagger_pipeline_args(&project(), "/host/src", "/tmp/some-builder-dir");
-        assert_eq!(args[0], "host");
-        assert_eq!(args[2], "--path=/tmp/some-builder-dir");
-        assert_eq!(args[3], "docker-build");
-        assert!(args[4].starts_with("--build-args=BUILDER_VERSION="));
+    fn pipeline_builds_the_embedded_builder_over_the_filtered_context() {
+        let args =
+            dagger_pipeline_args(&project(), &standalone(), &ContainerOptions::default()).unwrap();
+        assert_eq!(
+            &args[..4],
+            &["host", "directory", "--path=/host/src", "--gitignore"]
+        );
+        let dockerfile = args
+            .iter()
+            .find(|a| a.starts_with("--contents=") && a.contains("FROM "))
+            .unwrap();
+        assert!(dockerfile.contains("libwebkit2gtk-4.1-dev"));
+        assert!(dockerfile.ends_with("WORKDIR /src\nCOPY . /src"));
+        assert!(args.contains(&"docker-build".to_string()));
+        assert!(
+            args.iter()
+                .any(|a| a.starts_with("--build-args=BUILDER_VERSION="))
+        );
     }
 
     #[test]
     fn pipeline_runs_tauri_build_via_the_detected_package_manager() {
-        let args = dagger_pipeline_args(&project(), "/host/src", "/tmp/some-builder-dir");
+        let args =
+            dagger_pipeline_args(&project(), &standalone(), &ContainerOptions::default()).unwrap();
         assert!(args.contains(&"--args=npm,ci".to_string()));
         assert!(args.contains(&"--args=npm,run,tauri,build".to_string()));
         // no test/lint scripts on this fixture project -> neither should run
@@ -199,9 +351,37 @@ mod tests {
         let mut with_both = project();
         with_both.has_test_script = true;
         with_both.has_lint_script = true;
-        let args = dagger_pipeline_args(&with_both, "/host/src", "/tmp/some-builder-dir");
+        let args =
+            dagger_pipeline_args(&with_both, &standalone(), &ContainerOptions::default()).unwrap();
         assert!(args.contains(&"--args=npm,run,test".to_string()));
         assert!(args.contains(&"--args=npm,run,lint".to_string()));
+    }
+
+    #[test]
+    fn a_workspace_layout_runs_from_the_app_subdir_and_can_export_the_bundles() {
+        let layout = Layout {
+            context_dir: PathBuf::from("/host/repo"),
+            app_subdir: PathBuf::from("ui"),
+        };
+        let container = ContainerOptions {
+            export: Some(paws_core::Export {
+                path: "/src/target/release/bundle".into(),
+                destination: "/host/repo/dist".into(),
+            }),
+            ..Default::default()
+        };
+        let args = dagger_pipeline_args(&project(), &layout, &container).unwrap();
+        assert_eq!(args[2], "--path=/host/repo");
+        let position = |needle: &str| args.iter().position(|a| a == needle).unwrap();
+        assert!(position("--path=/src/ui") < position("--args=npm,ci"));
+        assert!(position("--args=npm,run,tauri,build") < position("export"));
+        if let Some(lint) = args.iter().position(|a| a == "--args=npm,run,lint") {
+            assert!(
+                lint < position("--args=npm,run,tauri,build"),
+                "lint runs before the slow build"
+            );
+        }
+        assert_eq!(args.last().unwrap(), "--path=/host/repo/dist");
     }
 
     #[test]
@@ -214,17 +394,15 @@ mod tests {
     }
 
     #[test]
-    fn write_android_builder_dockerfile_materializes_the_embedded_dockerfile() {
-        let dir = write_android_builder_dockerfile().unwrap();
-        let contents = fs::read_to_string(dir.join("Dockerfile")).unwrap();
-        assert_eq!(contents, TAURI_ANDROID_DOCKERFILE);
-    }
-
-    #[test]
     fn android_pipeline_runs_tauri_android_build() {
         let args =
-            android_dagger_pipeline_args(&project(), "/host/src", "/tmp/some-android-builder-dir");
-        assert_eq!(args[2], "--path=/tmp/some-android-builder-dir");
+            android_dagger_pipeline_args(&project(), &standalone(), &ContainerOptions::default())
+                .unwrap();
+        let dockerfile = args
+            .iter()
+            .find(|a| a.starts_with("--contents=") && a.contains("FROM "))
+            .unwrap();
+        assert!(dockerfile.contains("ANDROID_NDK_VERSION"));
         assert!(args.contains(&"--args=npm,run,tauri,android,build".to_string()));
         assert!(!args.iter().any(|a| a == "--args=npm,run,tauri,build"));
     }

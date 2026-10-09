@@ -32,6 +32,7 @@ members = [
     "crates/paws-mcp",
     "crates/paws-changelog",
     "crates/paws-assign",
+    "crates/paws-run",
 ]
 
 [workspace.package]

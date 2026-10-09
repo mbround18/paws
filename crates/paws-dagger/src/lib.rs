@@ -725,16 +725,15 @@ impl CacheTransport {
                     return Ok(false);
                 };
                 c.download(&location, dest).await?;
-                Ok(true)
             }
             Self::V2(c) => {
                 let Some(url) = c.find_entry(&key.save, &[&key.prefix], &version).await? else {
                     return Ok(false);
                 };
                 c.download(&url, dest).await?;
-                Ok(true)
             }
         }
+        Ok(true)
     }
 
     /// Claims `key` before anything expensive happens. Archiving the engine
@@ -957,7 +956,11 @@ async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
         "sh",
         "-c",
         // Install zstd and stream the tar through it to produce /backup.tar.zst.
-        "sh -c \"apk add --no-cache zstd >/dev/null && tar -C /data -cf - . | zstd -3 -o /backup.tar.zst\"",
+        // `-f`: the archive file is pre-created above, and zstd 1.5.7+ refuses
+        // to overwrite an existing output when its input is stdin ("already
+        // exists; stdin is an input - not proceeding"), which broke every
+        // save once alpine:3.20 shipped that version.
+        "sh -c \"apk add --no-cache zstd >/dev/null && tar -C /data -cf - . | zstd -3 -f -o /backup.tar.zst\"",
     ])
     .await;
     // Restart the engine regardless of whether the tar succeeded — leaving
@@ -987,12 +990,18 @@ async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
                 .and_then(|s| s.trim().parse::<u64>().ok())
         })
         .unwrap_or(default_threshold);
-    eprintln!("cache: using upload threshold {threshold} bytes (PAWS_CACHE_MAX_BYTES_GITHUB / PAWS_CACHE_MAX_BYTES)");
+    eprintln!(
+        "cache: using upload threshold {threshold} bytes (PAWS_CACHE_MAX_BYTES_GITHUB / PAWS_CACHE_MAX_BYTES)"
+    );
 
     if size > threshold {
-        eprintln!("cache: save skipped — archive {size} bytes exceeds PAWS_CACHE_MAX_BYTES={threshold} bytes");
+        eprintln!(
+            "cache: save skipped — archive {size} bytes exceeds PAWS_CACHE_MAX_BYTES={threshold} bytes"
+        );
         // Optionally copy the large archive to the workspace for inspection if requested
-        if std::env::var("PAWS_UPLOAD_ARTIFACT").is_ok_and(|v| v == "1" || v.to_lowercase() == "true") {
+        if std::env::var("PAWS_UPLOAD_ARTIFACT")
+            .is_ok_and(|v| v == "1" || v.to_lowercase() == "true")
+        {
             copy_archive_for_artifact(&archive_path).await.ok();
         }
         let _ = tokio::fs::remove_file(&archive_path).await;
@@ -1010,7 +1019,11 @@ async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
     let _ = tokio::fs::remove_file(&archive_path).await;
 
     client.upload(&key, &reserved, &data).await?;
-    eprintln!("cache: saved github-actions cache entry {save} ({len} bytes)", save = key.save, len = data.len());
+    eprintln!(
+        "cache: saved github-actions cache entry {save} ({len} bytes)",
+        save = key.save,
+        len = data.len()
+    );
     Ok(())
 }
 
@@ -1021,11 +1034,60 @@ async fn copy_archive_for_artifact(archive_path: &std::path::Path) -> Result<std
     let artifacts_dir = std::path::Path::new(&workspace).join("paws-artifacts");
     tokio::fs::create_dir_all(&artifacts_dir).await?;
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let filename = std::env::var("PAWS_ARTIFACT_FILENAME").unwrap_or_else(|_| format!("artifact-engine_state-{}.{}", timestamp, "tar.zst"));
+    let filename = std::env::var("PAWS_ARTIFACT_FILENAME")
+        .unwrap_or_else(|_| format!("artifact-engine_state-{}.{}", timestamp, "tar.zst"));
     let dest = artifacts_dir.join(filename);
     tokio::fs::copy(archive_path, &dest).await?;
-    eprintln!("cache: copied archive to {} for artifact upload", dest.display());
+    eprintln!(
+        "cache: copied archive to {} for artifact upload",
+        dest.display()
+    );
     Ok(dest)
+}
+
+/// Dagger's default garbage-collection policy keeps this share of the
+/// engine's disk free. Below it, the engine prunes everything it can after
+/// every session — cache volumes (`--cache`, the cargo registry, a
+/// `target/` directory) included — so a "warm" cache never survives to the
+/// next run. Confirmed for real against a v0.21.8 engine on an 85%-full
+/// disk: `dagql pruned result … Query.cacheVolume(key: "…-target")` right
+/// after each `paws ci`, and a 641-crate rebuild on the next one.
+pub const ENGINE_GC_MIN_FREE_PERCENT: u64 = 20;
+
+/// One line of warning when the engine's disk is below
+/// [`ENGINE_GC_MIN_FREE_PERCENT`] free, `None` when it is fine or cannot be
+/// measured (no docker, no engine container yet, a remote runner). Never
+/// fails a run: a slow build is the symptom, not a reason to stop.
+pub async fn engine_disk_pressure_warning() -> Option<String> {
+    let container = find_engine_container().await.ok().flatten()?;
+    let df = docker_output(&["exec", &container, "df", "-Pk", ENGINE_STATE_PATH])
+        .await
+        .ok()?;
+    disk_pressure_warning_from_df(&df)
+}
+
+/// The warning for a `df -Pk <path>` output, or `None` when free space is
+/// at or above the GC floor.
+pub fn disk_pressure_warning_from_df(df: &str) -> Option<String> {
+    let fields: Vec<&str> = df.lines().nth(1)?.split_whitespace().collect();
+    let total_kb: u64 = fields.get(1)?.parse().ok()?;
+    let free_kb: u64 = fields.get(3)?.parse().ok()?;
+    if total_kb == 0 {
+        return None;
+    }
+    let free_percent = free_kb * 100 / total_kb;
+    if free_percent >= ENGINE_GC_MIN_FREE_PERCENT {
+        return None;
+    }
+    Some(format!(
+        "cache: the Dagger engine's disk has {free_percent}% free ({} of {}); Dagger's default GC keeps {ENGINE_GC_MIN_FREE_PERCENT}% free and prunes cache volumes after every run, so --cache volumes will not persist between runs. Free disk, or lower the engine's gc minFreeSpace (~/.config/dagger/engine.json, see https://docs.dagger.io/configuration/engine) and restart the engine",
+        gib(free_kb),
+        gib(total_kb)
+    ))
+}
+
+fn gib(kb: u64) -> String {
+    format!("{} GiB", kb / (1024 * 1024))
 }
 
 /// Detects the active `CacheBackend` and, if it's `GitHubActionsCache`,
@@ -1049,6 +1111,9 @@ async fn copy_archive_for_artifact(archive_path: &std::path::Path) -> Result<std
 pub async fn restore_cache_backend() -> CacheBackend {
     let backend = CacheBackend::detect();
     eprintln!("{}", backend.log_line());
+    if let Some(warning) = engine_disk_pressure_warning().await {
+        eprintln!("{warning}");
+    }
     if let CacheBackend::GitHubActionsCache {
         base_url,
         token,
@@ -1279,22 +1344,115 @@ pub async fn call(invocation: DaggerCall) -> Result<String> {
 }
 
 async fn core_once(args: &[String]) -> Result<String> {
+    // Plain progress, even though nobody watches it: dagger's default
+    // non-TTY summary says only `! exit code: 1` for a failed step, so a
+    // `paws ci --silent` that failed in `vitest` after a 20-minute build
+    // gave no hint which test. The plain log carries each step's output,
+    // and `failed_step_output` picks the failed step's lines back out.
     let output = Command::new("dagger")
         .arg("core")
+        .arg("--progress=plain")
         .args(args)
         .output()
         .await
         .context("failed to spawn `dagger` CLI - is it installed and on PATH?")?;
 
     if !output.status.success() {
-        anyhow::bail!(
-            "dagger core {}: failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
+        match failed_step_output(&stderr) {
+            Some(step_output) => anyhow::bail!(
+                "dagger core {}: failed: {}\n--- output of the failed step ---\n{step_output}",
+                args.join(" "),
+                dagger_error_line(&stderr).unwrap_or("a step failed"),
+            ),
+            None => anyhow::bail!("dagger core {}: failed: {stderr}", args.join(" ")),
+        }
     }
 
     Ok(String::from_utf8(output.stdout)?)
+}
+
+/// How many lines of a failed step's output a `--silent` failure reports.
+/// The full log stays in dagger's own trace; this is what fits a terminal.
+pub const FAILED_STEP_OUTPUT_LINES: usize = 200;
+
+/// What the failed `with-exec` step(s) printed, from a `--progress=plain`
+/// log: each line there is `<id> : <event>`, a step's own output arrives
+/// as `<id> : [<elapsed>] | <text>`, and the failing step is marked
+/// `<id> : Container.withExec ERROR [...]`. `None` when no exec step
+/// failed (an image pull or Dockerfile build did), so the caller reports
+/// the whole log instead. Keeps the last [`FAILED_STEP_OUTPUT_LINES`].
+pub fn failed_step_output(plain_log: &str) -> Option<String> {
+    let event = |line: &str| -> Option<(String, String)> {
+        let (id, rest) = line.split_once(':')?;
+        let id = id.trim();
+        (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| (id.to_string(), rest.trim_start().to_string()))
+    };
+    let failed: std::collections::BTreeSet<String> = plain_log
+        .lines()
+        .filter_map(event)
+        .filter(|(_, rest)| rest.starts_with("Container.withExec ERROR"))
+        .map(|(id, _)| id)
+        .collect();
+    if failed.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<String> = plain_log
+        .lines()
+        .filter_map(event)
+        .filter(|(id, _)| failed.contains(id))
+        .filter_map(|(_, rest)| {
+            rest.strip_prefix('[')
+                .and_then(|r| r.split_once("] | "))
+                .map(|(_, text)| text.to_string())
+                .or_else(|| rest.strip_prefix("! ").map(ToString::to_string))
+        })
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    if lines.len() > FAILED_STEP_OUTPUT_LINES {
+        let dropped = lines.len() - FAILED_STEP_OUTPUT_LINES;
+        lines.drain(..dropped);
+        lines.insert(0, format!("… {dropped} earlier line(s) omitted"));
+    }
+    Some(lines.join("\n"))
+}
+
+/// `text` without ANSI escape sequences (`ESC [ … m` and friends). Dagger
+/// colours its plain log even into a pipe, which would stop the step
+/// markers above from matching and makes an error message hard to read.
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        // CSI: ESC [ <params> <final byte 0x40..=0x7e>; anything else: ESC + one char.
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&next) {
+                    break;
+                }
+            }
+        } else {
+            chars.next();
+        }
+    }
+    out
+}
+
+/// Dagger's own one-line verdict (`Error: exit code: 1 [traceparent:…]`),
+/// without the trace id, when the plain log has one.
+fn dagger_error_line(plain_log: &str) -> Option<&str> {
+    plain_log
+        .lines()
+        .find_map(|line| line.strip_prefix("Error: "))
+        .map(|rest| rest.split(" [traceparent:").next().unwrap_or(rest).trim())
 }
 
 /// Runs a moduleless `dagger core <args...>` pipeline — chained core
@@ -2039,6 +2197,67 @@ mod tests {
                 "unexpected error: {err}"
             );
         }
+    }
+
+    #[test]
+    fn failed_step_output_picks_the_failed_exec_lines_out_of_a_plain_log() {
+        let log = "\
+17  : Container.withWorkdir DONE [0.0s]
+18  : withExec sh -c 'pnpm test'
+18  : Container.withExec ERROR [0.1s]
+19  : Container.stdout ERROR [0.1s]
+19  : ! exit code: 3
+18  : Container.withExec ERROR [0.1s]
+18  : [0.1s] | FAIL src/a.test.ts > renders
+18  : [0.1s] | expected 1 to be 2
+17  : [0.0s] | not from the failed step
+Error: exit code: 3 [traceparent:995ce601c5ede91580cb3f1d1060ef16-13a2553b6e3f2db8]
+";
+        assert_eq!(
+            failed_step_output(log).unwrap(),
+            "FAIL src/a.test.ts > renders\nexpected 1 to be 2"
+        );
+        assert_eq!(dagger_error_line(log), Some("exit code: 3"));
+        assert_eq!(
+            failed_step_output("5 : Container.from ERROR [1s]\nError: pull failed"),
+            None,
+            "a failure outside with-exec reports the whole log"
+        );
+        let many: String = (0..300)
+            .map(|i| format!("1 : [0.1s] | line {i}\n"))
+            .chain(std::iter::once(
+                "1 : Container.withExec ERROR [0.1s]\n".to_string(),
+            ))
+            .collect();
+        let picked = failed_step_output(&many).unwrap();
+        assert!(picked.starts_with("… 100 earlier line(s) omitted\nline 100\n"));
+        assert!(picked.ends_with("line 299"));
+    }
+
+    #[test]
+    fn disk_pressure_warning_fires_only_below_the_gc_floor() {
+        let full = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/mapper/data-root 3835242120 3068454864 571892820 85% /\n";
+        let warning = disk_pressure_warning_from_df(full).unwrap();
+        assert!(
+            warning
+                .starts_with("cache: the Dagger engine's disk has 14% free (545 GiB of 3657 GiB)")
+        );
+        assert!(warning.contains("minFreeSpace"));
+
+        let roomy = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 1000000 500000 500000 50% /\n";
+        assert_eq!(disk_pressure_warning_from_df(roomy), None);
+        assert_eq!(disk_pressure_warning_from_df("garbage"), None);
+        assert_eq!(disk_pressure_warning_from_df(""), None);
+    }
+
+    #[test]
+    fn strip_ansi_removes_colour_codes_so_step_markers_match() {
+        let coloured = "28  : \u{1b}[1mContainer.withExec\u{1b}[0m \u{1b}[31mERROR\u{1b}[0m [0.6s]\n28  : [0.6s] | \u{1b}[32mok\u{1b}[0m\n";
+        assert_eq!(
+            strip_ansi(coloured),
+            "28  : Container.withExec ERROR [0.6s]\n28  : [0.6s] | ok\n"
+        );
+        assert_eq!(failed_step_output(&strip_ansi(coloured)).unwrap(), "ok");
     }
 
     #[tokio::test]

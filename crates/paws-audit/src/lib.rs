@@ -1192,7 +1192,7 @@ mod tests {
 
         assert_eq!(summary.overall_status, AuditOverallStatus::Pass);
         assert_eq!(summary.total_findings, 0);
-        assert!(summary.top_findings.is_empty());
+        assert_eq!(summary.top_findings.len(), 0);
         assert!(!summary.fallback_mode);
         assert_eq!(summary.detection_confidence, DetectionConfidence::High);
     }
@@ -1315,7 +1315,7 @@ mod tests {
         let raw = r#"{"vulnerabilities":{"found":false,"count":0,"list":[]}}"#;
         let (findings_count, top_findings) = parse_scanner_findings(ScannerName::CargoAudit, raw);
         assert_eq!(findings_count, 0);
-        assert!(top_findings.is_empty());
+        assert_eq!(top_findings.len(), 0);
 
         let scanner_result = AuditScannerResult {
             name: "cargo-audit".to_string(),

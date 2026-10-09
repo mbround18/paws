@@ -1441,13 +1441,13 @@ mod tests {
             {"id": 8, "tag_name": "v1.0.1"},
         ]);
         assert_eq!(releases_matching_tag(&body, "v1.0.0"), vec![7]);
-        assert!(releases_matching_tag(&body, "v9.9.9").is_empty());
+        assert_eq!(releases_matching_tag(&body, "v9.9.9").len(), 0);
     }
 
     #[test]
     fn a_non_array_release_listing_yields_nothing_rather_than_panicking() {
         let body = serde_json::json!({"message": "Not Found"});
-        assert!(releases_matching_tag(&body, "v1.0.0").is_empty());
+        assert_eq!(releases_matching_tag(&body, "v1.0.0").len(), 0);
     }
 
     /// The failure this makes loud: the upload succeeded, but against a

@@ -3,6 +3,7 @@
 
 pub mod builders;
 pub mod config;
+pub mod container;
 pub mod fsutil;
 pub mod pipeline;
 #[cfg(any(test, feature = "testing"))]
@@ -12,8 +13,9 @@ pub mod version;
 
 pub use builders::write_builder_dockerfile;
 pub use config::PawsConfig;
+pub use container::{Base, CacheMount, ContainerOptions, Export};
 pub use fsutil::{find_files, find_files_with_extension};
-pub use pipeline::{Pipeline, builder_build_args};
+pub use pipeline::{GENERATED_DOCKERFILE, Pipeline, builder_build_args, csv_join};
 pub use toolchain::{TOOLCHAINS, Toolchain, ToolchainInfo};
 pub use version::{ResolvedVersion, VersionOrigin, VersionSource};
 

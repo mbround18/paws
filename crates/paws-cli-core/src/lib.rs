@@ -27,6 +27,11 @@ async fn run_dagger_core(args: &[String], silent: bool) -> anyhow::Result<()> {
     if silent {
         let output = paws_dagger::core(args).await?;
         print!("{output}");
+        // `export` answers with the destination path and no newline, so the
+        // "succeeded" line that follows would otherwise share its line.
+        if !output.is_empty() && !output.ends_with('\n') {
+            println!();
+        }
     } else {
         paws_dagger::core_streaming(args).await?;
     }
@@ -163,6 +168,7 @@ fn collect_repository_signals() -> RepositorySignals {
 pub async fn execute(command: Commands) -> anyhow::Result<()> {
     match command {
         Commands::Ci(args) => run_ci(args).await,
+        Commands::Run(args) => run_run(args).await,
         Commands::Docker(args) => run_docker(args).await,
         Commands::Semver(args) => run_semver(args).await,
         Commands::Init(args) => run_init(args).await,
@@ -201,6 +207,112 @@ pub async fn run_ci(args: CiArgs) -> anyhow::Result<()> {
     result
 }
 
+/// Runs `paws run`, with the same single restore-before/save-after cache
+/// cycle as [`run_ci`].
+pub async fn run_run(args: RunArgs) -> anyhow::Result<()> {
+    let backend = paws_dagger::restore_cache_backend().await;
+    let result = run_run_pipeline(args).await;
+    paws_dagger::save_cache_backend(&backend).await;
+    result
+}
+
+async fn run_run_pipeline(args: RunArgs) -> anyhow::Result<()> {
+    let RunArgs {
+        source,
+        workdir,
+        toolchain,
+        toolchain_version,
+        image,
+        apt,
+        setup,
+        env,
+        cache,
+        exclude,
+        step,
+        export,
+        silent,
+        command,
+    } = args;
+
+    let source_dir = resolve_source_dir(source.as_deref())?;
+    if let Some(workdir) = workdir.as_deref() {
+        let host_workdir = source_dir.join(workdir);
+        if !host_workdir.is_dir() {
+            anyhow::bail!(
+                "--workdir {workdir} is not a directory in {}",
+                source_dir.display()
+            );
+        }
+    }
+    let container_workdir = paws_run::container_workdir(workdir.as_deref())?;
+
+    let image = match (image, toolchain) {
+        (Some(image), _) => image,
+        (None, Some(toolchain)) => {
+            let (config, _) = paws_core::PawsConfig::discover(&source_dir)?;
+            let version = toolchain.resolve_version(
+                &source_dir,
+                toolchain_version.as_deref(),
+                config.toolchain_version(toolchain.as_str()),
+            );
+            println!("run: {toolchain} {}", version.describe());
+            toolchain.image_for(&version.version).with_context(|| {
+                format!(
+                    "--toolchain {toolchain} builds from a paws builder image, not a pulled one; \
+                     pass --image instead"
+                )
+            })?
+        }
+        (None, None) => anyhow::bail!("paws run needs --image or --toolchain"),
+    };
+
+    let options = resolve_container_options(
+        &source_dir,
+        &container_workdir,
+        ContainerFlags {
+            apt,
+            setup,
+            env,
+            cache,
+            exclude,
+            export,
+        },
+    )?;
+
+    let mut commands: Vec<Vec<String>> = step.iter().map(|s| paws_run::shell_step(s)).collect();
+    if !command.is_empty() {
+        commands.push(command);
+    }
+
+    let spec = paws_run::RunSpec {
+        context_dir: source_dir.to_string_lossy().into_owned(),
+        workdir: container_workdir,
+        image,
+        apt_packages: options.apt_packages,
+        setup: options.setup,
+        env: options.env,
+        caches: options.caches,
+        excludes: options.excludes,
+        commands,
+        export: options.export,
+    };
+    let args = paws_run::dagger_pipeline_args(&spec)?;
+    if let Some(export) = &spec.export {
+        println!("run: exporting {} to {}", export.path, export.destination);
+    }
+    println!(
+        "run: {} step(s) in {} ({} from {})",
+        spec.commands.len(),
+        spec.image,
+        spec.workdir,
+        source_dir.display()
+    );
+    paws_dagger::ensure_available().await?;
+    run_dagger_core(&args, silent).await?;
+    println!("run: succeeded");
+    Ok(())
+}
+
 /// Resolve `--source` against the current directory, failing with a clear
 /// message rather than an opaque "not found" from whatever runs next.
 fn resolve_source_dir(source: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
@@ -222,6 +334,106 @@ fn resolve_source_dir(source: Option<&str>) -> anyhow::Result<std::path::PathBuf
     Ok(resolved.canonicalize()?)
 }
 
+/// The container-shaping flags `paws run` and `paws ci` share, as given.
+#[derive(Debug, Default)]
+struct ContainerFlags {
+    apt: Vec<String>,
+    setup: Vec<String>,
+    env: Vec<String>,
+    cache: Vec<String>,
+    exclude: Vec<String>,
+    export: Option<String>,
+}
+
+impl ContainerFlags {
+    const fn is_empty(&self) -> bool {
+        self.apt.is_empty()
+            && self.setup.is_empty()
+            && self.env.is_empty()
+            && self.cache.is_empty()
+            && self.exclude.is_empty()
+            && self.export.is_none()
+    }
+}
+
+/// Resolves [`ContainerFlags`] against the host: `--env NAME` reads the
+/// host's value, `--cache` volumes are scoped by `source_dir`'s name and
+/// relative paths by `workdir`, and `--export`'s host path is made absolute
+/// from the current directory.
+fn resolve_container_options(
+    source_dir: &std::path::Path,
+    workdir: &str,
+    flags: ContainerFlags,
+) -> anyhow::Result<paws_core::ContainerOptions> {
+    let env = flags
+        .env
+        .iter()
+        .map(|entry| paws_run::parse_env(entry, |name| std::env::var(name).ok()))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    let scope = paws_run::cache_scope(source_dir)?;
+    let caches = flags
+        .cache
+        .iter()
+        .map(|entry| paws_run::parse_cache(entry, &scope, workdir))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let host_base = std::env::current_dir().context("failed to read the current directory")?;
+    let export = flags
+        .export
+        .as_deref()
+        .map(|entry| paws_run::parse_export(entry, workdir, &host_base))
+        .transpose()?;
+    let options = paws_core::ContainerOptions {
+        apt_packages: flags.apt,
+        setup: flags.setup,
+        env,
+        caches,
+        excludes: flags.exclude,
+        export,
+    };
+    options.validate()?;
+    Ok(options)
+}
+
+/// Rejects a toolchain-specific flag given for another toolchain before
+/// anything is provisioned, so the mistake costs a message, not a build.
+fn check_ci_flag_scopes(
+    toolchain: Option<Toolchain>,
+    targets: &[String],
+    coverage: bool,
+    publish_artifacts: bool,
+    cargo: &paws_rust::CargoOptions,
+    container_flags: &ContainerFlags,
+) -> anyhow::Result<()> {
+    if !targets.is_empty() && toolchain != Some(Toolchain::Go) {
+        anyhow::bail!("--targets is only valid with --toolchain go");
+    }
+    if coverage && toolchain != Some(Toolchain::Rust) {
+        anyhow::bail!("--coverage is only valid with --toolchain rust");
+    }
+    if publish_artifacts && toolchain != Some(Toolchain::Esp32) {
+        anyhow::bail!("--publish-artifacts is only valid with --toolchain esp32");
+    }
+    if *cargo != paws_rust::CargoOptions::default() && toolchain != Some(Toolchain::Rust) {
+        anyhow::bail!(
+            "--workspace, --cargo-exclude and --cargo-arg are only valid with --toolchain rust"
+        );
+    }
+    if !container_flags.is_empty()
+        && !matches!(
+            toolchain,
+            Some(Toolchain::Rust | Toolchain::Tauri | Toolchain::TauriAndroid)
+        )
+    {
+        anyhow::bail!(
+            "--apt, --setup, --env, --cache, --exclude and --export are only valid with --toolchain rust, tauri or tauri-android"
+        );
+    }
+    Ok(())
+}
+
 async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
     let CiArgs {
         source,
@@ -232,17 +444,38 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
         targets,
         coverage,
         publish_artifacts,
+        workspace,
+        cargo_exclude,
+        cargo_arg,
+        apt,
+        setup,
+        env,
+        cache,
+        exclude,
+        export,
     } = args;
 
-    if !targets.is_empty() && toolchain != Some(Toolchain::Go) {
-        anyhow::bail!("--targets is only valid with --toolchain go");
-    }
-    if coverage && toolchain != Some(Toolchain::Rust) {
-        anyhow::bail!("--coverage is only valid with --toolchain rust");
-    }
-    if publish_artifacts && toolchain != Some(Toolchain::Esp32) {
-        anyhow::bail!("--publish-artifacts is only valid with --toolchain esp32");
-    }
+    let cargo = paws_rust::CargoOptions {
+        workspace,
+        exclude: cargo_exclude,
+        args: cargo_arg,
+    };
+    let container_flags = ContainerFlags {
+        apt,
+        setup,
+        env,
+        cache,
+        exclude,
+        export,
+    };
+    check_ci_flag_scopes(
+        toolchain,
+        &targets,
+        coverage,
+        publish_artifacts,
+        &cargo,
+        &container_flags,
+    )?;
 
     // Resolved once; every toolchain below builds from here rather than from
     // whatever directory the caller happened to be in.
@@ -277,7 +510,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
         )
     });
     if let (Some(toolchain), Some(version)) = (toolchain, &version) {
-        println!("ci: {toolchain} {}", version.describe());
+        println!("ci: {toolchain}, toolchain version {}", version.describe());
     }
     let image = match (toolchain, &version) {
         (Some(toolchain), Some(version)) => toolchain.image_for(&version.version),
@@ -287,12 +520,24 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
     paws_dagger::ensure_available().await?;
     match toolchain {
         Some(Toolchain::Node | Toolchain::Tauri) => {
-            ci_node_or_tauri(&source_dir, silent, toolchain).await?;
+            ci_node_or_tauri(&source_dir, silent, toolchain, container_flags).await?;
         }
-        Some(Toolchain::TauriAndroid) => ci_tauri_android(&source_dir, silent).await?,
+        Some(Toolchain::TauriAndroid) => {
+            ci_tauri_android(&source_dir, silent, container_flags).await?;
+        }
         Some(Toolchain::Python) => ci_python(&source_dir, silent, image.as_deref()).await?,
         Some(Toolchain::Ansible) => ci_ansible(&source_dir, silent, image.as_deref()).await?,
-        Some(Toolchain::Rust) => ci_rust(&source_dir, silent, coverage, image.as_deref()).await?,
+        Some(Toolchain::Rust) => {
+            ci_rust(
+                &source_dir,
+                silent,
+                coverage,
+                image.as_deref(),
+                &cargo,
+                container_flags,
+            )
+            .await?;
+        }
         Some(Toolchain::Go) => ci_go(&source_dir, silent, &targets, image.as_deref()).await?,
         Some(Toolchain::Java) => ci_java(&source_dir, silent).await?,
         Some(Toolchain::Kotlin) => ci_kotlin(&source_dir, silent).await?,
@@ -312,6 +557,7 @@ async fn ci_node_or_tauri(
     source_dir: &std::path::Path,
     silent: bool,
     toolchain: Option<Toolchain>,
+    container_flags: ContainerFlags,
 ) -> anyhow::Result<()> {
     let dir = source_dir.to_path_buf();
     let is_tauri = paws_tauri::is_tauri_project(&dir);
@@ -335,21 +581,16 @@ async fn ci_node_or_tauri(
     }
 
     if is_tauri {
-        println!(
-            "ci: tauri project using {} ({})",
-            project.package_manager.as_str(),
-            dir.display()
-        );
-        let builder_dir = paws_tauri::write_builder_dockerfile()
-            .context("failed to materialize the tauri-linux builder Dockerfile")?;
-        let args = paws_tauri::dagger_pipeline_args(
-            &project,
-            &dir.to_string_lossy(),
-            &builder_dir.to_string_lossy(),
-        );
+        let (layout, container) = tauri_layout_and_options(&dir, container_flags)?;
+        let args = paws_tauri::dagger_pipeline_args(&project, &layout, &container)?;
         run_dagger_core(&args, silent).await?;
         println!("ci: tauri build succeeded");
     } else {
+        if !container_flags.is_empty() {
+            anyhow::bail!(
+                "--apt, --setup, --env, --cache, --exclude and --export are only valid with --toolchain rust, tauri or tauri-android"
+            );
+        }
         println!(
             "ci: {} project using {} ({}){}",
             project.framework.as_str(),
@@ -369,7 +610,33 @@ async fn ci_node_or_tauri(
 }
 
 /// `paws ci` for Tauri Android builds.
-async fn ci_tauri_android(source_dir: &std::path::Path, silent: bool) -> anyhow::Result<()> {
+/// Where a Tauri app's build runs from (its Cargo workspace root when it has
+/// one, see [`paws_tauri::layout`]) and the resolved container options,
+/// announced on stdout so a monorepo build says which directory it sent.
+fn tauri_layout_and_options(
+    dir: &std::path::Path,
+    container_flags: ContainerFlags,
+) -> anyhow::Result<(paws_tauri::Layout, paws_core::ContainerOptions)> {
+    let layout = paws_tauri::layout(dir)?;
+    let workdir = layout.workdir();
+    let container = resolve_container_options(&layout.context_dir, &workdir, container_flags)?;
+    if layout.context_dir != dir {
+        println!(
+            "ci: tauri app is a member of the Cargo workspace at {}; sending that, building from {workdir}",
+            layout.context_dir.display()
+        );
+    }
+    if let Some(export) = &container.export {
+        println!("ci: exporting {} to {}", export.path, export.destination);
+    }
+    Ok((layout, container))
+}
+
+async fn ci_tauri_android(
+    source_dir: &std::path::Path,
+    silent: bool,
+    container_flags: ContainerFlags,
+) -> anyhow::Result<()> {
     let dir = source_dir.to_path_buf();
     if !paws_tauri::is_tauri_project(&dir) {
         anyhow::bail!(
@@ -384,13 +651,8 @@ async fn ci_tauri_android(source_dir: &std::path::Path, silent: bool) -> anyhow:
         project.package_manager.as_str(),
         dir.display()
     );
-    let builder_dir = paws_tauri::write_android_builder_dockerfile()
-        .context("failed to materialize the tauri-android builder Dockerfile")?;
-    let args = paws_tauri::android_dagger_pipeline_args(
-        &project,
-        &dir.to_string_lossy(),
-        &builder_dir.to_string_lossy(),
-    );
+    let (layout, container) = tauri_layout_and_options(&dir, container_flags)?;
+    let args = paws_tauri::android_dagger_pipeline_args(&project, &layout, &container)?;
     run_dagger_core(&args, silent).await?;
     println!("ci: tauri android build succeeded");
     Ok(())
@@ -448,6 +710,8 @@ async fn ci_rust(
     silent: bool,
     coverage: bool,
     image: Option<&str>,
+    cargo: &paws_rust::CargoOptions,
+    container_flags: ContainerFlags,
 ) -> anyhow::Result<()> {
     let dir = source_dir.to_path_buf();
     if !paws_rust::is_rust_project(&dir) {
@@ -471,22 +735,19 @@ async fn ci_rust(
         },
         dir.display()
     );
-    let builder_dir = if coverage && !is_wasm {
-        Some(
-            paws_rust::write_builder_dockerfile()
-                .context("failed to materialize the rust builder Dockerfile")?,
-        )
-    } else {
-        None
-    };
-    let builder_dir_str = builder_dir.as_ref().map(|d| d.to_string_lossy());
-    let args = paws_rust::dagger_pipeline_args_with_image(
+    let container =
+        resolve_container_options(&dir, paws_core::container::SOURCE_ROOT, container_flags)?;
+    if let Some(export) = &container.export {
+        println!("ci: exporting {} to {}", export.path, export.destination);
+    }
+    let args = paws_rust::dagger_pipeline_args(
         &dir.to_string_lossy(),
         is_wasm,
         coverage,
-        builder_dir_str.as_deref(),
         image.unwrap_or(paws_rust::BASE_IMAGE),
-    );
+        cargo,
+        &container,
+    )?;
     run_dagger_core(&args, silent).await?;
     println!("ci: rust build/test succeeded");
     Ok(())
@@ -2771,6 +3032,58 @@ mod tests {
         Cli::command().debug_assert();
     }
 
+    /// Every `CiArgs` field off, for the rejection tests below to override.
+    fn ci_args_defaults() -> CiArgs {
+        CiArgs {
+            source: None,
+            toolchain: None,
+            toolchain_version: None,
+            verbose: false,
+            silent: true,
+            targets: vec![],
+            coverage: false,
+            publish_artifacts: false,
+            workspace: false,
+            cargo_exclude: vec![],
+            cargo_arg: vec![],
+            apt: vec![],
+            setup: vec![],
+            env: vec![],
+            cache: vec![],
+            exclude: vec![],
+            export: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cargo_flags_are_rejected_outside_toolchain_rust() {
+        let args = CiArgs {
+            toolchain: Some(Toolchain::Node),
+            cargo_exclude: vec!["ui".into()],
+            ..ci_args_defaults()
+        };
+        let err = run_ci(args).await.unwrap_err();
+        assert!(
+            err.to_string().contains("only valid with --toolchain rust"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn container_flags_are_rejected_outside_rust_and_tauri() {
+        let args = CiArgs {
+            toolchain: Some(Toolchain::Go),
+            export: Some("dist=out".into()),
+            ..ci_args_defaults()
+        };
+        let err = run_ci(args).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only valid with --toolchain rust, tauri or tauri-android"),
+            "unexpected error message: {err}"
+        );
+    }
+
     // T009: `--coverage` outside `--toolchain rust` fails fast, before any
     // Dagger/Docker interaction — the gating check runs before
     // `paws_dagger::ensure_available()`, so this needs no real toolchain
@@ -2787,6 +3100,7 @@ mod tests {
             targets: vec![],
             coverage: true,
             publish_artifacts: false,
+            ..ci_args_defaults()
         };
         let err = run_ci(args).await.unwrap_err();
         assert!(
@@ -2807,6 +3121,7 @@ mod tests {
             targets: vec![],
             coverage: true,
             publish_artifacts: false,
+            ..ci_args_defaults()
         };
         let err = run_ci(args).await.unwrap_err();
         assert!(
@@ -2830,6 +3145,7 @@ mod tests {
             targets: vec![],
             coverage: false,
             publish_artifacts: true,
+            ..ci_args_defaults()
         };
         let err = run_ci(args).await.unwrap_err();
         assert!(
@@ -2850,6 +3166,7 @@ mod tests {
             targets: vec![],
             coverage: false,
             publish_artifacts: true,
+            ..ci_args_defaults()
         };
         let err = run_ci(args).await.unwrap_err();
         assert!(
@@ -3316,7 +3633,7 @@ mod tests {
         let root = project_scratch("deep");
         touch(&root, "a/b/c/d/package.json");
 
-        assert!(discover_projects(&root, "package.json", 3).is_empty());
+        assert_eq!(discover_projects(&root, "package.json", 3).len(), 0);
         assert_eq!(discover_projects(&root, "package.json", 4), vec!["a/b/c/d"]);
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3324,7 +3641,7 @@ mod tests {
     #[test]
     fn discovery_finds_nothing_in_an_empty_tree() {
         let root = project_scratch("bare");
-        assert!(discover_projects(&root, "package.json", 3).is_empty());
+        assert_eq!(discover_projects(&root, "package.json", 3).len(), 0);
         std::fs::remove_dir_all(&root).ok();
     }
 

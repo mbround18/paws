@@ -148,13 +148,17 @@ mod tests {
             .expect("paws-up action discovered");
 
         assert_eq!(paws_up.usage, "mbround18/paws/actions/paws-up@main");
-        assert!(!paws_up.description.is_empty());
+        assert_ne!(paws_up.description.len(), 0);
 
         let input_names: Vec<&str> = paws_up.inputs.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(
             input_names,
-            vec!["github-token", "install-dagger", "version"]
+            vec!["git-ref", "github-token", "install-dagger", "version"]
         );
+
+        let git_ref = paws_up.inputs.iter().find(|i| i.name == "git-ref").unwrap();
+        assert!(!git_ref.required);
+        assert_eq!(git_ref.default.as_deref(), Some(""));
 
         let version = paws_up.inputs.iter().find(|i| i.name == "version").unwrap();
         assert!(!version.required);

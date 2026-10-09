@@ -153,10 +153,20 @@ see `docs/ROADMAP.md`'s "Current coverage" for the running tally of what's been 
   ordering itself — Tauri's own CLI already sequences that via `tauri.conf.json`'s
   `beforeBuildCommand`. Builds against `builders/tauri-linux/Dockerfile` (Rust + Node + the
   GTK/WebKit libs Tauri's Linux backend needs), embedded into the binary via `include_str!` and
-  materialized to a temp dir at runtime (`write_builder_dockerfile`) — a plain repo-relative path
-  would resolve against the _target_ repo `paws ci` is running in, not `paws`'s own source tree,
-  since `paws` (unlike `paws-release`, which only ever builds itself) is meant to run from
-  anywhere. Desktop (`--toolchain tauri`) is Linux-only for now. Mobile (`--toolchain
+  written into the build context at runtime through `paws_core::ContainerOptions` — a plain
+  repo-relative path would resolve against the _target_ repo `paws ci` is running in, not
+  `paws`'s own source tree, since `paws` (unlike `paws-release`, which only ever builds itself)
+  is meant to run from anywhere. The context is the host directory filtered by `.gitignore`
+  (never a raw mount, so a checkout's `target/` and `node_modules/` stay home), and
+  `paws_tauri::layout` sends the parent Cargo workspace root when the app is a member of one
+  (`ui/` under a root `Cargo.toml`), running `tauri build` from the app's subdirectory. The
+  same `--apt`/`--setup`/`--env`/`--cache`/`--exclude`/`--export` flags `paws run` takes apply
+  here, and to `--toolchain rust`. The pipeline runs `lint` and `test` before `tauri build`, so
+  a cheap failure costs a minute instead of the release build. Note that cache volumes only
+  persist while the engine's disk stays above Dagger's 20% free-space GC floor;
+  `paws_dagger::engine_disk_pressure_warning` reports when it does not (measured on a Fathom
+  build: an 85%-full disk emptied the `target/` volume after every run, 641 crates rebuilt).
+  Desktop (`--toolchain tauri`) is Linux-only for now. Mobile (`--toolchain
 tauri-android`) builds against `builders/tauri-android/Dockerfile` (JDK 17 + Android SDK/NDK +
   Rust's Android cross targets), assuming the target repo already ran `tauri android init`
   (`src-tauri/gen/android` committed) — `paws` doesn't scaffold mobile projects itself. iOS has no
