@@ -1502,6 +1502,7 @@ dependencies = [
  "anyhow",
  "paws-core",
  "paws-node",
+ "toml",
 ]
 
 [[package]]

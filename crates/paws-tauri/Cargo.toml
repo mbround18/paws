@@ -15,6 +15,7 @@ workspace = true
 paws-core = { path = "../paws-core" }
 anyhow.workspace = true
 paws-node = { path = "../paws-node" }
+toml.workspace = true
 
 [dev-dependencies]
 paws-core = { path = "../paws-core", features = ["testing"] }

@@ -358,6 +358,64 @@ pub struct CiArgs {
     #[arg(long)]
     #[serde(default)]
     pub publish_artifacts: bool,
+    /// Build and test the whole Cargo workspace (`--workspace` on clippy,
+    /// build and test, `--all` on fmt) instead of the root package — only
+    /// valid with `--toolchain rust`.
+    #[arg(long)]
+    #[serde(default)]
+    pub workspace: bool,
+    /// Leave this workspace member out of every cargo step (`--exclude`),
+    /// repeatable; implies --workspace. For the crate that needs a desktop
+    /// toolchain the rest of the workspace doesn't — only valid with
+    /// `--toolchain rust`.
+    #[arg(long)]
+    #[serde(default)]
+    pub cargo_exclude: Vec<String>,
+    /// An extra flag for cargo clippy, build and test, repeatable
+    /// (`--cargo-arg --all-targets`) — only valid with `--toolchain rust`.
+    #[arg(long)]
+    #[serde(default)]
+    pub cargo_arg: Vec<String>,
+    /// Debian/Ubuntu packages installed into the build image first,
+    /// comma-separated or repeated — the system libraries a crate links
+    /// against. Only valid with `--toolchain rust` or `tauri`, whose builds
+    /// run from a filtered copy of the source like `paws run` does.
+    #[arg(long, value_delimiter = ',')]
+    #[serde(default)]
+    pub apt: Vec<String>,
+    /// A shell command baked into the build image after --apt, repeatable,
+    /// each its own `RUN` layer. Only valid with `--toolchain rust` or
+    /// `tauri`.
+    #[arg(long)]
+    #[serde(default)]
+    pub setup: Vec<String>,
+    /// Environment variable for every step, repeatable: `NAME=value`, or a
+    /// bare `NAME` to pass the host's value through (skipped when unset).
+    /// Only valid with `--toolchain rust` or `tauri`.
+    #[arg(long)]
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// Persistent cache volume, repeatable: `PATH` or `NAME=PATH`, a relative
+    /// PATH being relative to the directory the steps run in. Only valid with
+    /// `--toolchain rust` or `tauri`.
+    #[arg(long)]
+    #[serde(default)]
+    pub cache: Vec<String>,
+    /// Extra patterns to leave out of the source, comma-separated or
+    /// repeated, on top of `.gitignore` and `.git`. Only valid with
+    /// `--toolchain rust` or `tauri`.
+    #[arg(long, value_delimiter = ',')]
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// Copy a directory out of the container when the build succeeds:
+    /// `CONTAINER_PATH=HOST_PATH`, e.g. `--export
+    /// ../target/release/bundle=dist/bundles` for a Tauri app's deb/rpm/
+    /// `AppImage`. A relative container path is relative to the directory the
+    /// steps run in; a relative host path to the current one. Only valid
+    /// with `--toolchain rust` or `tauri`.
+    #[arg(long)]
+    #[serde(default)]
+    pub export: Option<String>,
 }
 
 /// `paws run`: see `paws_run` for why it exists.
@@ -432,6 +490,13 @@ pub struct RunArgs {
     #[arg(long)]
     #[serde(default)]
     pub step: Vec<String>,
+    /// Copy a directory out of the container after the last command:
+    /// `CONTAINER_PATH=HOST_PATH`. A relative container path is relative to
+    /// --workdir; a relative host path to the current directory. The
+    /// destination is created or replaced.
+    #[arg(long)]
+    #[serde(default)]
+    pub export: Option<String>,
     /// Suppress dagger's live progress; print output once the run finishes.
     #[arg(long)]
     #[serde(default)]
