@@ -22,16 +22,18 @@
 
 /// The provenance `--build-args` every `builders/*` image is built with.
 ///
-/// `dev`/`unknown` for version and revision, and the current Unix time for
-/// the created stamp — the same five-line block that was written out in
-/// `paws-java`, `paws-kotlin`, `paws-tauri`, `paws-flatpak` and `paws-esp32`
-/// independently, which meant a change to the label convention had to be
-/// made five times.
+/// paws's own version for `BUILDER_VERSION` and `unknown` for the revision
+/// (the Dockerfiles default `BUILDER_CREATED` to `unknown` too). Nothing
+/// here changes between two runs of the same paws binary on purpose: a
+/// build arg that did (the Unix time this used to pass) gave every run a
+/// new image digest, and `BuildKit` then re-ran every step after it, so a
+/// 20-minute build that had not changed re-ran in full. Replacing the
+/// five-line block each toolchain crate used to write out independently.
 pub fn builder_build_args() -> String {
-    let created_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
-    format!("BUILDER_VERSION=dev,BUILDER_REVISION=unknown,BUILDER_CREATED={created_unix}")
+    format!(
+        "BUILDER_VERSION={},BUILDER_REVISION=unknown",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 /// Where [`Pipeline::from_host_context`] writes its generated Dockerfile,
@@ -505,9 +507,13 @@ mod tests {
             .iter()
             .find(|a| a.starts_with("--build-args="))
             .expect("a builder image is built with provenance args");
-        assert!(build_args.contains("BUILDER_VERSION=dev"));
+        assert!(build_args.contains(&format!("BUILDER_VERSION={}", env!("CARGO_PKG_VERSION"))));
         assert!(build_args.contains("BUILDER_REVISION=unknown"));
-        assert!(build_args.contains("BUILDER_CREATED="));
+        assert!(
+            !build_args.contains("BUILDER_CREATED="),
+            "a per-run value would defeat BuildKit's layer cache: {build_args}"
+        );
+        assert_eq!(builder_build_args(), builder_build_args());
     }
 
     #[test]
