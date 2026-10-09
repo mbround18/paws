@@ -956,7 +956,11 @@ async fn save_github_actions_cache(client: &CacheTransport) -> Result<()> {
         "sh",
         "-c",
         // Install zstd and stream the tar through it to produce /backup.tar.zst.
-        "sh -c \"apk add --no-cache zstd >/dev/null && tar -C /data -cf - . | zstd -3 -o /backup.tar.zst\"",
+        // `-f`: the archive file is pre-created above, and zstd 1.5.7+ refuses
+        // to overwrite an existing output when its input is stdin ("already
+        // exists; stdin is an input - not proceeding"), which broke every
+        // save once alpine:3.20 shipped that version.
+        "sh -c \"apk add --no-cache zstd >/dev/null && tar -C /data -cf - . | zstd -3 -f -o /backup.tar.zst\"",
     ])
     .await;
     // Restart the engine regardless of whether the tar succeeded — leaving
