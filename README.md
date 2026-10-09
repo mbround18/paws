@@ -105,6 +105,17 @@ cargo install --path crates/paws-cli
 
 </details>
 
+### Cache volumes and a full disk
+
+`--cache` volumes (and the cargo registry / `target/` volumes `paws ci` mounts) live in the
+Dagger engine, and the engine's default garbage collector keeps 20% of its disk free. Below
+that it prunes everything it can after every run, cache volumes included, so a warm `target/`
+never reaches the next build. `paws` measures the engine's disk before each run and prints a
+`cache: the Dagger engine's disk has N% free …` line when that is the case. Free disk, or lower
+`minFreeSpace` in the engine's gc settings (`~/.config/dagger/engine.json`, see
+[Dagger's engine configuration](https://docs.dagger.io/configuration/engine)) and restart the
+engine.
+
 ### Build cache on GitHub Actions
 
 A few additional knobs are available to control cache saves and artifacts:

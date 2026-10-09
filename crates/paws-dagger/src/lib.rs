@@ -1041,6 +1041,51 @@ async fn copy_archive_for_artifact(archive_path: &std::path::Path) -> Result<std
     Ok(dest)
 }
 
+/// Dagger's default garbage-collection policy keeps this share of the
+/// engine's disk free. Below it, the engine prunes everything it can after
+/// every session — cache volumes (`--cache`, the cargo registry, a
+/// `target/` directory) included — so a "warm" cache never survives to the
+/// next run. Confirmed for real against a v0.21.8 engine on an 85%-full
+/// disk: `dagql pruned result … Query.cacheVolume(key: "…-target")` right
+/// after each `paws ci`, and a 641-crate rebuild on the next one.
+pub const ENGINE_GC_MIN_FREE_PERCENT: u64 = 20;
+
+/// One line of warning when the engine's disk is below
+/// [`ENGINE_GC_MIN_FREE_PERCENT`] free, `None` when it is fine or cannot be
+/// measured (no docker, no engine container yet, a remote runner). Never
+/// fails a run: a slow build is the symptom, not a reason to stop.
+pub async fn engine_disk_pressure_warning() -> Option<String> {
+    let container = find_engine_container().await.ok().flatten()?;
+    let df = docker_output(&["exec", &container, "df", "-Pk", ENGINE_STATE_PATH])
+        .await
+        .ok()?;
+    disk_pressure_warning_from_df(&df)
+}
+
+/// The warning for a `df -Pk <path>` output, or `None` when free space is
+/// at or above the GC floor.
+pub fn disk_pressure_warning_from_df(df: &str) -> Option<String> {
+    let fields: Vec<&str> = df.lines().nth(1)?.split_whitespace().collect();
+    let total_kb: u64 = fields.get(1)?.parse().ok()?;
+    let free_kb: u64 = fields.get(3)?.parse().ok()?;
+    if total_kb == 0 {
+        return None;
+    }
+    let free_percent = free_kb * 100 / total_kb;
+    if free_percent >= ENGINE_GC_MIN_FREE_PERCENT {
+        return None;
+    }
+    Some(format!(
+        "cache: the Dagger engine's disk has {free_percent}% free ({} of {}); Dagger's default GC keeps {ENGINE_GC_MIN_FREE_PERCENT}% free and prunes cache volumes after every run, so --cache volumes will not persist between runs. Free disk, or lower the engine's gc minFreeSpace (~/.config/dagger/engine.json, see https://docs.dagger.io/configuration/engine) and restart the engine",
+        gib(free_kb),
+        gib(total_kb)
+    ))
+}
+
+fn gib(kb: u64) -> String {
+    format!("{} GiB", kb / (1024 * 1024))
+}
+
 /// Detects the active `CacheBackend` and, if it's `GitHubActionsCache`,
 /// restores the engine's persistent state from the cache before any real
 /// build work happens. Call this **once**, at the start of a `paws
@@ -1062,6 +1107,9 @@ async fn copy_archive_for_artifact(archive_path: &std::path::Path) -> Result<std
 pub async fn restore_cache_backend() -> CacheBackend {
     let backend = CacheBackend::detect();
     eprintln!("{}", backend.log_line());
+    if let Some(warning) = engine_disk_pressure_warning().await {
+        eprintln!("{warning}");
+    }
     if let CacheBackend::GitHubActionsCache {
         base_url,
         token,
@@ -2180,6 +2228,22 @@ Error: exit code: 3 [traceparent:995ce601c5ede91580cb3f1d1060ef16-13a2553b6e3f2d
         let picked = failed_step_output(&many).unwrap();
         assert!(picked.starts_with("… 100 earlier line(s) omitted\nline 100\n"));
         assert!(picked.ends_with("line 299"));
+    }
+
+    #[test]
+    fn disk_pressure_warning_fires_only_below_the_gc_floor() {
+        let full = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/mapper/data-root 3835242120 3068454864 571892820 85% /\n";
+        let warning = disk_pressure_warning_from_df(full).unwrap();
+        assert!(
+            warning
+                .starts_with("cache: the Dagger engine's disk has 14% free (545 GiB of 3657 GiB)")
+        );
+        assert!(warning.contains("minFreeSpace"));
+
+        let roomy = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 1000000 500000 500000 50% /\n";
+        assert_eq!(disk_pressure_warning_from_df(roomy), None);
+        assert_eq!(disk_pressure_warning_from_df("garbage"), None);
+        assert_eq!(disk_pressure_warning_from_df(""), None);
     }
 
     #[test]
