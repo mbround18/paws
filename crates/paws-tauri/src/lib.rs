@@ -150,10 +150,12 @@ fn pipeline_args(
     let mut tauri_build = pm.run_script_args("tauri");
     tauri_build.extend(tauri_subcommand.iter().map(ToString::to_string));
 
+    // Cheap checks first: a failing unit test or lint should cost a minute,
+    // not the 20-minute Rust release build it used to follow.
     let pipeline = pipeline
-        .exec(tauri_build)
+        .exec_if(project.has_lint_script, pm.run_script_args("lint"))
         .exec_if(project.has_test_script, pm.run_script_args("test"))
-        .exec_if(project.has_lint_script, pm.run_script_args("lint"));
+        .exec(tauri_build);
     Ok(container.finish(pipeline))
 }
 
@@ -166,7 +168,7 @@ fn pipeline_args(
 /// `<package manager> run tauri build` for `project` from the app's own
 /// directory — which itself runs the frontend build (via `tauri.conf.json`'s
 /// `beforeBuildCommand`) before compiling the Rust shell, so this crate
-/// never has to sequence that itself. Runs `test`/`lint` afterward only if
+/// never has to sequence that itself. Runs `lint`/`test` first, only if
 /// the project actually defines them — unlike `paws-node`'s plain pipeline,
 /// `build`+`test` aren't required here (a fresh Tauri scaffold has neither;
 /// `tauri build` is the meaningful step). With `container.export`, the chain
@@ -373,6 +375,12 @@ mod tests {
         let position = |needle: &str| args.iter().position(|a| a == needle).unwrap();
         assert!(position("--path=/src/ui") < position("--args=npm,ci"));
         assert!(position("--args=npm,run,tauri,build") < position("export"));
+        if let Some(lint) = args.iter().position(|a| a == "--args=npm,run,lint") {
+            assert!(
+                lint < position("--args=npm,run,tauri,build"),
+                "lint runs before the slow build"
+            );
+        }
         assert_eq!(args.last().unwrap(), "--path=/host/repo/dist");
     }
 
