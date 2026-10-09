@@ -494,7 +494,7 @@ mod tests {
     fn default_owners_come_from_the_last_catch_all_rule() {
         let rules = parse_codeowners("* @alice\n/docs/ @bob\n** @carol\n");
         assert_eq!(default_owners(&rules), strings(&["@carol"]));
-        assert!(default_owners(&parse_codeowners("/docs/ @bob\n")).is_empty());
+        assert_eq!(default_owners(&parse_codeowners("/docs/ @bob\n")).len(), 0);
     }
 
     #[test]

@@ -510,7 +510,7 @@ mod tests {
         let labels = fetch_pr_labels_for_commit("owner", "repo", "", "token")
             .await
             .unwrap();
-        assert!(labels.is_empty());
+        assert_eq!(labels.len(), 0);
     }
 
     #[tokio::test]

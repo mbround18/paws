@@ -119,6 +119,6 @@ mod tests {
     #[test]
     fn an_unreadable_directory_yields_nothing_rather_than_failing() {
         let missing = std::env::temp_dir().join("paws-fsutil-does-not-exist");
-        assert!(find_files_with_extension(&missing, &["go"]).is_empty());
+        assert_eq!(find_files_with_extension(&missing, &["go"]).len(), 0);
     }
 }

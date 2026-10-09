@@ -2052,7 +2052,7 @@ mod tests {
     #[test]
     fn native_registries_is_empty_for_only_known_registries() {
         let registries = vec!["docker.io".to_string(), "ghcr.io".to_string()];
-        assert!(native_registries(&registries).is_empty());
+        assert_eq!(native_registries(&registries).len(), 0);
     }
 
     #[test]
@@ -2264,7 +2264,7 @@ mod tests {
         assert!(ghcr.credentials_required);
 
         // ...and Docker Hub must not claim the tag.
-        assert!(target(&targets, "docker.io").tags.is_empty());
+        assert_eq!(target(&targets, "docker.io").tags.len(), 0);
     }
 
     #[test]

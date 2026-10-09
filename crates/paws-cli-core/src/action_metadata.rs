@@ -148,7 +148,7 @@ mod tests {
             .expect("paws-up action discovered");
 
         assert_eq!(paws_up.usage, "mbround18/paws/actions/paws-up@main");
-        assert!(!paws_up.description.is_empty());
+        assert_ne!(paws_up.description.len(), 0);
 
         let input_names: Vec<&str> = paws_up.inputs.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(

@@ -725,16 +725,15 @@ impl CacheTransport {
                     return Ok(false);
                 };
                 c.download(&location, dest).await?;
-                Ok(true)
             }
             Self::V2(c) => {
                 let Some(url) = c.find_entry(&key.save, &[&key.prefix], &version).await? else {
                     return Ok(false);
                 };
                 c.download(&url, dest).await?;
-                Ok(true)
             }
         }
+        Ok(true)
     }
 
     /// Claims `key` before anything expensive happens. Archiving the engine
