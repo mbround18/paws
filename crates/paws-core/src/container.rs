@@ -103,11 +103,36 @@ impl ContainerOptions {
     /// last step's stdout.
     pub fn finish(&self, pipeline: Pipeline) -> Vec<String> {
         match &self.export {
+            Some(export) if self.in_cache(&export.path) => pipeline
+                .exec([
+                    "sh",
+                    "-c",
+                    &format!(
+                        "rm -rf {EXPORT_STAGING} && cp -a {} {EXPORT_STAGING}",
+                        export.path
+                    ),
+                ])
+                .export_directory(EXPORT_STAGING, &export.destination),
             Some(export) => pipeline.export_directory(&export.path, &export.destination),
             None => pipeline.stdout(),
         }
     }
+
+    /// Whether `path` lives under one of the cache volumes. Dagger cannot
+    /// read a directory out of a cache mount (`cannot retrieve path from
+    /// cache`), so an export from there — a Tauri bundle under a cached
+    /// `target/` is the common case — is copied to [`EXPORT_STAGING`] first.
+    fn in_cache(&self, path: &str) -> bool {
+        self.caches.iter().any(|cache| {
+            let root = cache.path.trim_end_matches('/');
+            path == root || path.starts_with(&format!("{root}/"))
+        })
+    }
 }
+
+/// Where an export from inside a cache volume is copied before Dagger reads
+/// it; see [`ContainerOptions::finish`].
+pub const EXPORT_STAGING: &str = "/.paws-export";
 
 /// What the container is built from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,12 +419,33 @@ mod tests {
             }),
             ..options
         };
+        let args = exporting.finish(pipeline.clone());
+        assert_eq!(
+            &args[args.len() - 6..],
+            &[
+                "with-exec",
+                "--args=sh,-c,rm -rf /.paws-export && cp -a /src/target/release/bundle /.paws-export",
+                "directory",
+                "--path=/.paws-export",
+                "export",
+                "--path=/host/out"
+            ][..],
+            "an export from inside a cache volume is staged first"
+        );
+
+        let exporting = ContainerOptions {
+            export: Some(Export {
+                path: "/src/dist".into(),
+                destination: "/host/out".into(),
+            }),
+            ..exporting
+        };
         let args = exporting.finish(pipeline);
         assert_eq!(
             &args[args.len() - 4..],
             &[
                 "directory",
-                "--path=/src/target/release/bundle",
+                "--path=/src/dist",
                 "export",
                 "--path=/host/out"
             ]

@@ -27,6 +27,11 @@ async fn run_dagger_core(args: &[String], silent: bool) -> anyhow::Result<()> {
     if silent {
         let output = paws_dagger::core(args).await?;
         print!("{output}");
+        // `export` answers with the destination path and no newline, so the
+        // "succeeded" line that follows would otherwise share its line.
+        if !output.is_empty() && !output.ends_with('\n') {
+            println!();
+        }
     } else {
         paws_dagger::core_streaming(args).await?;
     }
