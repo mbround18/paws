@@ -134,6 +134,18 @@ impl Pipeline {
     /// is written for the repo's own images and must not decide what a CI
     /// step sees, and the generated Dockerfile keeps itself out of the copy.
     pub fn from_host_context(context_dir: &str, excludes: &[String], dockerfile: &str) -> Self {
+        Self::from_host_context_with_build_args(context_dir, excludes, dockerfile, None)
+    }
+
+    /// [`Pipeline::from_host_context`] with `--build-args=<args>` on the
+    /// build, for a generated Dockerfile that embeds one of `builders/*` and
+    /// so expects the provenance args (see [`builder_build_args`]).
+    pub fn from_host_context_with_build_args(
+        context_dir: &str,
+        excludes: &[String],
+        dockerfile: &str,
+        build_args: Option<String>,
+    ) -> Self {
         let mut args = vec![
             "host".into(),
             "directory".into(),
@@ -153,6 +165,9 @@ impl Pipeline {
             "docker-build".into(),
             format!("--dockerfile={GENERATED_DOCKERFILE}"),
         ]);
+        if let Some(build_args) = build_args {
+            args.push(format!("--build-args={build_args}"));
+        }
         Self { args }
     }
 
