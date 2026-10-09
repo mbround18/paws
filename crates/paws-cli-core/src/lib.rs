@@ -510,7 +510,7 @@ async fn run_ci_pipeline(args: CiArgs) -> anyhow::Result<()> {
         )
     });
     if let (Some(toolchain), Some(version)) = (toolchain, &version) {
-        println!("ci: {toolchain} {}", version.describe());
+        println!("ci: {toolchain}, toolchain version {}", version.describe());
     }
     let image = match (toolchain, &version) {
         (Some(toolchain), Some(version)) => toolchain.image_for(&version.version),
