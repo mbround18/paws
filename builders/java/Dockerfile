@@ -25,7 +25,7 @@
 
 FROM eclipse-temurin:25-jdk-jammy AS jdk25
 
-FROM eclipse-temurin:21-jdk-jammy
+FROM eclipse-temurin:25-jdk-jammy
 
 COPY --from=jdk25 /opt/java/openjdk /usr/lib/jvm/temurin-25-jdk-amd64
 RUN ln -s /opt/java/openjdk /usr/lib/jvm/temurin-21-jdk-amd64
