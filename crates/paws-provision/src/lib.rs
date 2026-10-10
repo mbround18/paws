@@ -227,7 +227,7 @@ pub async fn install_python() -> Result<()> {
 /// `golang.org/dl` mechanism (see `install_go`) has no floating "latest"
 /// alias the way `rustup`'s "stable" or `corepack prepare pnpm@latest` do,
 /// so a real release has to be named. Overridable via `$PAWS_GO_VERSION`.
-pub const DEFAULT_GO_VERSION: &str = "1.23.4";
+pub const DEFAULT_GO_VERSION: &str = "1.27.1";
 
 /// Real, idempotent installer for a Go toolchain via `go install
 /// golang.org/dl/goX.Y.Z@latest` followed by that version's own `download`
