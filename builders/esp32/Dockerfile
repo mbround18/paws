@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
 #
 # Builder for `paws ci --toolchain esp32`: Rust + the ESP-IDF/`embuild` Rust
 # toolchain (Xtensa-patched `rustc` + the `riscv32im*-esp-espidf` targets),

@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
 #
 # Builder for `paws ci --toolchain java`/`kotlin`: JDK 21 + JDK 25 side by
 # side under /usr/lib/jvm/ -- the location Gradle's own toolchain

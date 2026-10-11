@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
 #
 # Builder for x86_64-apple-darwin and aarch64-apple-darwin, via osxcross
 # (https://github.com/tpoechtrager/osxcross). SDK acquisition and Cargo

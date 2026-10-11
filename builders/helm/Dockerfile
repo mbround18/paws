@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
 #
 # Builder for `paws helm` (lint/package Helm charts). No maintained
 # "official" Helm runtime image exists to just pull (unlike `rust:1-bookworm`

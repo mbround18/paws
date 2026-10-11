@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
 #
 # Builder for Tauri apps on Linux (deb/rpm/AppImage bundling). Rust +
 # Node (via NodeSource — the official Node image doesn't ship `cargo`, so

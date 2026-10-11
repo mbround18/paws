@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
 #
 # Builder for `paws ci --toolchain rust --coverage`: the same `rust:1-bookworm` base every plain
 # `paws ci --toolchain rust` run already pulls directly, plus `cargo-llvm-cov` and the
