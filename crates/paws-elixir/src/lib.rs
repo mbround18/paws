@@ -42,7 +42,7 @@ use anyhow::Result;
 /// Renovate target on each OTP major, in the same
 /// `automerge: false` spirit as the Temurin pin (see `docs/ROADMAP.md`'s
 /// "Base image version policy").
-pub const BASE_IMAGE: &str = "elixir:otp-28";
+pub const BASE_IMAGE: &str = "elixir:otp-29";
 
 /// A Mix project has a `mix.exs` at its root — the file every `mix`
 /// subcommand used here requires to resolve the project.
