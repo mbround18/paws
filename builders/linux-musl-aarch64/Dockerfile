@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
 #
 # Builder for aarch64-unknown-linux-musl. Based on messense/rust-musl-cross —
 # see linux-musl-x86_64/Dockerfile's comment; this is the aarch64 counterpart
