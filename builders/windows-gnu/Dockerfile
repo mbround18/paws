@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
 #
 # Builder for x86_64-pc-windows-gnu, via mingw-w64. Built through Dagger, not
 # `docker build` directly — see builders/README.md.
