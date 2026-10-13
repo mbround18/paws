@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
 #
 # Builder for x86_64-unknown-linux-gnu (native) and aarch64-unknown-linux-gnu
 # (cross, via a Debian cross-gcc). Built through Dagger, not `docker build`
