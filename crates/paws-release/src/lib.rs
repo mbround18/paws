@@ -121,7 +121,7 @@ pub fn target_config(triple: &str) -> Option<TargetConfig> {
 /// see that crate's `TAURI_LINUX_DOCKERFILE` for why embedding beats a
 /// repo-relative path: `paws release` runs from inside whatever repo it's
 /// releasing, not from inside `paws`'s own source tree.
-const GENERIC_LINUX_GNU_DOCKERFILE: &str = include_str!("../../../builders/linux-gnu/Dockerfile");
+pub const GENERIC_LINUX_GNU_DOCKERFILE: &str = include_str!("../../../builders/linux-gnu/Dockerfile");
 
 /// Targets [`build_binary_local`] can build, i.e. ones the embedded
 /// [`GENERIC_LINUX_GNU_DOCKERFILE`] actually has a toolchain for. Deliberately
@@ -702,7 +702,7 @@ impl GitHubReleaseClient {
     /// `GET /releases/tags/{tag}` — the view `install.sh`, `actions/paws-up`
     /// and the Releases page all use — is missing that platform.
     ///
-    /// [`converge_on_one_release`](Self::converge_on_one_release) is what
+    /// `converge_on_one_release` is what
     /// prevents that; this is the check that the prevention worked, so the
     /// failure mode is a red job rather than a release that looks fine until
     /// someone on the missing platform tries to install it.

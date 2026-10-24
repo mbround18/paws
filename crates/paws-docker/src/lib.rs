@@ -321,7 +321,7 @@ fn sanitize_tag_component(value: &str) -> String {
 /// (FR-005); this is the restructuring named in spec.md's Affected
 /// Contracts and plan.md's Design Decision 1.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum TagKind {
+pub enum TagKind {
     /// Today's sole output: a "v"-prefixed version or a "sha-"-prefixed
     /// git sha, already resolved to its bare tag value (no target prefix
     /// yet — that's applied uniformly below).

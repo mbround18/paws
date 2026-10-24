@@ -33,8 +33,8 @@ pub fn write_builder_dockerfile() -> Result<PathBuf> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelmChart {
     /// Directory basename, e.g. "mongo" for "charts/mongo" — also the join
-    /// key [`HelmChart::local_dependencies`] entries are resolved against,
-    /// since a `file://../mongo` dependency reference names a directory,
+    /// key the `local_dependencies` entries are resolved against, since a
+    /// `file://../mongo` dependency reference names a directory,
     /// not necessarily the `name:` a chart's own `Chart.yaml` declares.
     pub name: String,
     /// Path relative to the project root, e.g. "charts/mongo", or "." for a
@@ -258,8 +258,7 @@ fn topological_order(charts: Vec<HelmChart>) -> Vec<HelmChart> {
         .collect()
 }
 
-/// Finds Helm chart(s) in `dir` and returns them in dependency-safe order —
-/// see [`topological_order`].
+/// Finds Helm chart(s) in `dir` and returns them in dependency-safe order.
 pub fn detect_project(dir: &Path) -> Result<HelmProject> {
     let mut rel_dirs = discover_chart_relative_dirs(dir);
     if rel_dirs.is_empty() && dir.join("Chart.yaml").is_file() {
@@ -412,7 +411,7 @@ pub struct PublishTarget<'a> {
     /// The real, currently-published `index.yaml` (fetched by the caller —
     /// see `crates/paws-cli`'s `Commands::Helm` handler), if one exists
     /// yet. Seeds the running index so already-published chart versions
-    /// keep their real download URLs — see [`publish_pipeline_prefix`].
+    /// keep their real download URLs — see the shared publish-prefix helper.
     pub existing_index_path: Option<&'a Path>,
     /// Where each chart's package subdirectory lives inside the container.
     pub container_packages_dir: &'a str,
@@ -420,10 +419,9 @@ pub struct PublishTarget<'a> {
     pub container_index_path: &'a str,
 }
 
-/// The shared prefix [`publish_packages_pipeline_args`]/
-/// [`publish_index_pipeline_args`] both build on: builds the Helm builder,
-/// then for every chart (dependency-order, same as
-/// [`lint_pipeline_args`]/[`package_pipeline_args`]) packages it into its
+/// The shared prefix both publish helpers build on: builds the Helm builder,
+/// then for every chart (dependency-order, same as the lint/package helpers)
+/// packages it into its
 /// *own* subdirectory under `container_packages_dir` — not the shared flat
 /// directory [`package_pipeline_args`] uses — because each chart's Helm
 /// repo index entry needs its own `--url` (its own GitHub Release download
@@ -553,7 +551,7 @@ fn publish_pipeline_prefix(
 }
 
 /// Builds the `dagger core <chain>` argument list that runs
-/// [`publish_pipeline_prefix`] and exports every chart's packaged
+/// The shared publish-prefix helper and exports every chart's packaged
 /// subdirectory (under `container_packages_dir`) to `host_packages_dir`.
 /// Paired with [`publish_index_pipeline_args`] — `dagger core` chains are
 /// strictly linear (each call consumes the previous one's result), so

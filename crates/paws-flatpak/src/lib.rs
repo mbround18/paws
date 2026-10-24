@@ -63,7 +63,7 @@ pub fn write_builder_dockerfile() -> Result<PathBuf> {
 /// order. `packaging/flatpak/` matches this crate's own real-world
 /// reference (oled-wallpaper); a bare `flatpak/` dir and the repo root are
 /// the next most common conventions.
-const MANIFEST_SEARCH_DIRS: &[&str] = &["packaging/flatpak", "flatpak", "."];
+pub const MANIFEST_SEARCH_DIRS: &[&str] = &["packaging/flatpak", "flatpak", "."];
 
 #[derive(Debug, Clone)]
 pub struct FlatpakProject {

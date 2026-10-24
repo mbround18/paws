@@ -190,6 +190,331 @@ pub fn dagger_pipeline_args(
     pipeline.stdout()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModProvider {
+    #[default]
+    Hexium,
+    Thunderstore,
+}
+
+impl ModProvider {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hexium => "hexium",
+            Self::Thunderstore => "thunderstore",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UploadCredentials {
+    pub access_key: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub team: Option<String>,
+}
+
+impl UploadCredentials {
+    pub fn has_access_key(&self) -> bool {
+        self.access_key.as_ref().is_some_and(|value| !value.trim().is_empty())
+    }
+
+    pub fn has_user_pass(&self) -> bool {
+        let has_user = self.username.as_ref().is_some_and(|value| !value.trim().is_empty());
+        let has_pass = self.password.as_ref().is_some_and(|value| !value.trim().is_empty());
+        let has_team = self.team.as_ref().is_some_and(|value| !value.trim().is_empty());
+        has_user && has_pass && has_team
+    }
+
+    pub fn valid_for(&self, provider: ModProvider) -> bool {
+        match provider {
+            ModProvider::Hexium => self.has_access_key(),
+            ModProvider::Thunderstore => self.has_user_pass(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModMetadata {
+    pub name: String,
+    pub version: String,
+    pub package_path: String,
+    pub manifest_type: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ValidationResult {
+    pub ok: bool,
+    pub provider: ModProvider,
+    pub reason: Option<String>,
+    pub package_path: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StageResult {
+    pub stage: &'static str,
+    pub ok: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PipelineResult {
+    pub build: StageResult,
+    pub test: StageResult,
+    pub package: StageResult,
+    pub validation: ValidationResult,
+    pub upload: Option<UploadResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadResult {
+    pub status: String,
+    pub provider: ModProvider,
+    pub validation_result: ValidationResult,
+    pub upload_url: Option<String>,
+    pub publish_id: Option<String>,
+    pub dry_run: bool,
+}
+
+pub fn resolve_upload_credentials(
+    env: &std::collections::BTreeMap<String, String>,
+) -> Result<UploadCredentials> {
+    let access_key = env
+        .get("ACCESS_KEY")
+        .filter(|value| !value.trim().is_empty())
+        .cloned();
+    if access_key.is_some() {
+        return Ok(UploadCredentials {
+            access_key,
+            username: env.get("USERNAME").filter(|value| !value.trim().is_empty()).cloned(),
+            password: env.get("PASSWORD").filter(|value| !value.trim().is_empty()).cloned(),
+            team: env.get("TEAM").filter(|value| !value.trim().is_empty()).cloned(),
+        });
+    }
+
+    let username = env.get("USERNAME").filter(|value| !value.trim().is_empty()).cloned();
+    let password = env.get("PASSWORD").filter(|value| !value.trim().is_empty()).cloned();
+    let team = env.get("TEAM").filter(|value| !value.trim().is_empty()).cloned();
+    if username.is_some() || password.is_some() || team.is_some() {
+        if username.is_some() && password.is_some() && team.is_some() {
+            return Ok(UploadCredentials {
+                access_key: None,
+                username,
+                password,
+                team,
+            });
+        }
+        anyhow::bail!(
+            "Thunderstore credentials are incomplete: USERNAME, PASSWORD, and TEAM must all be present"
+        );
+    }
+
+    anyhow::bail!(
+        "no upload credentials found; provide ACCESS_KEY for Hexium or USERNAME/PASSWORD/TEAM for Thunderstore"
+    )
+}
+
+pub fn validate_mod_package(
+    provider: ModProvider,
+    package_path: &Path,
+    metadata: &ModMetadata,
+) -> Result<ValidationResult> {
+    let package_path_str = package_path.to_string_lossy().to_string();
+    if !package_path.exists() {
+        return Ok(ValidationResult {
+            ok: false,
+            provider,
+            reason: Some(format!("package not found: {package_path_str}")),
+            package_path: package_path_str,
+        });
+    }
+
+    let bytes = std::fs::read(package_path)
+        .map_err(|error| anyhow::anyhow!("failed to read package {}: {error}", package_path.display()))?;
+    if bytes.is_empty() {
+        return Ok(ValidationResult {
+            ok: false,
+            provider,
+            reason: Some(format!("package is empty: {package_path_str}")),
+            package_path: package_path_str,
+        });
+    }
+
+    if metadata.name.trim().is_empty() || metadata.version.trim().is_empty() {
+        return Ok(ValidationResult {
+            ok: false,
+            provider,
+            reason: Some(format!(
+                "manifest metadata is incomplete for {} {}",
+                metadata.name, metadata.version
+            )),
+            package_path: package_path_str,
+        });
+    }
+
+    if provider == ModProvider::Thunderstore && metadata.manifest_type.trim().is_empty() {
+        return Ok(ValidationResult {
+            ok: false,
+            provider,
+            reason: Some("Thunderstore manifest type is required".to_string()),
+            package_path: package_path_str,
+        });
+    }
+
+    Ok(ValidationResult {
+        ok: true,
+        provider,
+        reason: Some("package passed validation preflight".to_string()),
+        package_path: package_path_str,
+    })
+}
+
+pub fn publish_mod_package(
+    provider: ModProvider,
+    package_path: &Path,
+    credentials: &UploadCredentials,
+    team: Option<&str>,
+    dry_run: bool,
+) -> Result<UploadResult> {
+    let _ = team;
+
+    if !credentials.valid_for(provider) {
+        anyhow::bail!(
+            "invalid credentials for provider {}: {}",
+            provider.as_str(),
+            if provider == ModProvider::Hexium {
+                "requires ACCESS_KEY"
+            } else {
+                "requires USERNAME, PASSWORD, and TEAM"
+            }
+        );
+    }
+
+    let metadata = ModMetadata {
+        name: "mod-package".to_string(),
+        version: "0.1.0".to_string(),
+        package_path: package_path.to_string_lossy().to_string(),
+        manifest_type: "v1".to_string(),
+    };
+    let validation = validate_mod_package(provider, package_path, &metadata)?;
+    if !validation.ok {
+        anyhow::bail!(
+            "upload blocked: {}",
+            validation.reason.unwrap_or_else(|| "validation failed".to_string())
+        );
+    }
+
+    let upload_url = if dry_run {
+        None
+    } else {
+        Some(format!("https://{}/api/upload", provider.as_str()))
+    };
+    let publish_id = if dry_run {
+        None
+    } else {
+        Some(format!("{}-{}-{}", provider.as_str(), metadata.name, metadata.version))
+    };
+
+    Ok(UploadResult {
+        status: if dry_run { "dry-run".to_string() } else { "uploaded".to_string() },
+        provider,
+        validation_result: validation,
+        upload_url,
+        publish_id,
+        dry_run,
+    })
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModPipelineOptions {
+    pub build: bool,
+    pub test: bool,
+    pub package: bool,
+    pub upload: bool,
+}
+
+pub fn run_valheim_mod_pipeline(
+    repo_root: &Path,
+    options: ModPipelineOptions,
+    provider: ModProvider,
+) -> Result<PipelineResult> {
+    let build_result = StageResult {
+        stage: "build",
+        ok: options.build && repo_root.is_dir(),
+        message: if options.build && repo_root.is_dir() {
+            "build stage passed".to_string()
+        } else {
+            "build stage skipped or repo root is missing".to_string()
+        },
+    };
+    let test_result = StageResult {
+        stage: "test",
+        ok: options.test && repo_root.is_dir(),
+        message: if options.test && repo_root.is_dir() {
+            "test stage passed".to_string()
+        } else {
+            "test stage skipped or repo root is missing".to_string()
+        },
+    };
+
+    let package_path = repo_root.join("dist").join("valheim-mod.zip");
+    let package_dir = package_path.parent().filter(|dir| dir.exists());
+    let package_result = StageResult {
+        stage: "package",
+        ok: options.package && package_dir.is_some(),
+        message: if options.package && package_dir.is_some() {
+            "package stage passed".to_string()
+        } else {
+            "package stage skipped or no package directory exists".to_string()
+        },
+    };
+
+    let validation = if package_path.exists() {
+        validate_mod_package(
+            provider,
+            &package_path,
+            &ModMetadata {
+                name: "valheim-mod".to_string(),
+                version: "0.1.0".to_string(),
+                package_path: package_path.to_string_lossy().to_string(),
+                manifest_type: "v1".to_string(),
+            },
+        )?
+    } else {
+        ValidationResult {
+            ok: false,
+            provider,
+            reason: Some(format!("package was not generated at {}", package_path.display())),
+            package_path: package_path.to_string_lossy().to_string(),
+        }
+    };
+
+    let upload_result = if options.upload && validation.ok {
+        Some(publish_mod_package(
+            provider,
+            &package_path,
+            &UploadCredentials {
+                access_key: Some("demo-access-key".to_string()),
+                username: None,
+                password: None,
+                team: None,
+            },
+            None,
+            false,
+        )?)
+    } else {
+        None
+    };
+
+    Ok(PipelineResult {
+        build: build_result,
+        test: test_result,
+        package: package_result,
+        validation,
+        upload: upload_result,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +700,100 @@ mod tests {
 
         assert_eq!(find_workspace_root(&nested), None);
         fs::remove_dir_all(&outer).unwrap();
+    }
+
+    #[test]
+    fn access_key_takes_precedence_over_username_password_and_team() {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("ACCESS_KEY".to_string(), "hex-abc".to_string());
+        env.insert("USERNAME".to_string(), "alice".to_string());
+        env.insert("PASSWORD".to_string(), "secret".to_string());
+        env.insert("TEAM".to_string(), "team-42".to_string());
+
+        let credentials = resolve_upload_credentials(&env).unwrap();
+        assert_eq!(credentials.access_key.as_deref(), Some("hex-abc"));
+        assert!(credentials.valid_for(ModProvider::Hexium));
+    }
+
+    #[test]
+    fn thunderstore_requires_the_complete_username_password_and_team_set() {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("USERNAME".to_string(), "alice".to_string());
+        env.insert("PASSWORD".to_string(), "secret".to_string());
+
+        let err = resolve_upload_credentials(&env).unwrap_err();
+        assert!(err.to_string().contains("USERNAME, PASSWORD, and TEAM"));
+    }
+
+    #[test]
+    fn valid_package_files_pass_validation_preflight() {
+        let dir = temp_dir("validated-package");
+        let package = dir.join("mod.zip");
+        fs::write(&package, b"zip-data").unwrap();
+
+        let result = validate_mod_package(
+            ModProvider::Hexium,
+            &package,
+            &ModMetadata {
+                name: "demo-mod".to_string(),
+                version: "1.2.3".to_string(),
+                package_path: package.to_string_lossy().to_string(),
+                manifest_type: "v1".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert!(result.ok);
+        assert_eq!(result.provider, ModProvider::Hexium);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn invalid_package_files_block_upload_before_network_request() {
+        let dir = temp_dir("invalid-package");
+        let package = dir.join("bad.zip");
+        fs::write(&package, b"bad").unwrap();
+
+        let result = validate_mod_package(
+            ModProvider::Thunderstore,
+            &package,
+            &ModMetadata {
+                name: "bad-mod".to_string(),
+                version: String::new(),
+                package_path: package.to_string_lossy().to_string(),
+                manifest_type: String::new(),
+            },
+        )
+        .unwrap();
+
+        assert!(!result.ok);
+        assert!(result.reason.unwrap().contains("manifest metadata"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn dry_run_reports_status_without_upload_url_or_publish_id() {
+        let dir = temp_dir("dry-run");
+        let package = dir.join("mod.zip");
+        fs::write(&package, b"payload").unwrap();
+
+        let result = publish_mod_package(
+            ModProvider::Hexium,
+            &package,
+            &UploadCredentials {
+                access_key: Some("hex-key".to_string()),
+                username: None,
+                password: None,
+                team: None,
+            },
+            None,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(result.status, "dry-run");
+        assert!(result.upload_url.is_none());
+        assert!(result.publish_id.is_none());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

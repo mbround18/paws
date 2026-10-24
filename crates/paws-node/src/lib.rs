@@ -113,7 +113,7 @@ impl PackageManager {
     /// Setup command to run once before `install_args`, if any. `corepack`
     /// (bundled with Node 16.9+) manages yarn/pnpm at pinned versions; bun
     /// isn't a corepack-managed package manager, so its own base image is
-    /// expected to already have it (see [`base_image`]).
+    /// expected to already have it (see [`Self::base_image`]).
     pub fn setup_args(&self) -> Option<Vec<&'static str>> {
         match self {
             Self::Yarn | Self::Pnpm => Some(vec!["corepack", "enable"]),

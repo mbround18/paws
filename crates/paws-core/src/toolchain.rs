@@ -74,7 +74,7 @@ pub struct ToolchainInfo {
     /// `paws.toml` or the default.
     pub version_files: &'static [VersionSource],
     /// The version used when nothing else names one, and the tag that goes
-    /// into [`ToolchainInfo::image`].
+    /// into the toolchain image template.
     pub default_version: &'static str,
     /// The container image, with `{version}` where the tag varies.
     ///

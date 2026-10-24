@@ -56,7 +56,7 @@ pub struct DaggerCall {
 }
 
 /// specs/005-close-remaining-cli: which remote build-cache mechanism (if
-/// any) [`core`]/[`core_streaming`] wrap their `dagger` invocation with, so
+/// any) the `core()`/`core_streaming` functions wrap their `dagger` invocation with, so
 /// layers survive across separate, ephemeral CI runs instead of rebuilding
 /// from zero every time.
 ///
@@ -1468,9 +1468,9 @@ fn dagger_error_line(plain_log: &str) -> Option<&str> {
 /// whole pipeline — a real, observed failure
 /// (mbround18/paws#5's CI run: `rust:1-bookworm` pull reset mid-transfer)
 /// that had nothing to do with the code under test. Retried the same way
-/// as [`remote_image_exists_with_retry`] ([`is_transient_registry_error`]
-/// gates it to actual network/registry signatures, so a real build/test/
-/// lint failure still fails on the first attempt instead of burning ~21s).
+/// as the retry helper for registry checks, gated to actual network/registry
+/// signatures, so a real build/test/lint failure still fails on the first
+/// attempt instead of burning ~21s).
 pub async fn core(args: &[String]) -> Result<String> {
     for attempt in 1..=RETRY_ATTEMPTS {
         match core_once(args).await {

@@ -597,7 +597,7 @@ pub struct DockerArgs {
     pub ghcr_username: Option<String>,
     /// Username(s) for registries in --registries other than
     /// docker.io/ghcr.io (Artifactory, a private registry, etc.), as
-    /// "<registry>=<username>" pairs, comma-separated — e.g.
+    /// "&lt;registry&gt;=&lt;username&gt;" pairs, comma-separated — e.g.
     /// "myco.jfrog.io=deploy-bot". These are built and published
     /// natively through Dagger (`Container.withRegistryAuth`), not via
     /// the docker.io/ghcr.io-only `dockerRelease` call. The matching
@@ -955,12 +955,12 @@ pub struct ReleaseArgs {
     #[arg(long, default_value = ".")]
     #[serde(default = "field_defaults::dot")]
     pub source: String,
-    /// Cargo package(s) to build, comma-separated (one [[bin]] each) —
+    /// Cargo package(s) to build, comma-separated (one \[\[bin\]\] each) —
     /// e.g. "agent,server". Paired 1:1 with --binary-name.
     #[arg(long, default_value = "paws-cli", value_delimiter = ',')]
     #[serde(default = "field_defaults::paws_cli_package")]
     pub package: Vec<String>,
-    /// Binary name(s) as declared in each package's [[bin]] section,
+    /// Binary name(s) as declared in each package's \[\[bin\]\] section,
     /// comma-separated, paired 1:1 with --package. All built binaries
     /// are packaged into one archive.
     #[arg(long, default_value = "paws", value_delimiter = ',')]
