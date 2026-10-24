@@ -1,4 +1,4 @@
-.PHONY: build release fixtures clean
+.PHONY: build release fixtures clean complexity quality clippy complexity-clippy llvm-lines deps-check
 
 PARALLEL ?= 4
 
@@ -20,6 +20,25 @@ build:
 
 release:
 	cargo build --workspace --release
+
+clippy:
+	cargo clippy --workspace --all-targets -- -D warnings
+
+complexity-clippy:
+	cargo clippy --workspace --all-targets -- -W clippy::cognitive_complexity -W clippy::too_many_lines
+
+llvm-lines:
+	@cargo install --locked cargo-llvm-lines >/dev/null 2>&1 || cargo install --locked cargo-llvm-lines --force >/dev/null 2>&1 || true
+	cargo llvm-lines --workspace --all-targets
+
+deps-check:
+	@if cargo deny --version >/dev/null 2>&1; then cargo deny check; else echo "cargo deny not installed; install with: cargo install cargo-deny --locked"; fi
+	@if cargo machete --version >/dev/null 2>&1; then cargo machete; else echo "cargo machete not installed; install with: cargo install cargo-machete --locked"; fi
+	@if cargo udeps --version >/dev/null 2>&1; then cargo udeps --workspace --all-targets; else echo "cargo udeps not installed; install with: cargo install cargo-udeps --locked"; fi
+
+quality: clippy complexity-clippy
+
+complexity: quality llvm-lines deps-check
 
 # Runs the full fixture gauntlet (scripts/run-fixtures.sh) for real, through
 # Dagger, against every example under examples/ -- depends on release so
