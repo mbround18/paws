@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
 #
 # Builder for Tauri apps on Android. JDK 17 + Android SDK (platform-tools,
 # a platform, build-tools, the NDK) + Rust's Android cross targets + Node
