@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
 #
 # Builder for Flatpak apps. Bakes flatpak + flatpak-builder + the Flathub
 # freedesktop runtime/SDK/rust-stable extension in at a pinned version (the
