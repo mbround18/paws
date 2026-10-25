@@ -434,7 +434,7 @@ jobs:
 
       - name: Upload paws artifacts
         if: steps.check-artifacts.outputs.exists == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: paws-engine-state
           path: paws-artifacts/**
@@ -514,7 +514,7 @@ jobs:
 
       - name: Upload paws artifacts
         if: steps.check-artifacts.outputs.exists == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: paws-engine-state
           path: paws-artifacts/**
