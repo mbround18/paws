@@ -1,4 +1,4 @@
-.PHONY: build release fixtures clean complexity quality clippy complexity-clippy llvm-lines deps-check
+.PHONY: build release fixtures clean complexity quality clippy complexity-clippy llvm-lines deps-check cargo-chef cargo-chef-plan cargo-chef-cook
 
 PARALLEL ?= 4
 
@@ -27,9 +27,20 @@ clippy:
 complexity-clippy:
 	cargo clippy --workspace --all-targets -- -W clippy::cognitive_complexity -W clippy::too_many_lines
 
+cargo-chef:
+	@cargo install --locked cargo-chef >/dev/null 2>&1 || cargo install --locked cargo-chef --force >/dev/null 2>&1 || true
+
+cargo-chef-plan: cargo-chef
+	@mkdir -p .cargo/chef
+	cargo chef prepare --recipe-path .cargo/chef/recipe.json
+
+cargo-chef-cook: cargo-chef
+	@mkdir -p .cargo/chef
+	cargo chef cook --release --recipe-path .cargo/chef/recipe.json
+
 llvm-lines:
 	@cargo install --locked cargo-llvm-lines >/dev/null 2>&1 || cargo install --locked cargo-llvm-lines --force >/dev/null 2>&1 || true
-	cargo llvm-lines --workspace --all-targets
+	cargo llvm-lines --all-targets
 
 deps-check:
 	@if cargo deny --version >/dev/null 2>&1; then cargo deny check; else echo "cargo deny not installed; install with: cargo install cargo-deny --locked"; fi

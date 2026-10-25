@@ -16,6 +16,28 @@ The last one enforces [ADR 0001](docs/adr/0001-route-container-execution-through
 excepted). See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for crate layout and architecture, and
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's planned versus already wired.
 
+## Rust CI acceleration and cache strategy
+
+For Rust-heavy builds, the repo already uses `Swatinem/rust-cache` in CI and keeps the cache keyed
+by the lockfile so dependency layers are reused across runs. That is the fastest low-risk win for
+workspace builds.
+
+For Dockerized Rust builds, prefer a `cargo-chef` pattern when you want to split dependency planning
+from the final compile step. The repo keeps a ready-made helper in the root `Makefile` for that
+workflow:
+
+```sh
+make cargo-chef
+make cargo-chef-plan
+make cargo-chef-cook
+```
+
+This is especially useful when building release images or containerized toolchains, because it keeps
+`Cargo.lock`/dependency resolution stable while letting the Docker layer cache separate the
+"dependency recipe" phase from the final compile. For this repo, the Dagger-first execution model
+remains the primary path, but the `cargo-chef` plan is useful for any Docker image that builds Rust
+code directly.
+
 ## Delegating implementation work to an AI agent/subagent
 
 This repo is developed heavily with Claude Code, including via forked subagents that implement

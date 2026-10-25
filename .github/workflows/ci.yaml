@@ -147,6 +147,13 @@ jobs:
 
       - name: Cache cargo registry/build
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: true
+          cache-targets: true
+          shared-key: paws-rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Fetch dependencies
+        run: cargo fetch --locked
 
       - name: Build workspace
         run: cargo build --workspace
@@ -201,6 +208,13 @@ jobs:
 
       - name: Cache cargo registry/build
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: true
+          cache-targets: true
+          shared-key: paws-rust-e2e-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Fetch dependencies
+        run: cargo fetch --locked
 
       - name: Build paws
         run: cargo build -p paws-cli
