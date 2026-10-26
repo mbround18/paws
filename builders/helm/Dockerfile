@@ -10,7 +10,7 @@
 # resolves to on a given day. Built through Dagger, not `docker build`
 # directly — see builders/README.md.
 
-FROM alpine:3.20
+FROM alpine:3.24
 
 ARG HELM_VERSION=v3.16.4
 
