@@ -117,7 +117,7 @@ serde_json = "1"
 # `paws.toml` (repo-wide toolchain/tool version pins) — the natural format
 # for a Rust project's config, and the only place this workspace needs TOML
 # parsing at run time.
-toml = "0.9"
+toml = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "fs", "io-util"] }
 semver = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
